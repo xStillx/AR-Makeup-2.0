@@ -1,5 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="black">#FF000000</color>
-    <color name="white">#FFFFFFFF</color>
+    <color name="ink_950">#FF100D10</color>
+    <color name="glass_900">#E61A161A</color>
+    <color name="glass_border">#33FFFFFF</color>
+    <color name="rose_300">#FFF29AB2</color>
+    <color name="rose_400">#FFEB7698</color>
+    <color name="text_primary_on_dark">#FFFDF7F9</color>
+    <color name="text_secondary_on_dark">#BFEEDFE3</color>
 </resources>

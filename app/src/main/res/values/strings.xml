@@ -1,3 +1,19 @@
 <resources>
     <string name="app_name">AR Makeup</string>
+    <string name="camera_permission_title">Нужен доступ к камере</string>
+    <string name="camera_permission_message">Изображение обрабатывается только на устройстве и никуда не отправляется.</string>
+    <string name="camera_permission_action">Разрешить камеру</string>
+    <string name="status_preparing">Подготавливаем трекинг</string>
+    <string name="status_waiting_for_face">Поместите лицо в кадр</string>
+    <string name="status_tracking">Лицо отслеживается</string>
+    <string name="status_camera_unavailable">Фронтальная камера недоступна</string>
+    <string name="status_camera_error">Не удалось запустить камеру</string>
+    <string name="status_tracker_error">Не удалось запустить трекинг</string>
+    <string name="metrics_initial">MediaPipe · запуск…</string>
+    <string name="metrics_format">%1$d точек · ML %2$.0f FPS · %3$d мс · %4$s · камера %5$s</string>
+    <string name="camera_fps_auto">авто</string>
+    <string name="delegate_gpu">GPU</string>
+    <string name="delegate_cpu">CPU fallback</string>
+    <string name="phase_label">ЭТАП 01 · FACE TRACKING</string>
+    <string name="phase_description">Диагностическая сетка проверяет точность и задержку. Следом — GPU-материал помады.</string>
 </resources>
