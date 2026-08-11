@@ -34,6 +34,7 @@ class FaceLandmarkerTracker(
     private var inFlightFrame: PreparedFrame? = null
     private var inFlightImage: MPImage? = null
     private var pendingFrame: PreparedFrame? = null
+    private var lastDeliveredLandmarks: LandmarkRenderFrame? = null
     private var closed = false
 
     fun initialize() {
@@ -184,8 +185,9 @@ class FaceLandmarkerTracker(
         releaseBitmap(frame.bitmap)
         submitLatestPendingFrame()
 
+        val resultTimestampMs = SystemClock.uptimeMillis()
         val measuredLandmarks = result.faceLandmarks().firstOrNull()
-        val renderLandmarks = if (measuredLandmarks != null) {
+        val trackedLandmarks = if (measuredLandmarks != null) {
             val coordinates = FloatArray(
                 measuredLandmarks.size * LandmarkRenderFrame.COORDINATE_COUNT,
             )
@@ -197,8 +199,12 @@ class FaceLandmarkerTracker(
             }
             landmarkPredictor.update(coordinates, frame.timestampMs)
         } else {
-            landmarkPredictor.predictWithoutMeasurement(SystemClock.uptimeMillis())
+            landmarkPredictor.predictWithoutMeasurement(resultTimestampMs)
         }
+        val renderLandmarks = trackedLandmarks
+            ?.deliveredAt(resultTimestampMs)
+            ?.smoothCorrectionFrom(lastDeliveredLandmarks, resultTimestampMs)
+        lastDeliveredLandmarks = renderLandmarks
 
         listener.onTrackingResult(
             TrackingResult(
@@ -207,7 +213,7 @@ class FaceLandmarkerTracker(
                 inputHeight = inputHeight,
                 rotationDegrees = frame.rotationDegrees,
                 mirrorHorizontal = true,
-                latencyMs = (SystemClock.uptimeMillis() - frame.timestampMs).coerceAtLeast(0L),
+                latencyMs = (resultTimestampMs - frame.timestampMs).coerceAtLeast(0L),
                 delegate = activeDelegate,
             ),
         )
@@ -280,6 +286,7 @@ class FaceLandmarkerTracker(
         bitmapPool.forEach(Bitmap::recycle)
         bitmapPool.clear()
         landmarkPredictor.reset()
+        lastDeliveredLandmarks = null
     }
 
     private data class PreparedFrame(

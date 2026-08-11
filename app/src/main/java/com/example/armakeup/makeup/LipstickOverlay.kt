@@ -19,19 +19,24 @@ import com.example.armakeup.tracking.LandmarkRenderFrame
 import com.example.armakeup.tracking.NormalizedImageTransform
 
 /**
- * Hardware-accelerated matte lipstick prototype.
+ * Hardware-accelerated, reference-calibrated matte lipstick prototype.
  *
- * COLOR blending replaces hue/saturation while retaining the camera luminance at every pixel,
- * so natural lip folds and shading remain visible. A subtle MULTIPLY pass compresses highlights
- * for a matte finish. The inner lip loop is a real hole and never colors the mouth or teeth.
+ * COLOR blending retains camera luminance so natural lip folds and shading remain visible. The
+ * upper and lower lip use separate pigment profiles, while a subtle MULTIPLY pass compresses only
+ * the strongest highlights. The mouth and teeth are excluded from both regions.
  */
 class LipstickOverlay @JvmOverloads constructor(
     context: Context,
     attrs: AttributeSet? = null,
 ) : View(context, attrs) {
 
-    private val colorPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = ContextCompat.getColor(context, R.color.lipstick_matte_red)
+    private val upperColorPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = ContextCompat.getColor(context, R.color.lipstick_matte_upper)
+        style = Paint.Style.FILL
+        configureColorBlend()
+    }
+    private val lowerColorPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = ContextCompat.getColor(context, R.color.lipstick_matte_lower)
         style = Paint.Style.FILL
         configureColorBlend()
     }
@@ -41,12 +46,12 @@ class LipstickOverlay @JvmOverloads constructor(
         configureMatteBlend()
     }
 
-    private val edgePath = Path()
-    private val midPath = Path()
-    private val corePath = Path()
+    private val materialPath = Path()
     private val outerPoints = FloatArray(LipLandmarkTopology.outerContour.size * POINT_SIZE)
     private val innerPoints = FloatArray(LipLandmarkTopology.innerContour.size * POINT_SIZE)
-    private val adjustedPoints = FloatArray(outerPoints.size)
+    private val insetOuterPoints = FloatArray(outerPoints.size)
+    private val insetInnerPoints = FloatArray(innerPoints.size)
+    private val regionPoints = FloatArray(REGION_POINT_COUNT * POINT_SIZE)
 
     private var landmarks: LandmarkRenderFrame? = null
     private var sourceWidth = 1
@@ -91,16 +96,18 @@ class LipstickOverlay @JvmOverloads constructor(
             sourceHeight = sourceHeight,
         )
         updateBaseContours(landmarks, predictionSeconds, fillTransform)
-        buildLipPath(edgePath, insetFraction = 0f)
-        buildLipPath(midPath, insetFraction = MID_INSET_FRACTION)
-        buildLipPath(corePath, insetFraction = CORE_INSET_FRACTION)
-
-        drawCoverage(canvas, edgePath, EDGE_COVERAGE)
-        drawCoverage(canvas, midPath, MID_COVERAGE)
-        drawCoverage(canvas, corePath, CORE_COVERAGE)
-
-        mattePaint.alpha = MATTE_COVERAGE
-        canvas.drawPath(corePath, mattePaint)
+        drawLipMaterial(
+            canvas = canvas,
+            upperLip = true,
+            colorPaint = upperColorPaint,
+            profile = ReferenceMatteLipstickProfile.upper,
+        )
+        drawLipMaterial(
+            canvas = canvas,
+            upperLip = false,
+            colorPaint = lowerColorPaint,
+            profile = ReferenceMatteLipstickProfile.lower,
+        )
 
         if (landmarks.shouldAnimate(renderTimestampMs)) postInvalidateOnAnimation()
     }
@@ -153,29 +160,103 @@ class LipstickOverlay @JvmOverloads constructor(
         )
     }
 
-    private fun buildLipPath(path: Path, insetFraction: Float) {
-        path.reset()
-        path.fillType = Path.FillType.EVEN_ODD
+    private fun drawLipMaterial(
+        canvas: Canvas,
+        upperLip: Boolean,
+        colorPaint: Paint,
+        profile: LipstickCoverageProfile,
+    ) {
+        buildLipRegionPath(
+            materialPath,
+            ReferenceMatteLipstickProfile.EDGE_INSET_FRACTION,
+            upperLip,
+        )
+        drawCoverage(canvas, materialPath, colorPaint, profile.edgeCoverage)
 
+        buildLipRegionPath(
+            materialPath,
+            ReferenceMatteLipstickProfile.MID_INSET_FRACTION,
+            upperLip,
+        )
+        drawCoverage(canvas, materialPath, colorPaint, profile.midCoverage)
+
+        buildLipRegionPath(
+            materialPath,
+            ReferenceMatteLipstickProfile.CORE_INSET_FRACTION,
+            upperLip,
+        )
+        drawCoverage(canvas, materialPath, colorPaint, profile.coreCoverage)
+
+        mattePaint.alpha = profile.matteCoverage
+        canvas.drawPath(materialPath, mattePaint)
+    }
+
+    private fun buildLipRegionPath(path: Path, insetFraction: Float, upperLip: Boolean) {
+        path.reset()
         interpolateContour(
             from = outerPoints,
             toward = innerPoints,
             fraction = insetFraction,
+            output = insetOuterPoints,
         )
-        addClosedSpline(path, adjustedPoints)
-
         interpolateContour(
             from = innerPoints,
             toward = outerPoints,
             fraction = insetFraction,
+            output = insetInnerPoints,
         )
-        addClosedSpline(path, adjustedPoints)
+
+        if (upperLip) {
+            buildUpperRegionPoints()
+        } else {
+            buildLowerRegionPoints()
+        }
+        addClosedSpline(path, regionPoints)
     }
 
-    private fun interpolateContour(from: FloatArray, toward: FloatArray, fraction: Float) {
+    private fun interpolateContour(
+        from: FloatArray,
+        toward: FloatArray,
+        fraction: Float,
+        output: FloatArray,
+    ) {
         for (index in from.indices) {
-            adjustedPoints[index] = from[index] + (toward[index] - from[index]) * fraction
+            output[index] = from[index] + (toward[index] - from[index]) * fraction
         }
+    }
+
+    private fun buildUpperRegionPoints() {
+        var outputPointIndex = 0
+        copyPoint(insetOuterPoints, 0, regionPoints, outputPointIndex++)
+        for (sourcePointIndex in LAST_CONTOUR_POINT_INDEX downTo LIP_CORNER_POINT_INDEX) {
+            copyPoint(insetOuterPoints, sourcePointIndex, regionPoints, outputPointIndex++)
+        }
+        for (sourcePointIndex in LIP_CORNER_POINT_INDEX..LAST_CONTOUR_POINT_INDEX) {
+            copyPoint(insetInnerPoints, sourcePointIndex, regionPoints, outputPointIndex++)
+        }
+        copyPoint(insetInnerPoints, 0, regionPoints, outputPointIndex)
+    }
+
+    private fun buildLowerRegionPoints() {
+        var outputPointIndex = 0
+        for (sourcePointIndex in 0..LIP_CORNER_POINT_INDEX) {
+            copyPoint(insetOuterPoints, sourcePointIndex, regionPoints, outputPointIndex++)
+        }
+        for (sourcePointIndex in LIP_CORNER_POINT_INDEX downTo 0) {
+            copyPoint(insetInnerPoints, sourcePointIndex, regionPoints, outputPointIndex++)
+        }
+    }
+
+    private fun copyPoint(
+        source: FloatArray,
+        sourcePointIndex: Int,
+        output: FloatArray,
+        outputPointIndex: Int,
+    ) {
+        val sourceIndex = sourcePointIndex * POINT_SIZE
+        val outputIndex = outputPointIndex * POINT_SIZE
+        output[outputIndex] = source[sourceIndex]
+        output[outputIndex + 1] = source[sourceIndex + 1]
     }
 
     private fun addClosedSpline(path: Path, points: FloatArray) {
@@ -203,9 +284,9 @@ class LipstickOverlay @JvmOverloads constructor(
         path.close()
     }
 
-    private fun drawCoverage(canvas: Canvas, path: Path, coverage: Int) {
-        colorPaint.alpha = coverage
-        canvas.drawPath(path, colorPaint)
+    private fun drawCoverage(canvas: Canvas, path: Path, paint: Paint, coverage: Int) {
+        paint.alpha = coverage
+        canvas.drawPath(path, paint)
     }
 
     private fun Paint.configureColorBlend() {
@@ -236,12 +317,9 @@ class LipstickOverlay @JvmOverloads constructor(
 
     companion object {
         private const val POINT_SIZE = 2
-        private const val MID_INSET_FRACTION = 0.055f
-        private const val CORE_INSET_FRACTION = 0.12f
-        private const val EDGE_COVERAGE = 42
-        private const val MID_COVERAGE = 62
-        private const val CORE_COVERAGE = 132
-        private const val MATTE_COVERAGE = 24
+        private const val LIP_CORNER_POINT_INDEX = 10
+        private const val LAST_CONTOUR_POINT_INDEX = 19
+        private const val REGION_POINT_COUNT = 22
         private const val SPLINE_CONTROL_FACTOR = 0.11f
         private val MAX_REQUIRED_LANDMARK_INDEX = maxOf(
             LipLandmarkTopology.outerContour.max(),

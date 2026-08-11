@@ -40,7 +40,7 @@ Android-приложение для виртуальной примерки ма
 - В realtime-профиле включены все 478 landmarks. Необязательные 52 blendshapes и facial transformation matrix временно отключены, поскольку текущие эффекты их не потребляют; это исключает лишнюю модель из каждого кадра. Включать их нужно по требованию конкретного эффекта/quality profile.
 - Добавлены runtime camera permission, проверка фронтальной камеры, FPS/latency telemetry и обработка ошибок.
 - Добавлены unit-тесты преобразований координат `FILL_CENTER`, camera rotation и front-camera mirror.
-- Команда `:app:testDebugUnitTest :app:assembleDebug :app:lintDebug` успешно выполнена: 25 unit-тестов пройдены, Android lint сообщает `No issues found`.
+- Команда `:app:testDebugUnitTest :app:assembleDebug :app:lintDebug` успешно выполнена: 35 unit-тестов пройдено, Android lint сообщает `No issues found`.
 - Debug APK формируется в `app/build/outputs/apk/debug/app-debug.apk` и проверяется на подключённом Samsung SM-G990B.
 
 Официальный model bundle сохранён в `app/src/main/assets/face_landmarker.task`. Его SHA-256: `64184E229B263107BC2B804C6625DB1341FF2BB731874B0BCC2FE6544E0BC9FF`. BlazeFace, Face Mesh V2 и Blendshape V2 проверены по официальным model cards; все три компонента имеют лицензию Apache 2.0. Детали находятся в `app/src/main/assets/MODEL_LICENSES.md`.
@@ -73,18 +73,27 @@ Runtime-проверка после оптимизации на Samsung SM-G990B
 
 Визуальная приёмка пользователем 2026-08-11: трекинг в этой конфигурации оценён как отличный и считается зафиксированным baseline. Не менять параметры `LandmarkMotionPredictor`, быстрый translation-канал и sensor timestamp при исправлении последующего render jitter. Точка возврата сохраняется Git-тегом `tracking-stable-2026-08-11`.
 
+Исправление render jitter после baseline не меняет состояние или коэффициенты трекера. Раньше `LandmarkRenderFrame.shouldAnimate()` сравнивал render time непосредственно с capture timestamp. При реальной capture→result latency 85–128 ms 45-мс prediction horizon уже был исчерпан к моменту доставки результата, поэтому `LipstickOverlay` обновлялся ступенями с частотой ML около 30 FPS, несмотря на вызов `postInvalidateOnAnimation()`.
+
+Теперь capture-time alignment и render-time animation разделены: при доставке ML-результата `LandmarkRenderFrame` получает отдельный delivery timestamp, сохраняет исходную bounded prediction до 45 ms и открывает дополнительное render-only extrapolation window до 42 ms. Оверлей продолжает перестраивать контур на каждом `vsync` между соседними ML-результатами, а при задержке/потере нового результата экстраполяция автоматически останавливается. На SM-G990B после изменения поток после прогрева сохранил около 29–30 ML FPS; `gfxinfo`: 800 кадров, 2 janky frames (0,25%), p50=5 ms, p95=7 ms, p99=9 ms; GPU p50=2 ms, p95=4 ms, p99=5 ms. Визуальную плавность нужно подтвердить движениями на устройстве.
+
+После визуальной проверки обнаружена резкая фаза «догоняющей» коррекции в момент доставки следующего ML-результата. Она устранена render-only continuity correction: новый delivered frame вычисляет разницу с фактически показанной позицией предыдущего frame и плавно погашает её по smoothstep-кривой с нулевой скоростью на концах. Первоначальные 28 ms последовательно сокращены до 22 ms и затем до 16 ms по запросу пользователя. Текущие 16 ms соответствуют примерно одному кадру дисплея 60 Hz и минимизируют ощущение «резиновости». Tracking state, velocity и коэффициенты predictor не изменяются. Коррекция ограничена `0.12` normalized units на координату и полностью отключается при centroid jump больше `0.15`, чтобы не интерполировать между разными захватами лица. До изменения длительности на SM-G990B после прогрева сохранялось 29–30 ML FPS; `gfxinfo`: 799 кадров, 3 janky frames (0,38%), p50=5 ms, p95=6 ms, p99=8 ms; GPU p50=2 ms, p95=4 ms, p99=5 ms. Render bottleneck не появился; вариант 16 ms требует повторной визуальной проверки движениями.
+
 На SM-G990B portrait analysis-кадры приходят с `rotationDegrees = 270`. MediaPipe корректно использует этот угол для inference, но landmark-координаты требуют отдельного преобразования в display space. Для этого добавлен `NormalizedImageTransform`: сначала применяется clockwise camera rotation, затем horizontal mirror. Это исправляет диагностическую сетку, которая после первоначальной FPS-оптимизации отображалась повёрнутой на 90°.
 
-Первый вертикальный срез матовой красной помады:
+Текущий вертикальный срез матовой розово-кирпичной помады:
 
 - `LipstickOverlay` получает predicted landmarks на каждый `vsync`;
-- внешний и внутренний контуры состоят из двух согласованных 20-точечных MediaPipe loops; inner loop вырезается через `EVEN_ODD`, поэтому рот и зубы не окрашиваются;
-- замкнутые контуры сглаживаются cubic spline, а три вложенные маски дают ступенчатое feathering без blur и дополнительных bitmap;
-- на Android 10+ аппаратный `BlendMode.COLOR` переносит оттенок/насыщенность красной помады, сохраняя покадровую яркость и микротекстуру исходных губ; слабый `MULTIPLY` pass подавляет блики для matte-профиля;
+- внешний и внутренний контуры состоят из двух согласованных 20-точечных MediaPipe loops; из них строятся отдельные замкнутые области верхней и нижней губы, поэтому рот и зубы не окрашиваются;
+- контуры сглаживаются cubic spline, а три вложенные маски на каждой губе дают мягкое нарастание пигмента без blur и дополнительных bitmap;
+- после сравнения с пользовательским референсом неоновый `#C5163A` заменён тёплой розово-кирпичной парой `#B64B49`/`#C15C57`; верхняя губа намеренно темнее и плотнее нижней;
+- первая приглушённая калибровка `#A35653`/`#B56964` с покрытием 47,8%/40,6% оказалась практически невидимой на реальной камере и отклонена после пользовательской проверки;
+- после уточнения запроса более плотный вариант 71,1%/65,6% отклонён; прозрачность последовательно увеличена сначала до 63,1%/56,4%, затем до рабочего покрытия 56,9% на верхней и 50,7% на нижней губе; это остаётся выше практически невидимого уровня 47,8%/40,6%; внешний pass по-прежнему начинается с inset `0.015`, а matte compression остаётся на alpha 8/3, чтобы сохранить складки, тени и блик нижней губы;
+- на Android 10+ аппаратный `BlendMode.COLOR` переносит оттенок/насыщенность помады, сохраняя покадровую яркость исходных губ; слабый `MULTIPLY` pass подавляет только самые сильные блики для matte-профиля;
 - на API 24–28 используется texture-preserving multiply fallback;
 - `PreviewView` временно переведён в `compatible`/TextureView mode, чтобы HWUI мог смешивать материал с camera backdrop; диагностическая face mesh скрыта.
 
-Это визуальный прототип формы, tracking и параметров matte-материала, а не финальный production renderer. HWUI blending остаётся 2D/sRGB и не заменяет запланированный единый Filament-композитор в linear RGB с camera texture, face mesh normals, semantic lip mask и корректной окклюзией. Сборка с помадой и адаптивным фильтром успешно установлена и запущена на SM-G990B; автоматическая runtime-проверка ошибок и render performance пройдена, но субъективную стабильность контура при движении нужно оценивать глазами на устройстве.
+Это визуальный прототип формы, tracking и параметров matte-материала, а не финальный production renderer. Даже после референсной калибровки HWUI blending остаётся 2D/sRGB: он не моделирует BRDF, нормали, рассеяние света и надёжный linear-RGB camera sampling. Для уровня фотореализма целевого фото камера и макияж должны быть сведены в одном GPU-композиторе с semantic lip mask, face mesh normals и корректной окклюзией. Сборка с новым материалом установлена на SM-G990B; устройство во время автоматической проверки было заблокировано/в режиме сна, поэтому визуальная оценка и новый `gfxinfo` замер должны выполняться после ручного открытия приложения.
 
 Временный технический долг первого этапа: публичный Face Landmarker Android API принимает RGBA/`Bitmap`, поэтому analysis-ветка пока делает одну копию 640×480 в переиспользуемый буфер. Preview уже идёт прямо в camera surface. До production-эффектов нужно заменить диагностическую ветку на GPU/native integration или измеренно доказать, что копия укладывается в latency/thermal budget; сам макияж в любом случае должен рендериться единым Filament-композитором.
 
@@ -218,8 +227,8 @@ Preview и ImageAnalysis должны использовать общий `ViewP
 
 1. **Camera + diagnostics — реализовано:** фронтальная камера, единые transforms, FPS/latency overlay, базовый device capability probe.
 2. **Face mesh — реализована диагностическая версия:** Face Landmarker в live-stream режиме, синхронизация timestamp и mesh overlay. Стабильность ещё нужно проверить на реальных устройствах.
-3. **Вертикальный срез «помада» — прототип matte реализован:** landmark mask с отверстием рта, сохранение luminance/texture, cubic contours и prediction; остаются Filament/linear RGB, semantic lip refinement, satin/gloss и калибровка на разных губах/освещении.
-4. **Temporal quality — частично реализовано:** адаптивное low-pass сглаживание, отдельный быстрый канал общего translation, sensor-based frame timestamp, отфильтрованная локальная скорость, короткая bounded prediction и удержание при dropout; остаются device/video calibration коэффициентов, компенсация rotation/scale и стабилизация будущих semantic masks.
+3. **Вертикальный срез «помада» — референсно откалиброванный matte-прототип реализован:** раздельные области и покрытия верхней/нижней губы, мягкий край, исключение рта/зубов, сохранение luminance/texture, cubic contours и prediction; остаются единый GPU/linear-RGB compositor, semantic lip refinement, normals/BRDF, satin/gloss и калибровка на разных губах/освещении.
+4. **Temporal quality — частично реализовано:** зафиксированный adaptive tracking baseline, отдельный быстрый канал общего translation, sensor-based frame timestamp, bounded capture alignment, 42-мс render-only extrapolation window, 16-мс smoothstep continuity correction между delivered frames и удержание при dropout; остаются визуальная device/video calibration, компенсация rotation/scale и стабилизация будущих semantic masks.
 5. **Face parsing:** подготовленная и лицензированная модель для skin/lips/eyes/eyelids; LiteRT GPU/NPU/CPU benchmark.
 6. **Остальные эффекты:** lip liner, blush, eyeshadow, eyeliner.
 7. **Калибровка:** разные тона кожи, освещение, front-camera mirroring, HDR/SDR и цветовые пространства устройств.
