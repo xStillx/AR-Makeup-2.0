@@ -228,11 +228,19 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
 
             val renderLandmarks = result.renderLandmarks
             if (renderLandmarks == null) {
+                binding.lipstickOverlay.clear()
                 binding.faceMeshOverlay.clear()
                 binding.statusTitle.setText(R.string.status_waiting_for_face)
                 return@runOnUiThread
             }
 
+            binding.lipstickOverlay.setResult(
+                landmarks = renderLandmarks,
+                sourceWidth = result.inputWidth,
+                sourceHeight = result.inputHeight,
+                rotationDegrees = result.rotationDegrees,
+                mirrorHorizontal = result.mirrorHorizontal,
+            )
             binding.faceMeshOverlay.setResult(
                 landmarks = renderLandmarks,
                 sourceWidth = result.inputWidth,
@@ -256,6 +264,7 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
     override fun onTrackerError(message: String) {
         runOnUiThread {
             if (!isDestroyed) {
+                binding.lipstickOverlay.clear()
                 binding.faceMeshOverlay.clear()
                 binding.statusTitle.setText(R.string.status_tracker_error)
                 binding.statusMetrics.text = message

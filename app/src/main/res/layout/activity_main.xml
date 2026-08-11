@@ -12,14 +12,21 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:importantForAccessibility="no"
-        app:implementationMode="performance"
+        app:implementationMode="compatible"
         app:scaleType="fillCenter" />
+
+    <com.example.armakeup.makeup.LipstickOverlay
+        android:id="@+id/lipstick_overlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:importantForAccessibility="no" />
 
     <com.example.armakeup.tracking.FaceMeshOverlay
         android:id="@+id/face_mesh_overlay"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:importantForAccessibility="no" />
+        android:importantForAccessibility="no"
+        android:visibility="gone" />
 
     <com.google.android.material.card.MaterialCardView
         android:id="@+id/status_card"

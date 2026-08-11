@@ -14,6 +14,6 @@
     <string name="camera_fps_auto">авто</string>
     <string name="delegate_gpu">GPU</string>
     <string name="delegate_cpu">CPU fallback</string>
-    <string name="phase_label">ЭТАП 01 · FACE TRACKING</string>
-    <string name="phase_description">Диагностическая сетка проверяет точность и задержку. Следом — GPU-материал помады.</string>
+    <string name="phase_label">ЭТАП 02 · MATTE LIPSTICK</string>
+    <string name="phase_description">Матовая красная помада сохраняет естественную яркость и текстуру губ. Рот и зубы исключены из маски.</string>
 </resources>

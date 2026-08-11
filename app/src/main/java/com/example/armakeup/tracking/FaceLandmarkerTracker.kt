@@ -28,12 +28,12 @@ class FaceLandmarkerTracker(
     private val applicationContext = context.applicationContext
     private val bitmapPool = ArrayDeque<Bitmap>(BITMAP_POOL_CAPACITY)
     private val landmarkPredictor = LandmarkMotionPredictor()
+    private val frameTimestampResolver = CameraFrameTimestampResolver()
     private var faceLandmarker: FaceLandmarker? = null
     private var activeDelegate = InferenceDelegate.GPU
     private var inFlightFrame: PreparedFrame? = null
     private var inFlightImage: MPImage? = null
     private var pendingFrame: PreparedFrame? = null
-    private var lastTimestampMs = 0L
     private var closed = false
 
     fun initialize() {
@@ -101,8 +101,11 @@ class FaceLandmarkerTracker(
         val sourceWidth = imageProxy.width
         val sourceHeight = imageProxy.height
         val rotationDegrees = imageProxy.imageInfo.rotationDegrees
-        val frameTimestampMs = maxOf(SystemClock.uptimeMillis(), lastTimestampMs + 1L)
-        lastTimestampMs = frameTimestampMs
+        val frameTimestampMs = frameTimestampResolver.resolve(
+            cameraTimestampNs = imageProxy.imageInfo.timestamp,
+            nowElapsedRealtimeNs = SystemClock.elapsedRealtimeNanos(),
+            nowUptimeMs = SystemClock.uptimeMillis(),
+        )
 
         val reusablePending = pendingFrame?.takeIf {
             inFlightFrame != null &&
