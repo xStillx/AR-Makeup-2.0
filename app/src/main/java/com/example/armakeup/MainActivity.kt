@@ -6,7 +6,9 @@ import android.content.pm.PackageManager
 import android.os.Bundle
 import android.util.Log
 import android.util.Range
+import android.util.Rational
 import android.util.Size
+import android.view.Surface
 import android.view.View
 import android.view.ViewGroup
 import androidx.activity.enableEdgeToEdge
@@ -16,6 +18,7 @@ import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
 import androidx.camera.core.SessionConfig
+import androidx.camera.core.ViewPort
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -61,6 +64,7 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
         binding.root.keepScreenOn = true
+        binding.makeupRenderer.setErrorListener(::showFatalRendererState)
 
         cameraExecutor = Executors.newSingleThreadExecutor { runnable ->
             Thread(runnable, "ar-makeup-camera-ml")
@@ -113,6 +117,10 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
     }
 
     private fun startPipeline() {
+        binding.makeupRenderer.initializationErrorMessage?.let {
+            showFatalRendererState(it)
+            return
+        }
         if (!trackerReady && !trackerInitializationStarted) {
             trackerInitializationStarted = true
             binding.statusTitle.setText(R.string.status_preparing)
@@ -128,7 +136,7 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
 
         if (!cameraStarted && !cameraBindingStarted) {
             cameraBindingStarted = true
-            binding.cameraPreview.post { bindCameraUseCases() }
+            binding.makeupRenderer.post { bindCameraUseCases() }
         }
     }
 
@@ -144,12 +152,20 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
                     return@addListener
                 }
 
-                val preview = Preview.Builder().build().also {
-                    it.surfaceProvider = binding.cameraPreview.surfaceProvider
-                }
+                val targetRotation = binding.makeupRenderer.display?.rotation ?: Surface.ROTATION_0
+                val preview = Preview.Builder()
+                    .setTargetRotation(targetRotation)
+                    .build()
+                    .also {
+                        it.setSurfaceProvider(
+                            ContextCompat.getMainExecutor(this),
+                            binding.makeupRenderer.surfaceProvider,
+                        )
+                    }
                 val analysis = ImageAnalysis.Builder()
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+                    .setTargetRotation(targetRotation)
                     .setResolutionSelector(
                         ResolutionSelector.Builder()
                             .setResolutionStrategy(
@@ -169,7 +185,7 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
 
                 provider.unbindAll()
                 val baseSessionBuilder = SessionConfig.Builder(preview, analysis)
-                binding.cameraPreview.viewPort?.let(baseSessionBuilder::setViewPort)
+                baseSessionBuilder.setViewPort(createCameraViewPort(targetRotation))
                 val baseSession = baseSessionBuilder.build()
                 val preferredFrameRate = selectPreferredFrameRate(
                     provider.getCameraInfo(CameraSelector.DEFAULT_FRONT_CAMERA)
@@ -178,7 +194,7 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
                 val session = if (preferredFrameRate != null) {
                     cameraFpsLabel = preferredFrameRate.toDisplayLabel()
                     SessionConfig.Builder(preview, analysis).apply {
-                        binding.cameraPreview.viewPort?.let(::setViewPort)
+                        setViewPort(createCameraViewPort(targetRotation))
                         setFrameRateRange(preferredFrameRate)
                     }.build()
                 } else {
@@ -197,6 +213,14 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
                 showFatalCameraState(R.string.status_camera_error, error.message)
             }
         }, ContextCompat.getMainExecutor(this))
+    }
+
+    private fun createCameraViewPort(targetRotation: Int): ViewPort {
+        val width = binding.makeupRenderer.width.coerceAtLeast(1)
+        val height = binding.makeupRenderer.height.coerceAtLeast(1)
+        return ViewPort.Builder(Rational(width, height), targetRotation)
+            .setScaleType(ViewPort.FILL_CENTER)
+            .build()
     }
 
     override fun onTrackerReady(delegate: FaceLandmarkerTracker.InferenceDelegate) {
@@ -228,13 +252,13 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
 
             val renderLandmarks = result.renderLandmarks
             if (renderLandmarks == null) {
-                binding.lipstickOverlay.clear()
+                binding.makeupRenderer.clear()
                 binding.faceMeshOverlay.clear()
                 binding.statusTitle.setText(R.string.status_waiting_for_face)
                 return@runOnUiThread
             }
 
-            binding.lipstickOverlay.setResult(
+            binding.makeupRenderer.setResult(
                 landmarks = renderLandmarks,
                 sourceWidth = result.inputWidth,
                 sourceHeight = result.inputHeight,
@@ -264,7 +288,7 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
     override fun onTrackerError(message: String) {
         runOnUiThread {
             if (!isDestroyed) {
-                binding.lipstickOverlay.clear()
+                binding.makeupRenderer.clear()
                 binding.faceMeshOverlay.clear()
                 binding.statusTitle.setText(R.string.status_tracker_error)
                 binding.statusMetrics.text = message
@@ -275,6 +299,7 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
     override fun onResume() {
         super.onResume()
         if (!::binding.isInitialized) return
+        binding.makeupRenderer.onResumeRenderer()
 
         if (hasCameraPermission()) {
             binding.permissionPanel.visibility = View.GONE
@@ -287,9 +312,26 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
         }
     }
 
+    override fun onPause() {
+        if (::binding.isInitialized) binding.makeupRenderer.onPauseRenderer()
+        super.onPause()
+    }
+
     private fun showFatalCameraState(titleRes: Int, details: String? = null) {
         binding.statusTitle.setText(titleRes)
         binding.statusMetrics.text = details.orEmpty()
+        binding.permissionPanel.visibility = View.GONE
+    }
+
+    private fun showFatalRendererState(details: String) {
+        if (!::binding.isInitialized || isDestroyed) return
+        cameraProvider?.unbindAll()
+        cameraStarted = false
+        cameraBindingStarted = false
+        binding.makeupRenderer.clear()
+        binding.faceMeshOverlay.clear()
+        binding.statusTitle.setText(R.string.status_renderer_error)
+        binding.statusMetrics.text = details
         binding.permissionPanel.visibility = View.GONE
     }
 
@@ -312,6 +354,7 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
             cameraExecutor.execute { faceTracker?.close() }
             cameraExecutor.shutdown()
         }
+        if (::binding.isInitialized) binding.makeupRenderer.destroyRenderer()
         super.onDestroy()
     }
 

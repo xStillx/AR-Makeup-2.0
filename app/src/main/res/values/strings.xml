@@ -9,11 +9,12 @@
     <string name="status_camera_unavailable">Фронтальная камера недоступна</string>
     <string name="status_camera_error">Не удалось запустить камеру</string>
     <string name="status_tracker_error">Не удалось запустить трекинг</string>
+    <string name="status_renderer_error">Не удалось запустить GPU-композитор</string>
     <string name="metrics_initial">MediaPipe · запуск…</string>
     <string name="metrics_format">%1$d точек · ML %2$.0f FPS · %3$d мс · %4$s · камера %5$s</string>
     <string name="camera_fps_auto">авто</string>
     <string name="delegate_gpu">GPU</string>
     <string name="delegate_cpu">CPU fallback</string>
-    <string name="phase_label">ЭТАП 02 · MATTE LIPSTICK</string>
-    <string name="phase_description">Матовая розово-кирпичная помада сохраняет естественные тени, блики и текстуру губ. Рот и зубы исключены из маски.</string>
+    <string name="phase_label">ЭТАП 03 · GPU COMPOSITOR</string>
+    <string name="phase_description">Камера и матовая помада сводятся в единой Filament-сцене с обработкой цвета в linear RGB.</string>
 </resources>

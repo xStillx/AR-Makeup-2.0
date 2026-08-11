@@ -25,7 +25,7 @@ Android-приложение для виртуальной примерки ма
 - UI: XML/View system и `AppCompatActivity`.
 - `minSdk = 24`, `targetSdk = 37`, `compileSdk = 37`.
 - Android Gradle Plugin 9.3.1.
-- Реализован диагностический camera/ML pipeline и первый визуальный прототип матовой помады; production Filament-композитор пока не добавлен.
+- Реализованы диагностический camera/ML pipeline, зафиксированный tracking baseline и первый production-срез единого Filament-композитора для матовой помады. Semantic face parsing и полноценная normals/BRDF-модель ещё не добавлены.
 
 Пока нет причин менять `minSdk = 24`: он совместим с выбранным ML-стеком и позволяет использовать современный GPU-пайплайн на Android 7+.
 
@@ -40,8 +40,13 @@ Android-приложение для виртуальной примерки ма
 - В realtime-профиле включены все 478 landmarks. Необязательные 52 blendshapes и facial transformation matrix временно отключены, поскольку текущие эффекты их не потребляют; это исключает лишнюю модель из каждого кадра. Включать их нужно по требованию конкретного эффекта/quality profile.
 - Добавлены runtime camera permission, проверка фронтальной камеры, FPS/latency telemetry и обработка ошибок.
 - Добавлены unit-тесты преобразований координат `FILL_CENTER`, camera rotation и front-camera mirror.
-- Команда `:app:testDebugUnitTest :app:assembleDebug :app:lintDebug` успешно выполнена: 35 unit-тестов пройдено, Android lint сообщает `No issues found`.
+- Команда `:app:testDebugUnitTest :app:assembleDebug :app:lintDebug` успешно выполнена после исправления ориентации Filament camera stream: 44 unit-теста пройдено, Android lint сообщает `No issues found`.
 - Debug APK формируется в `app/build/outputs/apk/debug/app-debug.apk` и проверяется на подключённом Samsung SM-G990B.
+- Добавлен Google Filament `1.74.0`: CameraX `Preview.SurfaceProvider` передаёт camera frames непосредственно в Filament `Stream`, поэтому активный preview и помада теперь сводятся в одной GPU scene вместо двух Android View-слоёв. На API 29+ используется синхронизируемый `ACQUIRED` stream через `ImageReader`/`HardwareBuffer` и release-callback Filament; на API 24–28 остаётся copy-free `NATIVE` stream через `SurfaceTexture` без гарантии camera/render synchronization.
+- CameraX `TransformationInfo` преобразуется в единую Filament UV→camera texture matrix с учётом crop rect, rotation и front-camera mirror; обратимость transform покрыта unit-тестами. CameraX/MediaPipe используют top-left image origin, а Filament UV и external texture — bottom-left origin, поэтому origin меняется на обеих границах матрицы. На API 29+ OpenGL `ACQUIRED` path дополнительно компенсирует наблюдавшуюся на SM-G990B инверсию обеих display-осей импортированного `HardwareBuffer`; API 24–28 `NATIVE SurfaceTexture` path эту компенсацию не применяет. Camera quad и динамическая lip mesh используют одинаковые Filament UV, поэтому поправка не изменяет координаты трекера и сохраняет совпадение выборки camera color внутри lipstick material с фоном.
+- Landmark-контуры губ преобразуются в динамическую GPU mesh: отдельные upper/lower triangle strips, cubic subdivision и восемь поперечных coverage rings. Покрытие равно нулю у кожи и у внутренней границы рта, поэтому полость рта и зубы не входят в геометрию материала.
+- Первый Filament lipstick material работает в linear RGB: camera preview переводится через `inverseTonemapSRGB`, оттенок пигмента смешивается с сохранением luminance исходных губ, а matte compression применяется только к ярким участкам. Это foundation для дальнейших normals, lighting и BRDF, а не завершённая физическая модель.
+- Первая визуальная проверка Filament-композитора на SM-G990B выявила перевёрнутый camera preview при правильно ориентированной lip mesh. Нормализация top-left/bottom-left origin сама по себе не изменила наблюдаемую вертикальную инверсию, потому что смена UV mesh погасила экранную коррекцию. Отдельная вертикальная acquired-stream компенсация выровняла ориентацию, после чего визуально проявилось оставшееся горизонтальное отражение camera stream относительно landmarks: при движении головы вправо маска смещалась влево относительно изображения. Текущая компенсация отражает обе display-оси только для `ACQUIRED HardwareBuffer` и покрыта regression-тестом; новый debug APK установлен и запущен на SM-G990B, итоговое совпадение ожидает визуального подтверждения. До продолжения shader/BRDF-работ также обязательны проверка crop и новый `gfxinfo`-замер.
 
 Официальный model bundle сохранён в `app/src/main/assets/face_landmarker.task`. Его SHA-256: `64184E229B263107BC2B804C6625DB1341FF2BB731874B0BCC2FE6544E0BC9FF`. BlazeFace, Face Mesh V2 и Blendshape V2 проверены по официальным model cards; все три компонента имеют лицензию Apache 2.0. Детали находятся в `app/src/main/assets/MODEL_LICENSES.md`.
 
@@ -81,7 +86,7 @@ Runtime-проверка после оптимизации на Samsung SM-G990B
 
 На SM-G990B portrait analysis-кадры приходят с `rotationDegrees = 270`. MediaPipe корректно использует этот угол для inference, но landmark-координаты требуют отдельного преобразования в display space. Для этого добавлен `NormalizedImageTransform`: сначала применяется clockwise camera rotation, затем horizontal mirror. Это исправляет диагностическую сетку, которая после первоначальной FPS-оптимизации отображалась повёрнутой на 90°.
 
-Текущий вертикальный срез матовой розово-кирпичной помады:
+Референсный HWUI-срез матовой розово-кирпичной помады, использованный для калибровки до перехода на Filament:
 
 - `LipstickOverlay` получает predicted landmarks на каждый `vsync`;
 - внешний и внутренний контуры состоят из двух согласованных 20-точечных MediaPipe loops; из них строятся отдельные замкнутые области верхней и нижней губы, поэтому рот и зубы не окрашиваются;
@@ -93,9 +98,16 @@ Runtime-проверка после оптимизации на Samsung SM-G990B
 - на API 24–28 используется texture-preserving multiply fallback;
 - `PreviewView` временно переведён в `compatible`/TextureView mode, чтобы HWUI мог смешивать материал с camera backdrop; диагностическая face mesh скрыта.
 
-Это визуальный прототип формы, tracking и параметров matte-материала, а не финальный production renderer. Даже после референсной калибровки HWUI blending остаётся 2D/sRGB: он не моделирует BRDF, нормали, рассеяние света и надёжный linear-RGB camera sampling. Для уровня фотореализма целевого фото камера и макияж должны быть сведены в одном GPU-композиторе с semantic lip mask, face mesh normals и корректной окклюзией. Сборка с новым материалом установлена на SM-G990B; устройство во время автоматической проверки было заблокировано/в режиме сна, поэтому визуальная оценка и новый `gfxinfo` замер должны выполняться после ручного открытия приложения.
+Этот HWUI-прототип больше не является активным render path и временно сохранён в исходниках как точка визуального сравнения. Активный layout использует `FilamentMakeupView`: camera texture и динамическая lip mesh рендерятся в одной сцене. Текущий Filament material уже устраняет отдельный Canvas/HWUI compositing path и работает с линейными значениями, но ещё не моделирует face normals, оценку освещения, semantic lip refinement и полноценные matte/satin/gloss BRDF. Новый путь требует визуальной и performance-проверки на SM-G990B.
 
-Временный технический долг первого этапа: публичный Face Landmarker Android API принимает RGBA/`Bitmap`, поэтому analysis-ветка пока делает одну копию 640×480 в переиспользуемый буфер. Preview уже идёт прямо в camera surface. До production-эффектов нужно заменить диагностическую ветку на GPU/native integration или измеренно доказать, что копия укладывается в latency/thermal budget; сам макияж в любом случае должен рендериться единым Filament-композитором.
+Временный технический долг первого этапа:
+
+- публичный Face Landmarker Android API принимает RGBA/`Bitmap`, поэтому analysis-ветка пока делает одну копию 640×480 в переиспользуемый буфер. Preview уже идёт прямо в camera surface. До production-эффектов нужно заменить диагностическую ветку на GPU/native integration или измеренно доказать, что копия укладывается в latency/thermal budget;
+- material packages первого Filament-среза компилируются on-device через `filamat-android`. Это ускоряет разработку shader foundation, но увеличивает APK и startup cost. До релизного профиля материалы нужно компилировать host-side `matc` той же версии `1.74.0`, хранить как `.filamat` assets и убрать runtime `filamat-android` dependency;
+- первый compositor принудительно собирает OpenGL material variants. API 29+ использует `HardwareBuffer`, а совместимый API 24–28 fallback — `SurfaceTexture`; Vulkan backend нужно включать только после отдельной проверки обоих external stream путей, цвета и device coverage;
+- `NATIVE` fallback на API 24–28 не гарантирует совпадение времени camera texture и render state. Это должно входить в device acceptance; если относительный temporal drift заметен, минимальный поддерживаемый класс production-качества придётся поднять до API 29 либо реализовать отдельную синхронизацию для старых устройств.
+
+Debug APK первого runtime-`filamat` среза имеет размер `105.18 MiB` и содержит универсальные native libraries. Это не релизный size baseline: после host-side компиляции материалов, удаления `filamat-android` и настройки ABI packaging размер нужно измерить заново.
 
 ## Зафиксированный стек
 
@@ -106,12 +118,12 @@ Runtime-проверка после оптимизации на Samsung SM-G990B
 | Язык и платформа | Native Android, Kotlin | Прямой доступ к CameraX, GPU, профилировщикам и минимальная лишняя задержка. |
 | Камера | CameraX 1.6.1, Camera2 backend | Стабильная версия, единое поведение на разных устройствах, lifecycle, точные настройки FPS и неблокирующий analysis-поток. |
 | Геометрия лица | MediaPipe Tasks Vision / Face Landmarker `1.0.0` | 478 3D landmarks, 52 blendshape-коэффициента, матрица трансформации, `LIVE_STREAM`, on-device GPU delegate. |
-| Рендер | Google Filament, ориентир `1.74.0` | PBR, линейный/HDR-рендер, custom materials, Vulkan и OpenGL ES backend, Android API. |
+| Рендер | Google Filament `1.74.0`, первый активный backend OpenGL ES | PBR, линейный/HDR-рендер, custom materials и Android external camera stream; Vulkan будет включён после сравнительной проверки. |
 | Семантические маски | MediaPipe Image Segmenter API + собственная LiteRT-модель face parsing | Нужны точные вероятностные маски губ, кожи, век и глаз; стандартной selfie segmentation для этого недостаточно. |
 | Асинхронность | Kotlin Coroutines + Flow | Изоляция camera, inference и render потоков; latest-only state без очереди устаревших кадров. |
 | Профилирование | Perfetto, Android GPU Inspector, Jetpack Benchmark/Macrobenchmark | Измерение motion-to-photon latency, CPU/GPU времени, пропусков кадров, памяти и нагрева. |
 
-UI первого этапа остаётся на Views: сейчас используется CameraX `PreviewView`, диагностический overlay и обычные Android-контролы. В production камера и макияж должны перейти в единую Filament render surface. Compose можно подключить для каталога и экранов приложения позднее; он не должен находиться в горячем цикле обработки кадра.
+UI первого этапа остаётся на Views: камера и макияж уже используют единую `FilamentMakeupView` render surface, поверх которой находятся диагностический overlay и обычные Android-контролы. Compose можно подключить для каталога и экранов приложения позднее; он не должен находиться в горячем цикле обработки кадра.
 
 ## Главные архитектурные решения
 
@@ -225,9 +237,9 @@ Preview и ImageAnalysis должны использовать общий `ViewP
 
 ## Порядок реализации
 
-1. **Camera + diagnostics — реализовано:** фронтальная камера, единые transforms, FPS/latency overlay, базовый device capability probe.
+1. **Camera + diagnostics — реализовано:** фронтальная камера, единые transforms, FPS/latency overlay, базовый device capability probe; активный preview поступает в Filament через CameraX custom surface.
 2. **Face mesh — реализована диагностическая версия:** Face Landmarker в live-stream режиме, синхронизация timestamp и mesh overlay. Стабильность ещё нужно проверить на реальных устройствах.
-3. **Вертикальный срез «помада» — референсно откалиброванный matte-прототип реализован:** раздельные области и покрытия верхней/нижней губы, мягкий край, исключение рта/зубов, сохранение luminance/texture, cubic contours и prediction; остаются единый GPU/linear-RGB compositor, semantic lip refinement, normals/BRDF, satin/gloss и калибровка на разных губах/освещении.
+3. **Вертикальный срез «помада» — первый Filament production-срез реализован:** camera texture и динамическая upper/lower lip mesh сведены в одной GPU scene; есть linear-RGB luminance-preserving pigment, cubic subdivision, мягкое coverage и исключение рта/зубов. Остаются device runtime calibration, semantic lip refinement, face normals/lighting, полноценные BRDF-профили matte/satin/gloss и калибровка на разных губах/освещении.
 4. **Temporal quality — частично реализовано:** зафиксированный adaptive tracking baseline, отдельный быстрый канал общего translation, sensor-based frame timestamp, bounded capture alignment, 42-мс render-only extrapolation window, 16-мс smoothstep continuity correction между delivered frames и удержание при dropout; остаются визуальная device/video calibration, компенсация rotation/scale и стабилизация будущих semantic masks.
 5. **Face parsing:** подготовленная и лицензированная модель для skin/lips/eyes/eyelids; LiteRT GPU/NPU/CPU benchmark.
 6. **Остальные эффекты:** lip liner, blush, eyeshadow, eyeliner.

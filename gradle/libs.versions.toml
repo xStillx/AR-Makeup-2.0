@@ -10,6 +10,7 @@ activityKtx = "1.13.0"
 constraintlayout = "2.2.2"
 cameraX = "1.6.1"
 mediaPipe = "1.0.0"
+filament = "1.74.0"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -25,6 +26,8 @@ androidx-camera-camera2 = { group = "androidx.camera", name = "camera-camera2", 
 androidx-camera-lifecycle = { group = "androidx.camera", name = "camera-lifecycle", version.ref = "cameraX" }
 androidx-camera-view = { group = "androidx.camera", name = "camera-view", version.ref = "cameraX" }
 mediapipe-tasks-vision = { group = "com.google.mediapipe", name = "tasks-vision", version.ref = "mediaPipe" }
+filament-android = { group = "com.google.android.filament", name = "filament-android", version.ref = "filament" }
+filamat-android = { group = "com.google.android.filament", name = "filamat-android", version.ref = "filament" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
