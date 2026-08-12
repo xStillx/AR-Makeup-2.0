@@ -45,6 +45,10 @@ class FilamentMakeupView @JvmOverloads constructor(
     val initializationErrorMessage: String?
         get() = initializationError?.message
 
+    val renderBackendLabel: String
+        get() = compositor?.let { context.getString(it.renderBackendLabelRes) }
+            ?: context.getString(com.example.armakeup.R.string.render_backend_unavailable)
+
     fun setErrorListener(listener: (String) -> Unit) {
         errorListener = listener
         initializationError?.let(::dispatchError)

@@ -11,7 +11,12 @@
     <string name="status_tracker_error">Не удалось запустить трекинг</string>
     <string name="status_renderer_error">Не удалось запустить GPU-композитор</string>
     <string name="metrics_initial">MediaPipe · запуск…</string>
-    <string name="metrics_format">%1$d точек · ML %2$.0f FPS · %3$d мс · %4$s · камера %5$s</string>
+    <string name="metrics_format">%1$d точек · ML %2$.0f FPS · %3$d мс · %4$s · камера %5$s · %6$s</string>
+    <string name="render_backend_vulkan">Vulkan</string>
+    <string name="render_backend_opengl">OpenGL</string>
+    <string name="render_backend_opengl_fallback">OpenGL fallback</string>
+    <string name="render_backend_opengl_fallback_vulkan_runtime">OpenGL fallback · VK runtime</string>
+    <string name="render_backend_unavailable">GPU недоступен</string>
     <string name="camera_fps_auto">авто</string>
     <string name="delegate_gpu">GPU</string>
     <string name="delegate_cpu">CPU fallback</string>

@@ -12,28 +12,34 @@ internal object FilamentMaterialFactory {
         val lipstick: Material,
     )
 
-    fun build(engine: Engine): Materials {
+    fun build(engine: Engine, backend: MakeupRenderBackend): Materials {
         MaterialBuilder.init()
         return try {
             Materials(
-                camera = buildCameraMaterial(engine),
-                lipstick = buildLipstickMaterial(engine),
+                camera = buildCameraMaterial(engine, backend),
+                lipstick = buildLipstickMaterial(engine, backend),
             )
         } finally {
             MaterialBuilder.shutdown()
         }
     }
 
-    private fun buildCameraMaterial(engine: Engine): Material = buildMaterial(
+    private fun buildCameraMaterial(
+        engine: Engine,
+        backend: MakeupRenderBackend,
+    ): Material = buildMaterial(
         engine = engine,
-        builder = commonExternalTextureBuilder("AR camera")
+        builder = commonExternalTextureBuilder("AR camera", backend)
             .require(MaterialBuilder.VertexAttribute.UV0)
             .material(CAMERA_FRAGMENT),
     )
 
-    private fun buildLipstickMaterial(engine: Engine): Material = buildMaterial(
+    private fun buildLipstickMaterial(
+        engine: Engine,
+        backend: MakeupRenderBackend,
+    ): Material = buildMaterial(
         engine = engine,
-        builder = commonExternalTextureBuilder("AR lipstick")
+        builder = commonExternalTextureBuilder("AR lipstick", backend)
             .require(MaterialBuilder.VertexAttribute.UV0)
             .require(MaterialBuilder.VertexAttribute.COLOR)
             .uniformParameter(MaterialBuilder.UniformType.FLOAT3, "pigmentColor")
@@ -41,9 +47,12 @@ internal object FilamentMaterialFactory {
             .material(LIPSTICK_FRAGMENT),
     )
 
-    private fun commonExternalTextureBuilder(name: String): MaterialBuilder = MaterialBuilder()
+    private fun commonExternalTextureBuilder(
+        name: String,
+        backend: MakeupRenderBackend,
+    ): MaterialBuilder = MaterialBuilder()
         .platform(MaterialBuilder.Platform.MOBILE)
-        .targetApi(MaterialBuilder.TargetApi.OPENGL)
+        .targetApi(backend.targetApi)
         .name(name)
         .shading(MaterialBuilder.Shading.UNLIT)
         .samplerParameter(
@@ -57,6 +66,12 @@ internal object FilamentMaterialFactory {
         .depthWrite(true)
         .depthCulling(true)
         .optimization(MaterialBuilder.Optimization.PERFORMANCE)
+
+    private val MakeupRenderBackend.targetApi: MaterialBuilder.TargetApi
+        get() = when (this) {
+            MakeupRenderBackend.VULKAN -> MaterialBuilder.TargetApi.VULKAN
+            MakeupRenderBackend.OPENGL -> MaterialBuilder.TargetApi.OPENGL
+        }
 
     private fun buildMaterial(engine: Engine, builder: MaterialBuilder): Material {
         val materialPackage = builder.build(engine)

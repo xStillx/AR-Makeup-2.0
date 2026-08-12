@@ -10,9 +10,11 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.util.Log
 import android.view.Surface
 import android.view.SurfaceView
 import androidx.annotation.RequiresApi
+import androidx.annotation.StringRes
 import androidx.camera.core.SurfaceRequest
 import androidx.core.content.ContextCompat
 import com.example.armakeup.R
@@ -57,7 +59,17 @@ internal class FilamentMakeupRenderer(
     private val mainHandler = Handler(Looper.getMainLooper())
     private val mainExecutor = ContextCompat.getMainExecutor(context)
     private val displayHelper = DisplayHelper(context)
-    private val engine = Engine.create()
+    private val engineSelection = FilamentEngineFactory.create(context)
+    private val engine = engineSelection.engine
+    private val activeBackend = engineSelection.activeBackend
+    private val nativeVulkanProbe = NativeVulkanBootstrap.probe()
+    private val nativeVulkanRuntime = if (
+        engineSelection.requestedBackend == MakeupRenderBackend.VULKAN
+    ) {
+        NativeVulkanDiagnosticRuntime.createOrNull(nativeVulkanProbe)
+    } else {
+        null
+    }
     private val filamentRenderer: Renderer = engine.createRenderer()
     private val scene: Scene = engine.createScene()
     private val view: View = engine.createView()
@@ -65,7 +77,7 @@ internal class FilamentMakeupRenderer(
     private val camera: Camera = engine.createCamera(cameraEntity)
     private val uiHelper = UiHelper(UiHelper.ContextErrorPolicy.DONT_CHECK)
     private val frameScheduler = FrameScheduler()
-    private val materials = FilamentMaterialFactory.build(engine)
+    private val materials = engineSelection.materials
     private val cameraMaterialInstance = materials.camera.createInstance()
     private val upperLipMaterialInstance = materials.lipstick.createInstance()
     private val lowerLipMaterialInstance = materials.lipstick.createInstance()
@@ -103,7 +115,20 @@ internal class FilamentMakeupRenderer(
     private var viewportWidth = 0
     private var viewportHeight = 0
 
+    @get:StringRes
+    internal val renderBackendLabelRes: Int
+        get() = when {
+            activeBackend == MakeupRenderBackend.VULKAN -> R.string.render_backend_vulkan
+            nativeVulkanRuntime?.isReady == true ->
+                R.string.render_backend_opengl_fallback_vulkan_runtime
+            engineSelection.requestedBackend == MakeupRenderBackend.VULKAN ->
+                R.string.render_backend_opengl_fallback
+            else -> R.string.render_backend_opengl
+        }
+
     init {
+        Log.i(RENDER_LOG_TAG, engineSelection.diagnostic)
+        Log.i(NATIVE_VULKAN_LOG_TAG, nativeVulkanProbe.diagnostic)
         configureMaterialInstances(context)
         configureScene()
         uiHelper.renderCallback = SurfaceCallback()
@@ -171,6 +196,7 @@ internal class FilamentMakeupRenderer(
         ensureMainThread()
         if (destroyRequested || destroyed || resumed) return
         resumed = true
+        nativeVulkanRuntime?.start()
         frameScheduler.post()
     }
 
@@ -179,6 +205,7 @@ internal class FilamentMakeupRenderer(
         if (!resumed) return
         resumed = false
         frameScheduler.remove()
+        nativeVulkanRuntime?.stop()
     }
 
     fun destroy() {
@@ -244,6 +271,9 @@ internal class FilamentMakeupRenderer(
     }
 
     private fun obtainCameraInput(width: Int, height: Int): CameraInput {
+        check(activeBackend == MakeupRenderBackend.OPENGL) {
+            "Filament camera input is restricted to the verified OpenGL bridge"
+        }
         val current = cameraInput
         if (current != null && current.width == width && current.height == height) {
             return current
@@ -254,6 +284,10 @@ internal class FilamentMakeupRenderer(
         } else {
             NativeCameraInput(width, height)
         }
+        Log.i(
+            RENDER_LOG_TAG,
+            "cameraInput=${created.javaClass.simpleName} size=${width}x$height",
+        )
         cameraInput = created
         return created
     }
@@ -536,6 +570,7 @@ internal class FilamentMakeupRenderer(
     private fun finishDestroy() {
         if (destroyed) return
         destroyed = true
+        nativeVulkanRuntime?.close()
         hideLipEntity()
         cameraInput?.close()
         cameraInput = null
@@ -671,7 +706,7 @@ internal class FilamentMakeupRenderer(
         }
     }
 
-    /** API 29+ AR path with explicit HardwareBuffer acquisition and Filament release callbacks. */
+    /** API 29+ OpenGL bridge with explicit HardwareBuffer acquisition and release callbacks. */
     @RequiresApi(Build.VERSION_CODES.Q)
     private inner class AcquiredCameraInput(
         override val width: Int,
@@ -689,8 +724,10 @@ internal class FilamentMakeupRenderer(
             .height(height)
             .build(engine)
         override val surface: Surface = imageReader.surface
-        override val requiresHorizontalUvCompensation: Boolean = true
-        override val requiresVerticalUvCompensation: Boolean = true
+        override val requiresHorizontalUvCompensation: Boolean =
+            activeBackend == MakeupRenderBackend.OPENGL
+        override val requiresVerticalUvCompensation: Boolean =
+            activeBackend == MakeupRenderBackend.OPENGL
 
         init {
             cameraTexture.setExternalStream(engine, stream)
@@ -774,6 +811,8 @@ internal class FilamentMakeupRenderer(
         private const val MAX_ALPHA = 255f
         private const val MAX_COLOR_CHANNEL = 255f
         private const val ACQUIRED_MAX_IMAGES = 4
+        private const val RENDER_LOG_TAG = "ARMakeupRender"
+        private const val NATIVE_VULKAN_LOG_TAG = "ARMakeupVulkan"
         private val IDENTITY_MATRIX = floatArrayOf(
             1f, 0f, 0f, 0f,
             0f, 1f, 0f, 0f,

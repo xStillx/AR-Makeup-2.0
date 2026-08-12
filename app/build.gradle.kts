@@ -5,6 +5,7 @@ plugins {
 android {
     namespace = "com.example.armakeup"
     compileSdk = 37
+    ndkVersion = "29.0.14206865"
 
     defaultConfig {
         applicationId = "com.example.armakeup"
@@ -14,6 +15,12 @@ android {
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        externalNativeBuild {
+            cmake {
+                cppFlags += listOf("-std=c++20")
+            }
+        }
     }
 
     buildTypes {
@@ -32,6 +39,12 @@ android {
     }
     androidResources {
         noCompress += "task"
+    }
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.31.6"
+        }
     }
 }
 

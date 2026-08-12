@@ -281,6 +281,7 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
                 result.latencyMs,
                 getString(result.delegate.labelRes),
                 cameraFpsLabel,
+                binding.makeupRenderer.renderBackendLabel,
             )
         }
     }
