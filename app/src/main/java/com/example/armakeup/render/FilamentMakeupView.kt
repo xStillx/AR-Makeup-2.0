@@ -60,6 +60,7 @@ class FilamentMakeupView @JvmOverloads constructor(
         sourceHeight: Int,
         rotationDegrees: Int,
         mirrorHorizontal: Boolean,
+        sensorTimestampNs: Long,
     ) {
         compositor?.setResult(
             landmarks,
@@ -67,6 +68,7 @@ class FilamentMakeupView @JvmOverloads constructor(
             sourceHeight,
             rotationDegrees,
             mirrorHorizontal,
+            sensorTimestampNs,
         )
     }
 

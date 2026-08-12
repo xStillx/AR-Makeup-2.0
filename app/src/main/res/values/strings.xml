@@ -16,6 +16,7 @@
     <string name="render_backend_opengl">OpenGL</string>
     <string name="render_backend_opengl_fallback">OpenGL fallback</string>
     <string name="render_backend_opengl_fallback_vulkan_runtime">OpenGL fallback · VK runtime</string>
+    <string name="render_backend_opengl_fallback_vulkan_camera">OpenGL fallback · VK camera</string>
     <string name="render_backend_unavailable">GPU недоступен</string>
     <string name="camera_fps_auto">авто</string>
     <string name="delegate_gpu">GPU</string>

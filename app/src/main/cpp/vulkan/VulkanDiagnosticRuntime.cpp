@@ -1,30 +1,159 @@
+#include <android/hardware_buffer_jni.h>
 #include <android/native_window_jni.h>
 #include <jni.h>
 
+#include <media/NdkImage.h>
+#include <media/NdkImageReader.h>
+
 #include <dlfcn.h>
+#include <poll.h>
+#include <unistd.h>
 
 #define VK_USE_PLATFORM_ANDROID_KHR 1
 #include <vulkan/vulkan.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <exception>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <new>
 #include <sstream>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
+
+#include "CameraShaders.generated.h"
 
 namespace {
 
 constexpr std::uint32_t kFramesInFlight = 2;
 constexpr std::uint64_t kAcquireTimeoutNs = 1'000'000'000ULL;
 constexpr std::chrono::milliseconds kDiagnosticFrameInterval{100};
+constexpr std::uint32_t kCameraMaxImages = 4;
+constexpr std::size_t kTransformElementCount = 16;
+constexpr std::size_t kCameraMetadataCount = 8;
+
+struct MediaDispatch final {
+    using NewWithUsage = media_status_t (*)(
+        std::int32_t,
+        std::int32_t,
+        std::int32_t,
+        std::uint64_t,
+        std::int32_t,
+        AImageReader**
+    );
+    using DeleteReader = void (*)(AImageReader*);
+    using GetWindow = media_status_t (*)(AImageReader*, ANativeWindow**);
+    using AcquireLatestAsync = media_status_t (*)(AImageReader*, AImage**, int*);
+    using GetHardwareBuffer = media_status_t (*)(const AImage*, AHardwareBuffer**);
+    using GetTimestamp = media_status_t (*)(const AImage*, std::int64_t*);
+    using DeleteImage = void (*)(AImage*);
+    using DescribeHardwareBuffer = void (*)(const AHardwareBuffer*, AHardwareBuffer_Desc*);
+    using ToJavaHardwareBuffer = jobject (*)(JNIEnv*, AHardwareBuffer*);
+    using NativeWindowToSurface = jobject (*)(JNIEnv*, ANativeWindow*);
+
+    void* mediaLibrary = nullptr;
+    void* androidLibrary = nullptr;
+    NewWithUsage newWithUsage = nullptr;
+    DeleteReader deleteReader = nullptr;
+    GetWindow getWindow = nullptr;
+    AcquireLatestAsync acquireLatestAsync = nullptr;
+    GetHardwareBuffer getHardwareBuffer = nullptr;
+    GetTimestamp getTimestamp = nullptr;
+    DeleteImage deleteImage = nullptr;
+    DescribeHardwareBuffer describeHardwareBuffer = nullptr;
+    ToJavaHardwareBuffer toJavaHardwareBuffer = nullptr;
+    NativeWindowToSurface nativeWindowToSurface = nullptr;
+
+    [[nodiscard]] bool load() {
+        if (isReady()) {
+            return true;
+        }
+        mediaLibrary = dlopen("libmediandk.so", RTLD_NOW | RTLD_LOCAL);
+        androidLibrary = dlopen("libandroid.so", RTLD_NOW | RTLD_LOCAL);
+        if (mediaLibrary == nullptr || androidLibrary == nullptr) {
+            close();
+            return false;
+        }
+        newWithUsage = loadSymbol<NewWithUsage>(mediaLibrary, "AImageReader_newWithUsage");
+        deleteReader = loadSymbol<DeleteReader>(mediaLibrary, "AImageReader_delete");
+        getWindow = loadSymbol<GetWindow>(mediaLibrary, "AImageReader_getWindow");
+        acquireLatestAsync = loadSymbol<AcquireLatestAsync>(
+            mediaLibrary,
+            "AImageReader_acquireLatestImageAsync"
+        );
+        getHardwareBuffer = loadSymbol<GetHardwareBuffer>(
+            mediaLibrary,
+            "AImage_getHardwareBuffer"
+        );
+        getTimestamp = loadSymbol<GetTimestamp>(mediaLibrary, "AImage_getTimestamp");
+        deleteImage = loadSymbol<DeleteImage>(mediaLibrary, "AImage_delete");
+        describeHardwareBuffer = loadSymbol<DescribeHardwareBuffer>(
+            androidLibrary,
+            "AHardwareBuffer_describe"
+        );
+        toJavaHardwareBuffer = loadSymbol<ToJavaHardwareBuffer>(
+            androidLibrary,
+            "AHardwareBuffer_toHardwareBuffer"
+        );
+        nativeWindowToSurface = loadSymbol<NativeWindowToSurface>(
+            androidLibrary,
+            "ANativeWindow_toSurface"
+        );
+        if (!isReady()) {
+            close();
+            return false;
+        }
+        return true;
+    }
+
+    [[nodiscard]] bool isReady() const {
+        return newWithUsage != nullptr &&
+            deleteReader != nullptr &&
+            getWindow != nullptr &&
+            acquireLatestAsync != nullptr &&
+            getHardwareBuffer != nullptr &&
+            getTimestamp != nullptr &&
+            deleteImage != nullptr &&
+            describeHardwareBuffer != nullptr &&
+            toJavaHardwareBuffer != nullptr &&
+            nativeWindowToSurface != nullptr;
+    }
+
+    void close() {
+        newWithUsage = nullptr;
+        deleteReader = nullptr;
+        getWindow = nullptr;
+        acquireLatestAsync = nullptr;
+        getHardwareBuffer = nullptr;
+        getTimestamp = nullptr;
+        deleteImage = nullptr;
+        describeHardwareBuffer = nullptr;
+        toJavaHardwareBuffer = nullptr;
+        nativeWindowToSurface = nullptr;
+        if (mediaLibrary != nullptr) {
+            dlclose(mediaLibrary);
+            mediaLibrary = nullptr;
+        }
+        if (androidLibrary != nullptr) {
+            dlclose(androidLibrary);
+            androidLibrary = nullptr;
+        }
+    }
+
+private:
+    template <typename Function>
+    [[nodiscard]] static Function loadSymbol(void* library, const char* name) {
+        return reinterpret_cast<Function>(dlsym(library, name));
+    }
+};
 
 class VulkanDiagnosticRuntime final {
 public:
@@ -44,6 +173,7 @@ public:
 
     ~VulkanDiagnosticRuntime() {
         stop();
+        closeCamera();
         destroyVulkan();
         if (window_ != nullptr) {
             ANativeWindow_release(window_);
@@ -55,6 +185,11 @@ public:
     VulkanDiagnosticRuntime& operator=(const VulkanDiagnosticRuntime&) = delete;
 
     [[nodiscard]] bool isReady() const { return ready_.load(); }
+
+    [[nodiscard]] bool isCameraBridgeReady() const {
+        std::lock_guard lock(cameraMutex_);
+        return cameraReader_ != nullptr && cameraWindow_ != nullptr && cameraPipelineReady_;
+    }
 
     bool start() {
         std::lock_guard lock(threadMutex_);
@@ -90,14 +225,225 @@ public:
                << " format=" << formatName(surfaceFormat_.format)
                << " extent=" << extent_.width << 'x' << extent_.height
                << " images=" << swapchainImages_.size()
-               << " frames=" << presentedFrames_.load();
+               << " frames=" << presentedFrames_.load()
+               << " cameraImported=" << cameraImportedFrames_.load()
+               << " cameraRendered=" << cameraRenderedFrames_.load()
+               << " cameraDelivered=" << cameraDeliveredFrames_.load()
+               << " cameraReleased=" << cameraReleasedFrames_.load()
+               << " cameraDropped=" << cameraDroppedFrames_.load()
+               << " acquireFences=" << cameraAcquireFences_.load()
+               << " releaseFences=" << cameraReleaseFences_.load();
+        if (lastCameraWidth_.load() > 0U) {
+            output << " camera=" << lastCameraWidth_.load() << 'x' << lastCameraHeight_.load()
+                   << " ahbFormat=" << lastCameraFormat_.load()
+                   << " vkFormat=" << formatName(lastCameraVkFormat_.load())
+                   << " externalFormat=" << lastCameraExternalFormat_.load();
+        }
         if (!errorReason_.empty()) {
             output << " reason=" << errorReason_;
+        }
+        if (!cameraError_.empty()) {
+            output << " cameraReason=" << cameraError_;
         }
         return output.str();
     }
 
+    jobject configureCamera(JNIEnv* environment, std::uint32_t width, std::uint32_t height) {
+        std::lock_guard lock(cameraMutex_);
+        if (!ready_.load() || width == 0U || height == 0U) {
+            return nullptr;
+        }
+        if (cameraReader_ != nullptr) {
+            if (cameraWidth_ != width || cameraHeight_ != height) {
+                return nullptr;
+            }
+            return mediaDispatch_.nativeWindowToSurface(environment, cameraWindow_);
+        }
+        if (!mediaDispatch_.load()) {
+            setCameraError("media_dispatch_unavailable");
+            return nullptr;
+        }
+        AImageReader* reader = nullptr;
+        const media_status_t status = mediaDispatch_.newWithUsage(
+            static_cast<std::int32_t>(width),
+            static_cast<std::int32_t>(height),
+            AIMAGE_FORMAT_PRIVATE,
+            AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE,
+            static_cast<std::int32_t>(kCameraMaxImages),
+            &reader
+        );
+        if (status != AMEDIA_OK || reader == nullptr) {
+            setCameraError("image_reader_create_" + std::to_string(status));
+            return nullptr;
+        }
+        ANativeWindow* cameraWindow = nullptr;
+        const media_status_t windowStatus = mediaDispatch_.getWindow(reader, &cameraWindow);
+        if (windowStatus != AMEDIA_OK || cameraWindow == nullptr) {
+            mediaDispatch_.deleteReader(reader);
+            setCameraError("image_reader_window_" + std::to_string(windowStatus));
+            return nullptr;
+        }
+        jobject surface = mediaDispatch_.nativeWindowToSurface(environment, cameraWindow);
+        if (surface == nullptr) {
+            mediaDispatch_.deleteReader(reader);
+            setCameraError("camera_surface_unavailable");
+            return nullptr;
+        }
+        cameraReader_ = reader;
+        cameraWindow_ = cameraWindow;
+        cameraWidth_ = width;
+        cameraHeight_ = height;
+        cameraPipelineReady_ = true;
+        cameraError_.clear();
+        return surface;
+    }
+
+    jobject acquireCameraFrame(
+        JNIEnv* environment,
+        jlongArray metadata,
+        jfloatArray uvTransform
+    ) {
+        if (metadata == nullptr || uvTransform == nullptr ||
+            environment->GetArrayLength(metadata) < static_cast<jsize>(kCameraMetadataCount) ||
+            environment->GetArrayLength(uvTransform) !=
+                static_cast<jsize>(kTransformElementCount)) {
+            return nullptr;
+        }
+        std::array<float, kTransformElementCount> transform{};
+        environment->GetFloatArrayRegion(
+            uvTransform,
+            0,
+            static_cast<jsize>(transform.size()),
+            transform.data()
+        );
+        if (environment->ExceptionCheck() == JNI_TRUE) {
+            return nullptr;
+        }
+
+        std::lock_guard lock(cameraMutex_);
+        if (!ready_.load() || cameraReader_ == nullptr || !cameraPipelineReady_) {
+            return nullptr;
+        }
+        if (pendingCameraFrame_.image != nullptr) {
+            if (!finalizePendingCameraFrame()) {
+                return nullptr;
+            }
+            return deliverPendingCameraFrame(environment, metadata);
+        }
+        if (deliveredCameraFrames_.size() >= kCameraMaxImages - 1U) {
+            return nullptr;
+        }
+
+        AImage* image = nullptr;
+        int acquireFenceFd = -1;
+        const media_status_t status = mediaDispatch_.acquireLatestAsync(
+            cameraReader_,
+            &image,
+            &acquireFenceFd
+        );
+        if (status == AMEDIA_IMGREADER_NO_BUFFER_AVAILABLE) {
+            return nullptr;
+        }
+        if (status != AMEDIA_OK || image == nullptr) {
+            closeFileDescriptor(acquireFenceFd);
+            setCameraError("acquire_latest_" + std::to_string(status));
+            return nullptr;
+        }
+
+        AHardwareBuffer* hardwareBuffer = nullptr;
+        std::int64_t timestampNs = 0;
+        if (mediaDispatch_.getHardwareBuffer(image, &hardwareBuffer) != AMEDIA_OK ||
+            hardwareBuffer == nullptr ||
+            mediaDispatch_.getTimestamp(image, &timestampNs) != AMEDIA_OK) {
+            closeFileDescriptor(acquireFenceFd);
+            mediaDispatch_.deleteImage(image);
+            cameraDroppedFrames_.fetch_add(1);
+            setCameraError("camera_image_metadata_unavailable");
+            return nullptr;
+        }
+        AHardwareBuffer_Desc description{};
+        mediaDispatch_.describeHardwareBuffer(hardwareBuffer, &description);
+        pendingCameraFrame_.image = image;
+        pendingCameraFrame_.hardwareBuffer = hardwareBuffer;
+        pendingCameraFrame_.timestampNs = timestampNs;
+        pendingCameraFrame_.description = description;
+        pendingCameraFrame_.token = nextCameraToken_++;
+        pendingCameraFrame_.transform = transform;
+        pendingCameraFrame_.acquireFenceImported = acquireFenceFd >= 0;
+
+        if (!importAndRenderCameraFrame(acquireFenceFd)) {
+            closeFileDescriptor(acquireFenceFd);
+            destroyPendingCameraFrame(/* deleteImage = */ true);
+            cameraDroppedFrames_.fetch_add(1);
+            return nullptr;
+        }
+        if (!finalizePendingCameraFrame()) {
+            return nullptr;
+        }
+        return deliverPendingCameraFrame(environment, metadata);
+    }
+
+    void releaseCameraFrame(std::uint64_t token) {
+        std::lock_guard lock(cameraMutex_);
+        const auto iterator = deliveredCameraFrames_.find(token);
+        if (iterator == deliveredCameraFrames_.end()) {
+            return;
+        }
+        if (iterator->second != nullptr && mediaDispatch_.deleteImage != nullptr) {
+            mediaDispatch_.deleteImage(iterator->second);
+        }
+        deliveredCameraFrames_.erase(iterator);
+        cameraReleasedFrames_.fetch_add(1);
+    }
+
+    void closeCamera() {
+        std::lock_guard lock(cameraMutex_);
+        std::lock_guard renderLock(renderMutex_);
+        if (device_ != VK_NULL_HANDLE && deviceWaitIdle_ != nullptr) {
+            deviceWaitIdle_(device_);
+        }
+        destroyPendingCameraFrame(/* deleteImage = */ true);
+        if (mediaDispatch_.deleteImage != nullptr) {
+            for (const auto& entry : deliveredCameraFrames_) {
+                if (entry.second != nullptr) {
+                    mediaDispatch_.deleteImage(entry.second);
+                }
+            }
+        }
+        deliveredCameraFrames_.clear();
+        destroyCameraPipeline();
+        if (cameraReader_ != nullptr && mediaDispatch_.deleteReader != nullptr) {
+            mediaDispatch_.deleteReader(cameraReader_);
+        }
+        cameraReader_ = nullptr;
+        cameraWindow_ = nullptr;
+        cameraWidth_ = 0;
+        cameraHeight_ = 0;
+        cameraPipelineReady_ = false;
+        mediaDispatch_.close();
+    }
+
 private:
+    struct PendingCameraFrame final {
+        AImage* image = nullptr;
+        AHardwareBuffer* hardwareBuffer = nullptr;
+        AHardwareBuffer_Desc description{};
+        std::int64_t timestampNs = 0;
+        std::uint64_t token = 0;
+        std::array<float, kTransformElementCount> transform{};
+        bool acquireFenceImported = false;
+        bool releaseFenceExported = false;
+        int releaseFenceFd = -1;
+        VkImage importedImage = VK_NULL_HANDLE;
+        VkDeviceMemory importedMemory = VK_NULL_HANDLE;
+        VkImageView importedImageView = VK_NULL_HANDLE;
+        VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+        VkSemaphore acquireSemaphore = VK_NULL_HANDLE;
+        VkSemaphore releaseSemaphore = VK_NULL_HANDLE;
+        VkFormat vkFormat = VK_FORMAT_UNDEFINED;
+        std::uint64_t externalFormat = 0;
+    };
+
     template <typename Function>
     [[nodiscard]] Function loadGlobal(const char* name) const {
         return reinterpret_cast<Function>(getInstanceProcAddress_(VK_NULL_HANDLE, name));
@@ -267,7 +613,13 @@ private:
         }
 
         for (const VkPhysicalDevice candidate : devices) {
-            if (!supportsDeviceExtension(candidate, VK_KHR_SWAPCHAIN_EXTENSION_NAME)) {
+            if (!supportsDeviceExtension(candidate, VK_KHR_SWAPCHAIN_EXTENSION_NAME) ||
+                !supportsDeviceExtension(
+                    candidate,
+                    VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME
+                ) ||
+                !supportsDeviceExtension(candidate, VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME) ||
+                !supportsDeviceExtension(candidate, VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME)) {
                 continue;
             }
             std::uint32_t queueFamilyCount = 0;
@@ -343,7 +695,12 @@ private:
             .queueCount = 1,
             .pQueuePriorities = &queuePriority,
         };
-        const char* deviceExtension = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+        const std::array<const char*, 4> deviceExtensions{
+            VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+            VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME,
+            VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME,
+            VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME,
+        };
         const VkPhysicalDeviceFeatures features{};
         const VkDeviceCreateInfo deviceCreateInfo{
             .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
@@ -353,8 +710,8 @@ private:
             .pQueueCreateInfos = &queueCreateInfo,
             .enabledLayerCount = 0,
             .ppEnabledLayerNames = nullptr,
-            .enabledExtensionCount = 1,
-            .ppEnabledExtensionNames = &deviceExtension,
+            .enabledExtensionCount = static_cast<std::uint32_t>(deviceExtensions.size()),
+            .ppEnabledExtensionNames = deviceExtensions.data(),
             .pEnabledFeatures = &features,
         };
         const VkResult result = createDevice_(
@@ -393,8 +750,15 @@ private:
             loadDevice<PFN_vkAllocateCommandBuffers>("vkAllocateCommandBuffers");
         beginCommandBuffer_ = loadDevice<PFN_vkBeginCommandBuffer>("vkBeginCommandBuffer");
         endCommandBuffer_ = loadDevice<PFN_vkEndCommandBuffer>("vkEndCommandBuffer");
+        resetCommandBuffer_ = loadDevice<PFN_vkResetCommandBuffer>("vkResetCommandBuffer");
         cmdBeginRenderPass_ = loadDevice<PFN_vkCmdBeginRenderPass>("vkCmdBeginRenderPass");
         cmdEndRenderPass_ = loadDevice<PFN_vkCmdEndRenderPass>("vkCmdEndRenderPass");
+        cmdPipelineBarrier_ = loadDevice<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier");
+        cmdBindPipeline_ = loadDevice<PFN_vkCmdBindPipeline>("vkCmdBindPipeline");
+        cmdBindDescriptorSets_ =
+            loadDevice<PFN_vkCmdBindDescriptorSets>("vkCmdBindDescriptorSets");
+        cmdPushConstants_ = loadDevice<PFN_vkCmdPushConstants>("vkCmdPushConstants");
+        cmdDraw_ = loadDevice<PFN_vkCmdDraw>("vkCmdDraw");
         createSemaphore_ = loadDevice<PFN_vkCreateSemaphore>("vkCreateSemaphore");
         destroySemaphore_ = loadDevice<PFN_vkDestroySemaphore>("vkDestroySemaphore");
         createFence_ = loadDevice<PFN_vkCreateFence>("vkCreateFence");
@@ -405,6 +769,48 @@ private:
         queueSubmit_ = loadDevice<PFN_vkQueueSubmit>("vkQueueSubmit");
         queuePresent_ = loadDevice<PFN_vkQueuePresentKHR>("vkQueuePresentKHR");
         deviceWaitIdle_ = loadDevice<PFN_vkDeviceWaitIdle>("vkDeviceWaitIdle");
+        createImage_ = loadDevice<PFN_vkCreateImage>("vkCreateImage");
+        destroyImage_ = loadDevice<PFN_vkDestroyImage>("vkDestroyImage");
+        getImageMemoryRequirements_ =
+            loadDevice<PFN_vkGetImageMemoryRequirements>("vkGetImageMemoryRequirements");
+        allocateMemory_ = loadDevice<PFN_vkAllocateMemory>("vkAllocateMemory");
+        freeMemory_ = loadDevice<PFN_vkFreeMemory>("vkFreeMemory");
+        bindImageMemory_ = loadDevice<PFN_vkBindImageMemory>("vkBindImageMemory");
+        getAndroidHardwareBufferProperties_ =
+            loadDevice<PFN_vkGetAndroidHardwareBufferPropertiesANDROID>(
+                "vkGetAndroidHardwareBufferPropertiesANDROID"
+            );
+        createSamplerYcbcrConversion_ =
+            loadDevice<PFN_vkCreateSamplerYcbcrConversion>("vkCreateSamplerYcbcrConversion");
+        destroySamplerYcbcrConversion_ =
+            loadDevice<PFN_vkDestroySamplerYcbcrConversion>("vkDestroySamplerYcbcrConversion");
+        createSampler_ = loadDevice<PFN_vkCreateSampler>("vkCreateSampler");
+        destroySampler_ = loadDevice<PFN_vkDestroySampler>("vkDestroySampler");
+        createShaderModule_ = loadDevice<PFN_vkCreateShaderModule>("vkCreateShaderModule");
+        destroyShaderModule_ = loadDevice<PFN_vkDestroyShaderModule>("vkDestroyShaderModule");
+        createDescriptorSetLayout_ =
+            loadDevice<PFN_vkCreateDescriptorSetLayout>("vkCreateDescriptorSetLayout");
+        destroyDescriptorSetLayout_ =
+            loadDevice<PFN_vkDestroyDescriptorSetLayout>("vkDestroyDescriptorSetLayout");
+        createDescriptorPool_ =
+            loadDevice<PFN_vkCreateDescriptorPool>("vkCreateDescriptorPool");
+        destroyDescriptorPool_ =
+            loadDevice<PFN_vkDestroyDescriptorPool>("vkDestroyDescriptorPool");
+        allocateDescriptorSets_ =
+            loadDevice<PFN_vkAllocateDescriptorSets>("vkAllocateDescriptorSets");
+        freeDescriptorSets_ = loadDevice<PFN_vkFreeDescriptorSets>("vkFreeDescriptorSets");
+        updateDescriptorSets_ =
+            loadDevice<PFN_vkUpdateDescriptorSets>("vkUpdateDescriptorSets");
+        createPipelineLayout_ =
+            loadDevice<PFN_vkCreatePipelineLayout>("vkCreatePipelineLayout");
+        destroyPipelineLayout_ =
+            loadDevice<PFN_vkDestroyPipelineLayout>("vkDestroyPipelineLayout");
+        createGraphicsPipelines_ =
+            loadDevice<PFN_vkCreateGraphicsPipelines>("vkCreateGraphicsPipelines");
+        destroyPipeline_ = loadDevice<PFN_vkDestroyPipeline>("vkDestroyPipeline");
+        importSemaphoreFd_ =
+            loadDevice<PFN_vkImportSemaphoreFdKHR>("vkImportSemaphoreFdKHR");
+        getSemaphoreFd_ = loadDevice<PFN_vkGetSemaphoreFdKHR>("vkGetSemaphoreFdKHR");
 
         if (destroyDevice_ == nullptr ||
             getDeviceQueue_ == nullptr ||
@@ -422,8 +828,14 @@ private:
             allocateCommandBuffers_ == nullptr ||
             beginCommandBuffer_ == nullptr ||
             endCommandBuffer_ == nullptr ||
+            resetCommandBuffer_ == nullptr ||
             cmdBeginRenderPass_ == nullptr ||
             cmdEndRenderPass_ == nullptr ||
+            cmdPipelineBarrier_ == nullptr ||
+            cmdBindPipeline_ == nullptr ||
+            cmdBindDescriptorSets_ == nullptr ||
+            cmdPushConstants_ == nullptr ||
+            cmdDraw_ == nullptr ||
             createSemaphore_ == nullptr ||
             destroySemaphore_ == nullptr ||
             createFence_ == nullptr ||
@@ -433,7 +845,33 @@ private:
             acquireNextImage_ == nullptr ||
             queueSubmit_ == nullptr ||
             queuePresent_ == nullptr ||
-            deviceWaitIdle_ == nullptr) {
+            deviceWaitIdle_ == nullptr ||
+            createImage_ == nullptr ||
+            destroyImage_ == nullptr ||
+            getImageMemoryRequirements_ == nullptr ||
+            allocateMemory_ == nullptr ||
+            freeMemory_ == nullptr ||
+            bindImageMemory_ == nullptr ||
+            getAndroidHardwareBufferProperties_ == nullptr ||
+            createSamplerYcbcrConversion_ == nullptr ||
+            destroySamplerYcbcrConversion_ == nullptr ||
+            createSampler_ == nullptr ||
+            destroySampler_ == nullptr ||
+            createShaderModule_ == nullptr ||
+            destroyShaderModule_ == nullptr ||
+            createDescriptorSetLayout_ == nullptr ||
+            destroyDescriptorSetLayout_ == nullptr ||
+            createDescriptorPool_ == nullptr ||
+            destroyDescriptorPool_ == nullptr ||
+            allocateDescriptorSets_ == nullptr ||
+            freeDescriptorSets_ == nullptr ||
+            updateDescriptorSets_ == nullptr ||
+            createPipelineLayout_ == nullptr ||
+            destroyPipelineLayout_ == nullptr ||
+            createGraphicsPipelines_ == nullptr ||
+            destroyPipeline_ == nullptr ||
+            importSemaphoreFd_ == nullptr ||
+            getSemaphoreFd_ == nullptr) {
             setError("device_dispatch_incomplete");
             return false;
         }
@@ -721,7 +1159,7 @@ private:
         const VkCommandPoolCreateInfo poolCreateInfo{
             .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
             .pNext = nullptr,
-            .flags = 0,
+            .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
             .queueFamilyIndex = queueFamilyIndex_,
         };
         VkResult result = createCommandPool_(device_, &poolCreateInfo, nullptr, &commandPool_);
@@ -744,45 +1182,56 @@ private:
         }
 
         for (std::size_t index = 0; index < commandBuffers_.size(); ++index) {
-            const VkCommandBufferBeginInfo beginInfo{
-                .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-                .pNext = nullptr,
-                .flags = VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT,
-                .pInheritanceInfo = nullptr,
-            };
-            result = beginCommandBuffer_(commandBuffers_[index], &beginInfo);
-            if (result != VK_SUCCESS) {
-                setVulkanError("begin_command_buffer", result);
+            if (!recordClearCommandBuffer(static_cast<std::uint32_t>(index), false)) {
                 return false;
             }
-            const VkClearValue clearValue{
-                .color = VkClearColorValue{
-                    .float32 = {0.82F, 0.12F, 0.34F, 1.0F},
-                },
-            };
-            const VkRenderPassBeginInfo renderPassInfo{
-                .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
-                .pNext = nullptr,
-                .renderPass = renderPass_,
-                .framebuffer = framebuffers_[index],
-                .renderArea = VkRect2D{
-                    .offset = VkOffset2D{.x = 0, .y = 0},
-                    .extent = extent_,
-                },
-                .clearValueCount = 1,
-                .pClearValues = &clearValue,
-            };
-            cmdBeginRenderPass_(
-                commandBuffers_[index],
-                &renderPassInfo,
-                VK_SUBPASS_CONTENTS_INLINE
-            );
-            cmdEndRenderPass_(commandBuffers_[index]);
-            result = endCommandBuffer_(commandBuffers_[index]);
-            if (result != VK_SUCCESS) {
-                setVulkanError("end_command_buffer", result);
+        }
+        return true;
+    }
+
+    bool recordClearCommandBuffer(std::uint32_t imageIndex, bool reset) {
+        VkCommandBuffer commandBuffer = commandBuffers_[imageIndex];
+        if (reset) {
+            const VkResult resetResult = resetCommandBuffer_(commandBuffer, 0);
+            if (resetResult != VK_SUCCESS) {
+                setVulkanError("reset_clear_command_buffer", resetResult);
                 return false;
             }
+        }
+        const VkCommandBufferBeginInfo beginInfo{
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+            .pNext = nullptr,
+            .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+            .pInheritanceInfo = nullptr,
+        };
+        VkResult result = beginCommandBuffer_(commandBuffer, &beginInfo);
+        if (result != VK_SUCCESS) {
+            setVulkanError("begin_clear_command_buffer", result);
+            return false;
+        }
+        const VkClearValue clearValue{
+            .color = VkClearColorValue{
+                .float32 = {0.82F, 0.12F, 0.34F, 1.0F},
+            },
+        };
+        const VkRenderPassBeginInfo renderPassInfo{
+            .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+            .pNext = nullptr,
+            .renderPass = renderPass_,
+            .framebuffer = framebuffers_[imageIndex],
+            .renderArea = VkRect2D{
+                .offset = VkOffset2D{.x = 0, .y = 0},
+                .extent = extent_,
+            },
+            .clearValueCount = 1,
+            .pClearValues = &clearValue,
+        };
+        cmdBeginRenderPass_(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+        cmdEndRenderPass_(commandBuffer);
+        result = endCommandBuffer_(commandBuffer);
+        if (result != VK_SUCCESS) {
+            setVulkanError("end_clear_command_buffer", result);
+            return false;
         }
         return true;
     }
@@ -832,6 +1281,1043 @@ private:
         return true;
     }
 
+    bool createCameraPipeline(
+        const VkAndroidHardwareBufferFormatPropertiesANDROID& formatProperties,
+        VkFormat imageFormat,
+        std::uint64_t externalFormat
+    ) {
+        if (cameraPipeline_ != VK_NULL_HANDLE &&
+            cameraPipelineVkFormat_ == imageFormat &&
+            cameraPipelineExternalFormat_ == externalFormat) {
+            return true;
+        }
+        if (cameraPipeline_ != VK_NULL_HANDLE) {
+            std::lock_guard renderLock(renderMutex_);
+            deviceWaitIdle_(device_);
+            destroyCameraPipeline();
+        }
+
+        const bool usesExternalFormat = imageFormat == VK_FORMAT_UNDEFINED;
+        VkExternalFormatANDROID conversionExternalFormat{
+            .sType = VK_STRUCTURE_TYPE_EXTERNAL_FORMAT_ANDROID,
+            .pNext = nullptr,
+            .externalFormat = externalFormat,
+        };
+        const VkFilter chromaFilter =
+            (formatProperties.formatFeatures &
+             VK_FORMAT_FEATURE_SAMPLED_IMAGE_YCBCR_CONVERSION_LINEAR_FILTER_BIT) != 0U
+            ? VK_FILTER_LINEAR
+            : VK_FILTER_NEAREST;
+        const VkSamplerYcbcrConversionCreateInfo conversionCreateInfo{
+            .sType = VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_CREATE_INFO,
+            .pNext = usesExternalFormat ? &conversionExternalFormat : nullptr,
+            .format = imageFormat,
+            .ycbcrModel = formatProperties.suggestedYcbcrModel,
+            .ycbcrRange = formatProperties.suggestedYcbcrRange,
+            .components = formatProperties.samplerYcbcrConversionComponents,
+            .xChromaOffset = formatProperties.suggestedXChromaOffset,
+            .yChromaOffset = formatProperties.suggestedYChromaOffset,
+            .chromaFilter = chromaFilter,
+            .forceExplicitReconstruction = VK_FALSE,
+        };
+        VkResult result = createSamplerYcbcrConversion_(
+            device_,
+            &conversionCreateInfo,
+            nullptr,
+            &cameraYcbcrConversion_
+        );
+        if (result != VK_SUCCESS) {
+            setCameraVulkanError("create_ycbcr_conversion", result);
+            return false;
+        }
+
+        const VkSamplerYcbcrConversionInfo samplerConversionInfo{
+            .sType = VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_INFO,
+            .pNext = nullptr,
+            .conversion = cameraYcbcrConversion_,
+        };
+        const VkSamplerCreateInfo samplerCreateInfo{
+            .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+            .pNext = &samplerConversionInfo,
+            .flags = 0,
+            .magFilter = chromaFilter,
+            .minFilter = chromaFilter,
+            .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+            .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            .mipLodBias = 0.0F,
+            .anisotropyEnable = VK_FALSE,
+            .maxAnisotropy = 1.0F,
+            .compareEnable = VK_FALSE,
+            .compareOp = VK_COMPARE_OP_ALWAYS,
+            .minLod = 0.0F,
+            .maxLod = 0.0F,
+            .borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK,
+            .unnormalizedCoordinates = VK_FALSE,
+        };
+        result = createSampler_(device_, &samplerCreateInfo, nullptr, &cameraSampler_);
+        if (result != VK_SUCCESS) {
+            setCameraVulkanError("create_camera_sampler", result);
+            destroyCameraPipeline();
+            return false;
+        }
+
+        const VkDescriptorSetLayoutBinding descriptorBinding{
+            .binding = 0,
+            .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+            .pImmutableSamplers = &cameraSampler_,
+        };
+        const VkDescriptorSetLayoutCreateInfo descriptorLayoutCreateInfo{
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .bindingCount = 1,
+            .pBindings = &descriptorBinding,
+        };
+        result = createDescriptorSetLayout_(
+            device_,
+            &descriptorLayoutCreateInfo,
+            nullptr,
+            &cameraDescriptorSetLayout_
+        );
+        if (result != VK_SUCCESS) {
+            setCameraVulkanError("create_camera_descriptor_layout", result);
+            destroyCameraPipeline();
+            return false;
+        }
+
+        const VkDescriptorPoolSize descriptorPoolSize{
+            .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .descriptorCount = kCameraMaxImages,
+        };
+        const VkDescriptorPoolCreateInfo descriptorPoolCreateInfo{
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
+            .maxSets = kCameraMaxImages,
+            .poolSizeCount = 1,
+            .pPoolSizes = &descriptorPoolSize,
+        };
+        result = createDescriptorPool_(
+            device_,
+            &descriptorPoolCreateInfo,
+            nullptr,
+            &cameraDescriptorPool_
+        );
+        if (result != VK_SUCCESS) {
+            setCameraVulkanError("create_camera_descriptor_pool", result);
+            destroyCameraPipeline();
+            return false;
+        }
+
+        const VkPushConstantRange pushConstantRange{
+            .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+            .offset = 0,
+            .size = static_cast<std::uint32_t>(sizeof(float) * kTransformElementCount),
+        };
+        const VkPipelineLayoutCreateInfo pipelineLayoutCreateInfo{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .setLayoutCount = 1,
+            .pSetLayouts = &cameraDescriptorSetLayout_,
+            .pushConstantRangeCount = 1,
+            .pPushConstantRanges = &pushConstantRange,
+        };
+        result = createPipelineLayout_(
+            device_,
+            &pipelineLayoutCreateInfo,
+            nullptr,
+            &cameraPipelineLayout_
+        );
+        if (result != VK_SUCCESS) {
+            setCameraVulkanError("create_camera_pipeline_layout", result);
+            destroyCameraPipeline();
+            return false;
+        }
+
+        VkShaderModule vertexModule = VK_NULL_HANDLE;
+        VkShaderModule fragmentModule = VK_NULL_HANDLE;
+        if (!createShaderModule(
+                armakeup::shaders::kCameraVertex,
+                sizeof(armakeup::shaders::kCameraVertex),
+                &vertexModule
+            ) ||
+            !createShaderModule(
+                armakeup::shaders::kCameraFragment,
+                sizeof(armakeup::shaders::kCameraFragment),
+                &fragmentModule
+            )) {
+            if (vertexModule != VK_NULL_HANDLE) {
+                destroyShaderModule_(device_, vertexModule, nullptr);
+            }
+            if (fragmentModule != VK_NULL_HANDLE) {
+                destroyShaderModule_(device_, fragmentModule, nullptr);
+            }
+            destroyCameraPipeline();
+            return false;
+        }
+
+        const std::array<VkPipelineShaderStageCreateInfo, 2> shaderStages{
+            VkPipelineShaderStageCreateInfo{
+                .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                .pNext = nullptr,
+                .flags = 0,
+                .stage = VK_SHADER_STAGE_VERTEX_BIT,
+                .module = vertexModule,
+                .pName = "main",
+                .pSpecializationInfo = nullptr,
+            },
+            VkPipelineShaderStageCreateInfo{
+                .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                .pNext = nullptr,
+                .flags = 0,
+                .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+                .module = fragmentModule,
+                .pName = "main",
+                .pSpecializationInfo = nullptr,
+            },
+        };
+        const VkPipelineVertexInputStateCreateInfo vertexInputState{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .vertexBindingDescriptionCount = 0,
+            .pVertexBindingDescriptions = nullptr,
+            .vertexAttributeDescriptionCount = 0,
+            .pVertexAttributeDescriptions = nullptr,
+        };
+        const VkPipelineInputAssemblyStateCreateInfo inputAssemblyState{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+            .primitiveRestartEnable = VK_FALSE,
+        };
+        const VkViewport viewport{
+            .x = 0.0F,
+            .y = 0.0F,
+            .width = static_cast<float>(extent_.width),
+            .height = static_cast<float>(extent_.height),
+            .minDepth = 0.0F,
+            .maxDepth = 1.0F,
+        };
+        const VkRect2D scissor{
+            .offset = VkOffset2D{.x = 0, .y = 0},
+            .extent = extent_,
+        };
+        const VkPipelineViewportStateCreateInfo viewportState{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .viewportCount = 1,
+            .pViewports = &viewport,
+            .scissorCount = 1,
+            .pScissors = &scissor,
+        };
+        const VkPipelineRasterizationStateCreateInfo rasterizationState{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .depthClampEnable = VK_FALSE,
+            .rasterizerDiscardEnable = VK_FALSE,
+            .polygonMode = VK_POLYGON_MODE_FILL,
+            .cullMode = VK_CULL_MODE_NONE,
+            .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+            .depthBiasEnable = VK_FALSE,
+            .depthBiasConstantFactor = 0.0F,
+            .depthBiasClamp = 0.0F,
+            .depthBiasSlopeFactor = 0.0F,
+            .lineWidth = 1.0F,
+        };
+        const VkPipelineMultisampleStateCreateInfo multisampleState{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+            .sampleShadingEnable = VK_FALSE,
+            .minSampleShading = 0.0F,
+            .pSampleMask = nullptr,
+            .alphaToCoverageEnable = VK_FALSE,
+            .alphaToOneEnable = VK_FALSE,
+        };
+        const VkPipelineColorBlendAttachmentState colorBlendAttachment{
+            .blendEnable = VK_FALSE,
+            .srcColorBlendFactor = VK_BLEND_FACTOR_ONE,
+            .dstColorBlendFactor = VK_BLEND_FACTOR_ZERO,
+            .colorBlendOp = VK_BLEND_OP_ADD,
+            .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+            .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
+            .alphaBlendOp = VK_BLEND_OP_ADD,
+            .colorWriteMask = VK_COLOR_COMPONENT_R_BIT |
+                VK_COLOR_COMPONENT_G_BIT |
+                VK_COLOR_COMPONENT_B_BIT |
+                VK_COLOR_COMPONENT_A_BIT,
+        };
+        const VkPipelineColorBlendStateCreateInfo colorBlendState{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .logicOpEnable = VK_FALSE,
+            .logicOp = VK_LOGIC_OP_COPY,
+            .attachmentCount = 1,
+            .pAttachments = &colorBlendAttachment,
+            .blendConstants = {0.0F, 0.0F, 0.0F, 0.0F},
+        };
+        const VkGraphicsPipelineCreateInfo pipelineCreateInfo{
+            .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .stageCount = static_cast<std::uint32_t>(shaderStages.size()),
+            .pStages = shaderStages.data(),
+            .pVertexInputState = &vertexInputState,
+            .pInputAssemblyState = &inputAssemblyState,
+            .pTessellationState = nullptr,
+            .pViewportState = &viewportState,
+            .pRasterizationState = &rasterizationState,
+            .pMultisampleState = &multisampleState,
+            .pDepthStencilState = nullptr,
+            .pColorBlendState = &colorBlendState,
+            .pDynamicState = nullptr,
+            .layout = cameraPipelineLayout_,
+            .renderPass = renderPass_,
+            .subpass = 0,
+            .basePipelineHandle = VK_NULL_HANDLE,
+            .basePipelineIndex = -1,
+        };
+        result = createGraphicsPipelines_(
+            device_,
+            VK_NULL_HANDLE,
+            1,
+            &pipelineCreateInfo,
+            nullptr,
+            &cameraPipeline_
+        );
+        destroyShaderModule_(device_, fragmentModule, nullptr);
+        destroyShaderModule_(device_, vertexModule, nullptr);
+        if (result != VK_SUCCESS) {
+            setCameraVulkanError("create_camera_pipeline", result);
+            destroyCameraPipeline();
+            return false;
+        }
+
+        cameraPipelineVkFormat_ = imageFormat;
+        cameraPipelineExternalFormat_ = externalFormat;
+        return true;
+    }
+
+    bool createShaderModule(
+        const std::uint8_t* byteCode,
+        std::size_t byteCount,
+        VkShaderModule* output
+    ) {
+        if (byteCode == nullptr || output == nullptr || byteCount == 0U || byteCount % 4U != 0U) {
+            setCameraError("invalid_spirv");
+            return false;
+        }
+        const VkShaderModuleCreateInfo createInfo{
+            .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .codeSize = byteCount,
+            .pCode = reinterpret_cast<const std::uint32_t*>(byteCode),
+        };
+        const VkResult result = createShaderModule_(device_, &createInfo, nullptr, output);
+        if (result != VK_SUCCESS) {
+            setCameraVulkanError("create_shader_module", result);
+            return false;
+        }
+        return true;
+    }
+
+    bool importCameraImage() {
+        VkAndroidHardwareBufferFormatPropertiesANDROID formatProperties{};
+        formatProperties.sType =
+            VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_FORMAT_PROPERTIES_ANDROID;
+        VkAndroidHardwareBufferPropertiesANDROID bufferProperties{};
+        bufferProperties.sType = VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_PROPERTIES_ANDROID;
+        bufferProperties.pNext = &formatProperties;
+        VkResult result = getAndroidHardwareBufferProperties_(
+            device_,
+            pendingCameraFrame_.hardwareBuffer,
+            &bufferProperties
+        );
+        if (result != VK_SUCCESS) {
+            setCameraVulkanError("get_ahb_properties", result);
+            return false;
+        }
+        const bool useExternalFormat = formatProperties.externalFormat != 0U;
+        const VkFormat imageFormat = useExternalFormat
+            ? VK_FORMAT_UNDEFINED
+            : formatProperties.format;
+        if (imageFormat == VK_FORMAT_UNDEFINED && !useExternalFormat) {
+            setCameraError("camera_format_unavailable");
+            return false;
+        }
+        if ((formatProperties.formatFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) == 0U) {
+            setCameraError("camera_format_not_sampled");
+            return false;
+        }
+        if (!createCameraPipeline(
+                formatProperties,
+                imageFormat,
+                formatProperties.externalFormat
+            )) {
+            return false;
+        }
+
+        VkExternalMemoryImageCreateInfo externalMemoryInfo{
+            .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
+            .pNext = nullptr,
+            .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID,
+        };
+        VkExternalFormatANDROID externalFormatInfo{
+            .sType = VK_STRUCTURE_TYPE_EXTERNAL_FORMAT_ANDROID,
+            .pNext = &externalMemoryInfo,
+            .externalFormat = formatProperties.externalFormat,
+        };
+        const VkImageCreateInfo imageCreateInfo{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+            .pNext = useExternalFormat
+                ? static_cast<const void*>(&externalFormatInfo)
+                : static_cast<const void*>(&externalMemoryInfo),
+            .flags = 0,
+            .imageType = VK_IMAGE_TYPE_2D,
+            .format = imageFormat,
+            .extent = VkExtent3D{
+                .width = pendingCameraFrame_.description.width,
+                .height = pendingCameraFrame_.description.height,
+                .depth = 1,
+            },
+            .mipLevels = 1,
+            .arrayLayers = 1,
+            .samples = VK_SAMPLE_COUNT_1_BIT,
+            .tiling = VK_IMAGE_TILING_OPTIMAL,
+            .usage = VK_IMAGE_USAGE_SAMPLED_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+            .queueFamilyIndexCount = 0,
+            .pQueueFamilyIndices = nullptr,
+            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        };
+        result = createImage_(
+            device_,
+            &imageCreateInfo,
+            nullptr,
+            &pendingCameraFrame_.importedImage
+        );
+        if (result != VK_SUCCESS) {
+            setCameraVulkanError("create_imported_image", result);
+            return false;
+        }
+
+        VkMemoryRequirements imageMemoryRequirements{};
+        getImageMemoryRequirements_(
+            device_,
+            pendingCameraFrame_.importedImage,
+            &imageMemoryRequirements
+        );
+        const std::uint32_t compatibleMemoryTypes =
+            imageMemoryRequirements.memoryTypeBits & bufferProperties.memoryTypeBits;
+        const std::uint32_t memoryTypeIndex = firstSetBit(compatibleMemoryTypes);
+        if (memoryTypeIndex == std::numeric_limits<std::uint32_t>::max()) {
+            setCameraError("camera_memory_type_unavailable");
+            return false;
+        }
+        VkMemoryDedicatedAllocateInfo dedicatedAllocateInfo{
+            .sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO,
+            .pNext = nullptr,
+            .image = pendingCameraFrame_.importedImage,
+            .buffer = VK_NULL_HANDLE,
+        };
+        VkImportAndroidHardwareBufferInfoANDROID importInfo{
+            .sType = VK_STRUCTURE_TYPE_IMPORT_ANDROID_HARDWARE_BUFFER_INFO_ANDROID,
+            .pNext = &dedicatedAllocateInfo,
+            .buffer = pendingCameraFrame_.hardwareBuffer,
+        };
+        const VkMemoryAllocateInfo memoryAllocateInfo{
+            .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+            .pNext = &importInfo,
+            .allocationSize = bufferProperties.allocationSize,
+            .memoryTypeIndex = memoryTypeIndex,
+        };
+        result = allocateMemory_(
+            device_,
+            &memoryAllocateInfo,
+            nullptr,
+            &pendingCameraFrame_.importedMemory
+        );
+        if (result != VK_SUCCESS) {
+            setCameraVulkanError("allocate_imported_memory", result);
+            return false;
+        }
+        result = bindImageMemory_(
+            device_,
+            pendingCameraFrame_.importedImage,
+            pendingCameraFrame_.importedMemory,
+            0
+        );
+        if (result != VK_SUCCESS) {
+            setCameraVulkanError("bind_imported_memory", result);
+            return false;
+        }
+
+        const VkSamplerYcbcrConversionInfo conversionInfo{
+            .sType = VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_INFO,
+            .pNext = nullptr,
+            .conversion = cameraYcbcrConversion_,
+        };
+        const VkImageViewCreateInfo imageViewCreateInfo{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .pNext = &conversionInfo,
+            .flags = 0,
+            .image = pendingCameraFrame_.importedImage,
+            .viewType = VK_IMAGE_VIEW_TYPE_2D,
+            .format = imageFormat,
+            .components = VkComponentMapping{
+                .r = VK_COMPONENT_SWIZZLE_IDENTITY,
+                .g = VK_COMPONENT_SWIZZLE_IDENTITY,
+                .b = VK_COMPONENT_SWIZZLE_IDENTITY,
+                .a = VK_COMPONENT_SWIZZLE_IDENTITY,
+            },
+            .subresourceRange = VkImageSubresourceRange{
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+        };
+        result = createImageView_(
+            device_,
+            &imageViewCreateInfo,
+            nullptr,
+            &pendingCameraFrame_.importedImageView
+        );
+        if (result != VK_SUCCESS) {
+            setCameraVulkanError("create_imported_image_view", result);
+            return false;
+        }
+
+        const VkDescriptorSetAllocateInfo descriptorAllocateInfo{
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+            .pNext = nullptr,
+            .descriptorPool = cameraDescriptorPool_,
+            .descriptorSetCount = 1,
+            .pSetLayouts = &cameraDescriptorSetLayout_,
+        };
+        result = allocateDescriptorSets_(
+            device_,
+            &descriptorAllocateInfo,
+            &pendingCameraFrame_.descriptorSet
+        );
+        if (result != VK_SUCCESS) {
+            setCameraVulkanError("allocate_camera_descriptor", result);
+            return false;
+        }
+        const VkDescriptorImageInfo descriptorImageInfo{
+            .sampler = VK_NULL_HANDLE,
+            .imageView = pendingCameraFrame_.importedImageView,
+            .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+        };
+        const VkWriteDescriptorSet descriptorWrite{
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .pNext = nullptr,
+            .dstSet = pendingCameraFrame_.descriptorSet,
+            .dstBinding = 0,
+            .dstArrayElement = 0,
+            .descriptorCount = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .pImageInfo = &descriptorImageInfo,
+            .pBufferInfo = nullptr,
+            .pTexelBufferView = nullptr,
+        };
+        updateDescriptorSets_(device_, 1, &descriptorWrite, 0, nullptr);
+
+        pendingCameraFrame_.vkFormat = imageFormat;
+        pendingCameraFrame_.externalFormat = formatProperties.externalFormat;
+        lastCameraWidth_.store(pendingCameraFrame_.description.width);
+        lastCameraHeight_.store(pendingCameraFrame_.description.height);
+        lastCameraFormat_.store(pendingCameraFrame_.description.format);
+        lastCameraVkFormat_.store(imageFormat);
+        lastCameraExternalFormat_.store(formatProperties.externalFormat);
+        cameraImportedFrames_.fetch_add(1);
+        return true;
+    }
+
+    bool importAndRenderCameraFrame(int& acquireFenceFd) {
+        if (!importCameraImage()) {
+            return false;
+        }
+        if (acquireFenceFd >= 0) {
+            const VkSemaphoreCreateInfo semaphoreCreateInfo{
+                .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+                .pNext = nullptr,
+                .flags = 0,
+            };
+            VkResult result = createSemaphore_(
+                device_,
+                &semaphoreCreateInfo,
+                nullptr,
+                &pendingCameraFrame_.acquireSemaphore
+            );
+            if (result != VK_SUCCESS) {
+                setCameraVulkanError("create_camera_acquire_semaphore", result);
+                return false;
+            }
+            const VkImportSemaphoreFdInfoKHR importSemaphoreInfo{
+                .sType = VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_FD_INFO_KHR,
+                .pNext = nullptr,
+                .semaphore = pendingCameraFrame_.acquireSemaphore,
+                .flags = VK_SEMAPHORE_IMPORT_TEMPORARY_BIT,
+                .handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT,
+                .fd = acquireFenceFd,
+            };
+            result = importSemaphoreFd_(device_, &importSemaphoreInfo);
+            if (result != VK_SUCCESS) {
+                setCameraVulkanError("import_camera_acquire_fence", result);
+                return false;
+            }
+            acquireFenceFd = -1;
+            cameraAcquireFences_.fetch_add(1);
+        }
+
+        const VkExportSemaphoreCreateInfo exportSemaphoreInfo{
+            .sType = VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO,
+            .pNext = nullptr,
+            .handleTypes = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT,
+        };
+        const VkSemaphoreCreateInfo semaphoreCreateInfo{
+            .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+            .pNext = &exportSemaphoreInfo,
+            .flags = 0,
+        };
+        VkResult result = createSemaphore_(
+            device_,
+            &semaphoreCreateInfo,
+            nullptr,
+            &pendingCameraFrame_.releaseSemaphore
+        );
+        if (result != VK_SUCCESS) {
+            setCameraVulkanError("create_camera_release_semaphore", result);
+            return false;
+        }
+        if (!renderImportedCameraFrame()) {
+            return false;
+        }
+        const VkSemaphoreGetFdInfoKHR getFdInfo{
+            .sType = VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR,
+            .pNext = nullptr,
+            .semaphore = pendingCameraFrame_.releaseSemaphore,
+            .handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT,
+        };
+        result = getSemaphoreFd_(device_, &getFdInfo, &pendingCameraFrame_.releaseFenceFd);
+        if (result != VK_SUCCESS || pendingCameraFrame_.releaseFenceFd < 0) {
+            deviceWaitIdle_(device_);
+            setCameraVulkanError("export_camera_release_fence", result);
+            return false;
+        }
+        pendingCameraFrame_.releaseFenceExported = true;
+        cameraReleaseFences_.fetch_add(1);
+        return true;
+    }
+
+    bool renderImportedCameraFrame() {
+        std::lock_guard renderLock(renderMutex_);
+        const std::uint32_t frameIndex = currentFrame_ % kFramesInFlight;
+        VkResult result = waitForFences_(
+            device_,
+            1,
+            &frameFences_[frameIndex],
+            VK_TRUE,
+            std::numeric_limits<std::uint64_t>::max()
+        );
+        if (result != VK_SUCCESS) {
+            setCameraVulkanError("wait_camera_frame_fence", result);
+            return false;
+        }
+        std::uint32_t imageIndex = 0;
+        result = acquireNextImage_(
+            device_,
+            swapchain_,
+            kAcquireTimeoutNs,
+            imageAvailableSemaphores_[frameIndex],
+            VK_NULL_HANDLE,
+            &imageIndex
+        );
+        if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
+            setCameraVulkanError("acquire_camera_swapchain_image", result);
+            return false;
+        }
+        if (imageIndex >= commandBuffers_.size()) {
+            setCameraError("camera_swapchain_index_out_of_range");
+            return false;
+        }
+        if (imageFences_[imageIndex] != VK_NULL_HANDLE) {
+            result = waitForFences_(
+                device_,
+                1,
+                &imageFences_[imageIndex],
+                VK_TRUE,
+                std::numeric_limits<std::uint64_t>::max()
+            );
+            if (result != VK_SUCCESS) {
+                setCameraVulkanError("wait_camera_image_fence", result);
+                return false;
+            }
+        }
+        imageFences_[imageIndex] = frameFences_[frameIndex];
+        result = resetFences_(device_, 1, &frameFences_[frameIndex]);
+        if (result != VK_SUCCESS) {
+            setCameraVulkanError("reset_camera_frame_fence", result);
+            return false;
+        }
+        if (!recordCameraCommandBuffer(imageIndex)) {
+            return false;
+        }
+
+        std::array<VkSemaphore, 2> waitSemaphores{
+            imageAvailableSemaphores_[frameIndex],
+            pendingCameraFrame_.acquireSemaphore,
+        };
+        std::array<VkPipelineStageFlags, 2> waitStages{
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        };
+        const std::uint32_t waitCount = pendingCameraFrame_.acquireSemaphore == VK_NULL_HANDLE
+            ? 1U
+            : 2U;
+        const std::array<VkSemaphore, 2> signalSemaphores{
+            renderFinishedSemaphores_[frameIndex],
+            pendingCameraFrame_.releaseSemaphore,
+        };
+        const VkSubmitInfo submitInfo{
+            .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+            .pNext = nullptr,
+            .waitSemaphoreCount = waitCount,
+            .pWaitSemaphores = waitSemaphores.data(),
+            .pWaitDstStageMask = waitStages.data(),
+            .commandBufferCount = 1,
+            .pCommandBuffers = &commandBuffers_[imageIndex],
+            .signalSemaphoreCount = static_cast<std::uint32_t>(signalSemaphores.size()),
+            .pSignalSemaphores = signalSemaphores.data(),
+        };
+        result = queueSubmit_(graphicsQueue_, 1, &submitInfo, frameFences_[frameIndex]);
+        if (result != VK_SUCCESS) {
+            setCameraVulkanError("submit_camera_frame", result);
+            return false;
+        }
+        const VkPresentInfoKHR presentInfo{
+            .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+            .pNext = nullptr,
+            .waitSemaphoreCount = 1,
+            .pWaitSemaphores = &renderFinishedSemaphores_[frameIndex],
+            .swapchainCount = 1,
+            .pSwapchains = &swapchain_,
+            .pImageIndices = &imageIndex,
+            .pResults = nullptr,
+        };
+        result = queuePresent_(graphicsQueue_, &presentInfo);
+        if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
+            waitForFences_(
+                device_,
+                1,
+                &frameFences_[frameIndex],
+                VK_TRUE,
+                std::numeric_limits<std::uint64_t>::max()
+            );
+            setCameraVulkanError("present_camera_frame", result);
+            return false;
+        }
+        presentedFrames_.fetch_add(1);
+        cameraRenderedFrames_.fetch_add(1);
+        currentFrame_ = (currentFrame_ + 1) % kFramesInFlight;
+        return true;
+    }
+
+    bool recordCameraCommandBuffer(std::uint32_t imageIndex) {
+        VkCommandBuffer commandBuffer = commandBuffers_[imageIndex];
+        VkResult result = resetCommandBuffer_(commandBuffer, 0);
+        if (result != VK_SUCCESS) {
+            setCameraVulkanError("reset_camera_command_buffer", result);
+            return false;
+        }
+        const VkCommandBufferBeginInfo beginInfo{
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+            .pNext = nullptr,
+            .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+            .pInheritanceInfo = nullptr,
+        };
+        result = beginCommandBuffer_(commandBuffer, &beginInfo);
+        if (result != VK_SUCCESS) {
+            setCameraVulkanError("begin_camera_command_buffer", result);
+            return false;
+        }
+        const VkImageMemoryBarrier acquireBarrier{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .pNext = nullptr,
+            .srcAccessMask = 0,
+            .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+            .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+            .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT,
+            .dstQueueFamilyIndex = queueFamilyIndex_,
+            .image = pendingCameraFrame_.importedImage,
+            .subresourceRange = VkImageSubresourceRange{
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+        };
+        cmdPipelineBarrier_(
+            commandBuffer,
+            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            0,
+            0,
+            nullptr,
+            0,
+            nullptr,
+            1,
+            &acquireBarrier
+        );
+        const VkClearValue clearValue{
+            .color = VkClearColorValue{.float32 = {0.0F, 0.0F, 0.0F, 1.0F}},
+        };
+        const VkRenderPassBeginInfo renderPassInfo{
+            .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+            .pNext = nullptr,
+            .renderPass = renderPass_,
+            .framebuffer = framebuffers_[imageIndex],
+            .renderArea = VkRect2D{
+                .offset = VkOffset2D{.x = 0, .y = 0},
+                .extent = extent_,
+            },
+            .clearValueCount = 1,
+            .pClearValues = &clearValue,
+        };
+        cmdBeginRenderPass_(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+        cmdBindPipeline_(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, cameraPipeline_);
+        cmdBindDescriptorSets_(
+            commandBuffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            cameraPipelineLayout_,
+            0,
+            1,
+            &pendingCameraFrame_.descriptorSet,
+            0,
+            nullptr
+        );
+        cmdPushConstants_(
+            commandBuffer,
+            cameraPipelineLayout_,
+            VK_SHADER_STAGE_FRAGMENT_BIT,
+            0,
+            static_cast<std::uint32_t>(sizeof(float) * kTransformElementCount),
+            pendingCameraFrame_.transform.data()
+        );
+        cmdDraw_(commandBuffer, 3, 1, 0, 0);
+        cmdEndRenderPass_(commandBuffer);
+        const VkImageMemoryBarrier releaseBarrier{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .pNext = nullptr,
+            .srcAccessMask = VK_ACCESS_SHADER_READ_BIT,
+            .dstAccessMask = 0,
+            .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+            .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+            .srcQueueFamilyIndex = queueFamilyIndex_,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT,
+            .image = pendingCameraFrame_.importedImage,
+            .subresourceRange = acquireBarrier.subresourceRange,
+        };
+        cmdPipelineBarrier_(
+            commandBuffer,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+            0,
+            0,
+            nullptr,
+            0,
+            nullptr,
+            1,
+            &releaseBarrier
+        );
+        result = endCommandBuffer_(commandBuffer);
+        if (result != VK_SUCCESS) {
+            setCameraVulkanError("end_camera_command_buffer", result);
+            return false;
+        }
+        return true;
+    }
+
+    bool finalizePendingCameraFrame() {
+        if (pendingCameraFrame_.image == nullptr || pendingCameraFrame_.releaseFenceFd < 0) {
+            return false;
+        }
+        pollfd fencePoll{
+            .fd = pendingCameraFrame_.releaseFenceFd,
+            .events = POLLIN,
+            .revents = 0,
+        };
+        const int pollResult = poll(&fencePoll, 1, 0);
+        if (pollResult == 0) {
+            return false;
+        }
+        if (pollResult < 0) {
+            setCameraError("release_fence_poll_failed");
+            return false;
+        }
+        closeFileDescriptor(pendingCameraFrame_.releaseFenceFd);
+        pendingCameraFrame_.releaseFenceFd = -1;
+        destroyPendingCameraGpuResources();
+        return true;
+    }
+
+    jobject deliverPendingCameraFrame(JNIEnv* environment, jlongArray metadata) {
+        if (pendingCameraFrame_.image == nullptr ||
+            pendingCameraFrame_.hardwareBuffer == nullptr) {
+            return nullptr;
+        }
+        jobject hardwareBuffer = mediaDispatch_.toJavaHardwareBuffer(
+            environment,
+            pendingCameraFrame_.hardwareBuffer
+        );
+        if (hardwareBuffer == nullptr) {
+            destroyPendingCameraFrame(/* deleteImage = */ true);
+            cameraDroppedFrames_.fetch_add(1);
+            setCameraError("java_hardware_buffer_unavailable");
+            return nullptr;
+        }
+        const std::array<jlong, kCameraMetadataCount> values{
+            static_cast<jlong>(pendingCameraFrame_.token),
+            static_cast<jlong>(pendingCameraFrame_.timestampNs),
+            static_cast<jlong>(pendingCameraFrame_.description.width),
+            static_cast<jlong>(pendingCameraFrame_.description.height),
+            static_cast<jlong>(pendingCameraFrame_.description.format),
+            static_cast<jlong>(pendingCameraFrame_.description.usage),
+            pendingCameraFrame_.acquireFenceImported ? 1L : 0L,
+            pendingCameraFrame_.releaseFenceExported ? 1L : 0L,
+        };
+        environment->SetLongArrayRegion(
+            metadata,
+            0,
+            static_cast<jsize>(values.size()),
+            values.data()
+        );
+        if (environment->ExceptionCheck() == JNI_TRUE) {
+            environment->DeleteLocalRef(hardwareBuffer);
+            destroyPendingCameraFrame(/* deleteImage = */ true);
+            cameraDroppedFrames_.fetch_add(1);
+            return nullptr;
+        }
+        deliveredCameraFrames_.emplace(
+            pendingCameraFrame_.token,
+            pendingCameraFrame_.image
+        );
+        pendingCameraFrame_.image = nullptr;
+        pendingCameraFrame_ = PendingCameraFrame{};
+        cameraDeliveredFrames_.fetch_add(1);
+        return hardwareBuffer;
+    }
+
+    void destroyPendingCameraGpuResources() {
+        if (device_ == VK_NULL_HANDLE) {
+            return;
+        }
+        if (pendingCameraFrame_.descriptorSet != VK_NULL_HANDLE &&
+            cameraDescriptorPool_ != VK_NULL_HANDLE) {
+            freeDescriptorSets_(
+                device_,
+                cameraDescriptorPool_,
+                1,
+                &pendingCameraFrame_.descriptorSet
+            );
+            pendingCameraFrame_.descriptorSet = VK_NULL_HANDLE;
+        }
+        if (pendingCameraFrame_.importedImageView != VK_NULL_HANDLE) {
+            destroyImageView_(device_, pendingCameraFrame_.importedImageView, nullptr);
+            pendingCameraFrame_.importedImageView = VK_NULL_HANDLE;
+        }
+        if (pendingCameraFrame_.importedImage != VK_NULL_HANDLE) {
+            destroyImage_(device_, pendingCameraFrame_.importedImage, nullptr);
+            pendingCameraFrame_.importedImage = VK_NULL_HANDLE;
+        }
+        if (pendingCameraFrame_.importedMemory != VK_NULL_HANDLE) {
+            freeMemory_(device_, pendingCameraFrame_.importedMemory, nullptr);
+            pendingCameraFrame_.importedMemory = VK_NULL_HANDLE;
+        }
+        if (pendingCameraFrame_.releaseSemaphore != VK_NULL_HANDLE) {
+            destroySemaphore_(device_, pendingCameraFrame_.releaseSemaphore, nullptr);
+            pendingCameraFrame_.releaseSemaphore = VK_NULL_HANDLE;
+        }
+        if (pendingCameraFrame_.acquireSemaphore != VK_NULL_HANDLE) {
+            destroySemaphore_(device_, pendingCameraFrame_.acquireSemaphore, nullptr);
+            pendingCameraFrame_.acquireSemaphore = VK_NULL_HANDLE;
+        }
+    }
+
+    void destroyPendingCameraFrame(bool deleteImage) {
+        closeFileDescriptor(pendingCameraFrame_.releaseFenceFd);
+        pendingCameraFrame_.releaseFenceFd = -1;
+        destroyPendingCameraGpuResources();
+        if (deleteImage && pendingCameraFrame_.image != nullptr &&
+            mediaDispatch_.deleteImage != nullptr) {
+            mediaDispatch_.deleteImage(pendingCameraFrame_.image);
+        }
+        pendingCameraFrame_ = PendingCameraFrame{};
+    }
+
+    void destroyCameraPipeline() {
+        if (device_ == VK_NULL_HANDLE) {
+            return;
+        }
+        if (cameraPipeline_ != VK_NULL_HANDLE) {
+            destroyPipeline_(device_, cameraPipeline_, nullptr);
+            cameraPipeline_ = VK_NULL_HANDLE;
+        }
+        if (cameraPipelineLayout_ != VK_NULL_HANDLE) {
+            destroyPipelineLayout_(device_, cameraPipelineLayout_, nullptr);
+            cameraPipelineLayout_ = VK_NULL_HANDLE;
+        }
+        if (cameraDescriptorPool_ != VK_NULL_HANDLE) {
+            destroyDescriptorPool_(device_, cameraDescriptorPool_, nullptr);
+            cameraDescriptorPool_ = VK_NULL_HANDLE;
+        }
+        if (cameraDescriptorSetLayout_ != VK_NULL_HANDLE) {
+            destroyDescriptorSetLayout_(device_, cameraDescriptorSetLayout_, nullptr);
+            cameraDescriptorSetLayout_ = VK_NULL_HANDLE;
+        }
+        if (cameraSampler_ != VK_NULL_HANDLE) {
+            destroySampler_(device_, cameraSampler_, nullptr);
+            cameraSampler_ = VK_NULL_HANDLE;
+        }
+        if (cameraYcbcrConversion_ != VK_NULL_HANDLE) {
+            destroySamplerYcbcrConversion_(device_, cameraYcbcrConversion_, nullptr);
+            cameraYcbcrConversion_ = VK_NULL_HANDLE;
+        }
+        cameraPipelineVkFormat_ = VK_FORMAT_UNDEFINED;
+        cameraPipelineExternalFormat_ = 0;
+    }
+
+    [[nodiscard]] static std::uint32_t firstSetBit(std::uint32_t mask) {
+        for (std::uint32_t index = 0; index < 32U; ++index) {
+            if ((mask & (1U << index)) != 0U) {
+                return index;
+            }
+        }
+        return std::numeric_limits<std::uint32_t>::max();
+    }
+
+    static void closeFileDescriptor(int fileDescriptor) {
+        if (fileDescriptor >= 0) {
+            ::close(fileDescriptor);
+        }
+    }
+
     void renderLoop() {
         {
             std::lock_guard lock(statusMutex_);
@@ -856,6 +2342,7 @@ private:
     }
 
     bool renderFrame() {
+        std::lock_guard renderLock(renderMutex_);
         const std::uint32_t frameIndex = currentFrame_ % kFramesInFlight;
         VkResult result = waitForFences_(
             device_,
@@ -907,6 +2394,9 @@ private:
         result = resetFences_(device_, 1, &frameFences_[frameIndex]);
         if (result != VK_SUCCESS) {
             setVulkanError("reset_frame_fence", result);
+            return false;
+        }
+        if (!recordClearCommandBuffer(imageIndex, true)) {
             return false;
         }
         const VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
@@ -1018,6 +2508,15 @@ private:
         setError(operation + "_vk_" + std::to_string(result));
     }
 
+    void setCameraError(const std::string& reason) {
+        std::lock_guard lock(statusMutex_);
+        cameraError_ = reason;
+    }
+
+    void setCameraVulkanError(const std::string& operation, VkResult result) {
+        setCameraError(operation + "_vk_" + std::to_string(result));
+    }
+
     [[nodiscard]] static std::string versionName(std::uint32_t version) {
         std::ostringstream output;
         output << VK_API_VERSION_MAJOR(version) << '.'
@@ -1068,17 +2567,50 @@ private:
     std::vector<VkFence> frameFences_;
     std::vector<VkFence> imageFences_;
 
+    MediaDispatch mediaDispatch_;
+    AImageReader* cameraReader_ = nullptr;
+    ANativeWindow* cameraWindow_ = nullptr;
+    std::uint32_t cameraWidth_ = 0;
+    std::uint32_t cameraHeight_ = 0;
+    bool cameraPipelineReady_ = false;
+    PendingCameraFrame pendingCameraFrame_;
+    std::unordered_map<std::uint64_t, AImage*> deliveredCameraFrames_;
+    std::uint64_t nextCameraToken_ = 1;
+    VkSamplerYcbcrConversion cameraYcbcrConversion_ = VK_NULL_HANDLE;
+    VkSampler cameraSampler_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout cameraDescriptorSetLayout_ = VK_NULL_HANDLE;
+    VkDescriptorPool cameraDescriptorPool_ = VK_NULL_HANDLE;
+    VkPipelineLayout cameraPipelineLayout_ = VK_NULL_HANDLE;
+    VkPipeline cameraPipeline_ = VK_NULL_HANDLE;
+    VkFormat cameraPipelineVkFormat_ = VK_FORMAT_UNDEFINED;
+    std::uint64_t cameraPipelineExternalFormat_ = 0;
+
     std::atomic<bool> ready_{false};
     std::atomic<bool> stopRequested_{false};
     std::atomic<std::uint64_t> presentedFrames_{0};
+    std::atomic<std::uint64_t> cameraImportedFrames_{0};
+    std::atomic<std::uint64_t> cameraRenderedFrames_{0};
+    std::atomic<std::uint64_t> cameraDeliveredFrames_{0};
+    std::atomic<std::uint64_t> cameraReleasedFrames_{0};
+    std::atomic<std::uint64_t> cameraDroppedFrames_{0};
+    std::atomic<std::uint64_t> cameraAcquireFences_{0};
+    std::atomic<std::uint64_t> cameraReleaseFences_{0};
+    std::atomic<std::uint32_t> lastCameraWidth_{0};
+    std::atomic<std::uint32_t> lastCameraHeight_{0};
+    std::atomic<std::uint32_t> lastCameraFormat_{0};
+    std::atomic<VkFormat> lastCameraVkFormat_{VK_FORMAT_UNDEFINED};
+    std::atomic<std::uint64_t> lastCameraExternalFormat_{0};
     std::uint32_t currentFrame_ = 0;
     std::thread renderThread_;
     mutable std::mutex threadMutex_;
     mutable std::mutex statusMutex_;
+    mutable std::mutex cameraMutex_;
+    std::mutex renderMutex_;
     std::mutex waitMutex_;
     std::condition_variable wakeCondition_;
     std::string status_ = "initializing";
     std::string errorReason_;
+    std::string cameraError_;
     std::string deviceName_ = "none";
     std::uint32_t deviceApiVersion_ = 0;
 
@@ -1112,8 +2644,14 @@ private:
     PFN_vkAllocateCommandBuffers allocateCommandBuffers_ = nullptr;
     PFN_vkBeginCommandBuffer beginCommandBuffer_ = nullptr;
     PFN_vkEndCommandBuffer endCommandBuffer_ = nullptr;
+    PFN_vkResetCommandBuffer resetCommandBuffer_ = nullptr;
     PFN_vkCmdBeginRenderPass cmdBeginRenderPass_ = nullptr;
     PFN_vkCmdEndRenderPass cmdEndRenderPass_ = nullptr;
+    PFN_vkCmdPipelineBarrier cmdPipelineBarrier_ = nullptr;
+    PFN_vkCmdBindPipeline cmdBindPipeline_ = nullptr;
+    PFN_vkCmdBindDescriptorSets cmdBindDescriptorSets_ = nullptr;
+    PFN_vkCmdPushConstants cmdPushConstants_ = nullptr;
+    PFN_vkCmdDraw cmdDraw_ = nullptr;
     PFN_vkCreateSemaphore createSemaphore_ = nullptr;
     PFN_vkDestroySemaphore destroySemaphore_ = nullptr;
     PFN_vkCreateFence createFence_ = nullptr;
@@ -1124,6 +2662,32 @@ private:
     PFN_vkQueueSubmit queueSubmit_ = nullptr;
     PFN_vkQueuePresentKHR queuePresent_ = nullptr;
     PFN_vkDeviceWaitIdle deviceWaitIdle_ = nullptr;
+    PFN_vkCreateImage createImage_ = nullptr;
+    PFN_vkDestroyImage destroyImage_ = nullptr;
+    PFN_vkGetImageMemoryRequirements getImageMemoryRequirements_ = nullptr;
+    PFN_vkAllocateMemory allocateMemory_ = nullptr;
+    PFN_vkFreeMemory freeMemory_ = nullptr;
+    PFN_vkBindImageMemory bindImageMemory_ = nullptr;
+    PFN_vkGetAndroidHardwareBufferPropertiesANDROID getAndroidHardwareBufferProperties_ = nullptr;
+    PFN_vkCreateSamplerYcbcrConversion createSamplerYcbcrConversion_ = nullptr;
+    PFN_vkDestroySamplerYcbcrConversion destroySamplerYcbcrConversion_ = nullptr;
+    PFN_vkCreateSampler createSampler_ = nullptr;
+    PFN_vkDestroySampler destroySampler_ = nullptr;
+    PFN_vkCreateShaderModule createShaderModule_ = nullptr;
+    PFN_vkDestroyShaderModule destroyShaderModule_ = nullptr;
+    PFN_vkCreateDescriptorSetLayout createDescriptorSetLayout_ = nullptr;
+    PFN_vkDestroyDescriptorSetLayout destroyDescriptorSetLayout_ = nullptr;
+    PFN_vkCreateDescriptorPool createDescriptorPool_ = nullptr;
+    PFN_vkDestroyDescriptorPool destroyDescriptorPool_ = nullptr;
+    PFN_vkAllocateDescriptorSets allocateDescriptorSets_ = nullptr;
+    PFN_vkFreeDescriptorSets freeDescriptorSets_ = nullptr;
+    PFN_vkUpdateDescriptorSets updateDescriptorSets_ = nullptr;
+    PFN_vkCreatePipelineLayout createPipelineLayout_ = nullptr;
+    PFN_vkDestroyPipelineLayout destroyPipelineLayout_ = nullptr;
+    PFN_vkCreateGraphicsPipelines createGraphicsPipelines_ = nullptr;
+    PFN_vkDestroyPipeline destroyPipeline_ = nullptr;
+    PFN_vkImportSemaphoreFdKHR importSemaphoreFd_ = nullptr;
+    PFN_vkGetSemaphoreFdKHR getSemaphoreFd_ = nullptr;
 };
 
 [[nodiscard]] VulkanDiagnosticRuntime* fromHandle(jlong handle) {
@@ -1207,4 +2771,73 @@ Java_com_example_armakeup_render_NativeVulkanDiagnosticRuntime_nativeDiagnostic(
         ? "status=error reason=invalid_native_handle"
         : runtime->diagnostic();
     return environment->NewStringUTF(diagnostic.c_str());
+}
+
+extern "C" JNIEXPORT jobject JNICALL
+Java_com_example_armakeup_render_NativeVulkanDiagnosticRuntime_nativeConfigureCamera(
+    JNIEnv* environment,
+    jobject /* runtime */,
+    jlong handle,
+    jint width,
+    jint height
+) {
+    VulkanDiagnosticRuntime* runtime = fromHandle(handle);
+    if (runtime == nullptr || width <= 0 || height <= 0) {
+        return nullptr;
+    }
+    return runtime->configureCamera(
+        environment,
+        static_cast<std::uint32_t>(width),
+        static_cast<std::uint32_t>(height)
+    );
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_example_armakeup_render_NativeVulkanDiagnosticRuntime_nativeIsCameraBridgeReady(
+    JNIEnv* /* environment */,
+    jobject /* runtime */,
+    jlong handle
+) {
+    const VulkanDiagnosticRuntime* runtime = fromHandle(handle);
+    return runtime != nullptr && runtime->isCameraBridgeReady() ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jobject JNICALL
+Java_com_example_armakeup_render_NativeVulkanDiagnosticRuntime_nativeAcquireCameraFrame(
+    JNIEnv* environment,
+    jobject /* runtime */,
+    jlong handle,
+    jlongArray metadata,
+    jfloatArray uvTransform
+) {
+    VulkanDiagnosticRuntime* runtime = fromHandle(handle);
+    if (runtime == nullptr) {
+        return nullptr;
+    }
+    return runtime->acquireCameraFrame(environment, metadata, uvTransform);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_example_armakeup_render_NativeVulkanDiagnosticRuntime_nativeReleaseCameraFrame(
+    JNIEnv* /* environment */,
+    jobject /* runtime */,
+    jlong handle,
+    jlong token
+) {
+    VulkanDiagnosticRuntime* runtime = fromHandle(handle);
+    if (runtime != nullptr && token > 0) {
+        runtime->releaseCameraFrame(static_cast<std::uint64_t>(token));
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_example_armakeup_render_NativeVulkanDiagnosticRuntime_nativeCloseCamera(
+    JNIEnv* /* environment */,
+    jobject /* runtime */,
+    jlong handle
+) {
+    VulkanDiagnosticRuntime* runtime = fromHandle(handle);
+    if (runtime != nullptr) {
+        runtime->closeCamera();
+    }
 }

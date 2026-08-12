@@ -1,13 +1,11 @@
 package com.example.armakeup.tracking
 
 import android.content.Context
-import android.graphics.Bitmap
 import android.os.SystemClock
 import androidx.annotation.StringRes
 import androidx.camera.core.ImageProxy
-import androidx.core.graphics.createBitmap
 import com.example.armakeup.R
-import com.google.mediapipe.framework.image.BitmapImageBuilder
+import com.google.mediapipe.framework.image.ByteBufferImageBuilder
 import com.google.mediapipe.framework.image.MPImage
 import com.google.mediapipe.tasks.core.BaseOptions
 import com.google.mediapipe.tasks.core.Delegate
@@ -15,6 +13,7 @@ import com.google.mediapipe.tasks.vision.core.ImageProcessingOptions
 import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.facelandmarker.FaceLandmarker
 import com.google.mediapipe.tasks.vision.facelandmarker.FaceLandmarkerResult
+import java.nio.ByteBuffer
 import java.util.ArrayDeque
 import java.util.concurrent.Executor
 import java.util.concurrent.RejectedExecutionException
@@ -26,7 +25,7 @@ class FaceLandmarkerTracker(
 ) : AutoCloseable {
 
     private val applicationContext = context.applicationContext
-    private val bitmapPool = ArrayDeque<Bitmap>(BITMAP_POOL_CAPACITY)
+    private val frameBufferPool = ArrayDeque<RgbaFrameBuffer>(FRAME_BUFFER_POOL_CAPACITY)
     private val landmarkPredictor = LandmarkMotionPredictor()
     private val frameTimestampResolver = CameraFrameTimestampResolver()
     private var faceLandmarker: FaceLandmarker? = null
@@ -102,33 +101,35 @@ class FaceLandmarkerTracker(
         val sourceWidth = imageProxy.width
         val sourceHeight = imageProxy.height
         val rotationDegrees = imageProxy.imageInfo.rotationDegrees
+        val sensorTimestampNs = imageProxy.imageInfo.timestamp
         val frameTimestampMs = frameTimestampResolver.resolve(
-            cameraTimestampNs = imageProxy.imageInfo.timestamp,
+            cameraTimestampNs = sensorTimestampNs,
             nowElapsedRealtimeNs = SystemClock.elapsedRealtimeNanos(),
             nowUptimeMs = SystemClock.uptimeMillis(),
         )
 
         val reusablePending = pendingFrame?.takeIf {
             inFlightFrame != null &&
-                it.bitmap.width == sourceWidth &&
-                it.bitmap.height == sourceHeight
+                it.frameBuffer.width == sourceWidth &&
+                it.frameBuffer.height == sourceHeight
         }
-        val bitmap = reusablePending?.bitmap ?: obtainBitmap(sourceWidth, sourceHeight)
+        val frameBuffer = reusablePending?.frameBuffer
+            ?: obtainFrameBuffer(sourceWidth, sourceHeight)
 
         try {
             imageProxy.use { proxy ->
-                proxy.planes[0].buffer.rewind()
-                bitmap.copyPixelsFromBuffer(proxy.planes[0].buffer)
+                copyRgbaPixels(proxy, frameBuffer.buffer)
             }
         } catch (error: RuntimeException) {
-            if (reusablePending == null) releaseBitmap(bitmap)
+            if (reusablePending == null) releaseFrameBuffer(frameBuffer)
             listener.onTrackerError(error.message ?: "Frame copy failed")
             return
         }
 
         val frame = PreparedFrame(
-            bitmap = bitmap,
+            frameBuffer = frameBuffer,
             timestampMs = frameTimestampMs,
+            sensorTimestampNs = sensorTimestampNs,
             rotationDegrees = rotationDegrees,
         )
 
@@ -136,7 +137,7 @@ class FaceLandmarkerTracker(
             submit(frame)
         } else {
             if (reusablePending == null) {
-                pendingFrame?.let { releaseBitmap(it.bitmap) }
+                pendingFrame?.let { releaseFrameBuffer(it.frameBuffer) }
             }
             pendingFrame = frame
         }
@@ -145,11 +146,16 @@ class FaceLandmarkerTracker(
     private fun submit(frame: PreparedFrame) {
         val landmarker = faceLandmarker
         if (closed || landmarker == null) {
-            releaseBitmap(frame.bitmap)
+            releaseFrameBuffer(frame.frameBuffer)
             return
         }
 
-        val mpImage = BitmapImageBuilder(frame.bitmap).build()
+        val mpImage = ByteBufferImageBuilder(
+            frame.frameBuffer.buffer,
+            frame.frameBuffer.width,
+            frame.frameBuffer.height,
+            MPImage.IMAGE_FORMAT_RGBA,
+        ).build()
         val processingOptions = ImageProcessingOptions.builder()
             .setRotationDegrees(frame.rotationDegrees)
             .build()
@@ -162,7 +168,7 @@ class FaceLandmarkerTracker(
             inFlightFrame = null
             inFlightImage = null
             mpImage.close()
-            releaseBitmap(frame.bitmap)
+            releaseFrameBuffer(frame.frameBuffer)
             submitLatestPendingFrame()
             listener.onTrackerError(error.message ?: "Frame processing failed")
         }
@@ -180,9 +186,9 @@ class FaceLandmarkerTracker(
         }
 
         val rotated = frame.rotationDegrees % 180 != 0
-        val inputWidth = if (rotated) frame.bitmap.height else frame.bitmap.width
-        val inputHeight = if (rotated) frame.bitmap.width else frame.bitmap.height
-        releaseBitmap(frame.bitmap)
+        val inputWidth = if (rotated) frame.frameBuffer.height else frame.frameBuffer.width
+        val inputHeight = if (rotated) frame.frameBuffer.width else frame.frameBuffer.height
+        releaseFrameBuffer(frame.frameBuffer)
         submitLatestPendingFrame()
 
         val resultTimestampMs = SystemClock.uptimeMillis()
@@ -213,6 +219,7 @@ class FaceLandmarkerTracker(
                 inputHeight = inputHeight,
                 rotationDegrees = frame.rotationDegrees,
                 mirrorHorizontal = true,
+                sensorTimestampNs = frame.sensorTimestampNs,
                 latencyMs = (resultTimestampMs - frame.timestampMs).coerceAtLeast(0L),
                 delegate = activeDelegate,
             ),
@@ -224,7 +231,7 @@ class FaceLandmarkerTracker(
         inFlightImage?.close()
         inFlightImage = null
         inFlightFrame = null
-        frame?.let { releaseBitmap(it.bitmap) }
+        frame?.let { releaseFrameBuffer(it.frameBuffer) }
         submitLatestPendingFrame()
         listener.onTrackerError(error.message ?: "MediaPipe inference failed")
     }
@@ -243,25 +250,61 @@ class FaceLandmarkerTracker(
         }
     }
 
-    private fun obtainBitmap(width: Int, height: Int): Bitmap {
-        val iterator = bitmapPool.iterator()
+    private fun obtainFrameBuffer(width: Int, height: Int): RgbaFrameBuffer {
+        val iterator = frameBufferPool.iterator()
         while (iterator.hasNext()) {
             val candidate = iterator.next()
-            if (candidate.width == width && candidate.height == height && !candidate.isRecycled) {
+            if (candidate.width == width && candidate.height == height) {
                 iterator.remove()
+                candidate.buffer.clear()
                 return candidate
             }
         }
-        return createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        return RgbaFrameBuffer(
+            buffer = ByteBuffer.allocateDirect(width * height * RGBA_BYTES_PER_PIXEL),
+            width = width,
+            height = height,
+        )
     }
 
-    private fun releaseBitmap(bitmap: Bitmap) {
-        if (bitmap.isRecycled) return
-        if (bitmapPool.size < BITMAP_POOL_CAPACITY) {
-            bitmapPool.addLast(bitmap)
-        } else {
-            bitmap.recycle()
+    private fun releaseFrameBuffer(frameBuffer: RgbaFrameBuffer) {
+        frameBuffer.buffer.clear()
+        if (frameBufferPool.size < FRAME_BUFFER_POOL_CAPACITY) {
+            frameBufferPool.addLast(frameBuffer)
         }
+    }
+
+    private fun copyRgbaPixels(imageProxy: ImageProxy, target: ByteBuffer) {
+        val plane = imageProxy.planes.firstOrNull()
+            ?: throw IllegalArgumentException("RGBA frame has no image plane")
+        require(plane.pixelStride == RGBA_BYTES_PER_PIXEL) {
+            "Unsupported RGBA pixel stride ${plane.pixelStride}"
+        }
+
+        val rowBytes = imageProxy.width * RGBA_BYTES_PER_PIXEL
+        val requiredSourceBytes = (imageProxy.height - 1) * plane.rowStride + rowBytes
+        val source = plane.buffer.duplicate().apply { clear() }
+        require(requiredSourceBytes <= source.capacity()) {
+            "RGBA plane is smaller than its declared row layout"
+        }
+        require(target.capacity() >= rowBytes * imageProxy.height) {
+            "Reusable RGBA buffer is too small"
+        }
+
+        target.clear()
+        if (plane.rowStride == rowBytes) {
+            source.limit(rowBytes * imageProxy.height)
+            target.put(source)
+        } else {
+            repeat(imageProxy.height) { row ->
+                val rowStart = row * plane.rowStride
+                source.clear()
+                source.position(rowStart)
+                source.limit(rowStart + rowBytes)
+                target.put(source)
+            }
+        }
+        target.flip()
     }
 
     private fun executeCallback(inputImage: MPImage? = null, block: () -> Unit) {
@@ -279,19 +322,23 @@ class FaceLandmarkerTracker(
         faceLandmarker = null
         inFlightImage?.close()
         inFlightImage = null
-        inFlightFrame?.bitmap?.recycle()
         inFlightFrame = null
-        pendingFrame?.bitmap?.recycle()
         pendingFrame = null
-        bitmapPool.forEach(Bitmap::recycle)
-        bitmapPool.clear()
+        frameBufferPool.clear()
         landmarkPredictor.reset()
         lastDeliveredLandmarks = null
     }
 
+    private data class RgbaFrameBuffer(
+        val buffer: ByteBuffer,
+        val width: Int,
+        val height: Int,
+    )
+
     private data class PreparedFrame(
-        val bitmap: Bitmap,
+        val frameBuffer: RgbaFrameBuffer,
         val timestampMs: Long,
+        val sensorTimestampNs: Long,
         val rotationDegrees: Int,
     )
 
@@ -301,6 +348,7 @@ class FaceLandmarkerTracker(
         val inputHeight: Int,
         val rotationDegrees: Int,
         val mirrorHorizontal: Boolean,
+        val sensorTimestampNs: Long,
         val latencyMs: Long,
         val delegate: InferenceDelegate,
     )
@@ -319,6 +367,7 @@ class FaceLandmarkerTracker(
     companion object {
         private const val MODEL_ASSET_PATH = "face_landmarker.task"
         private const val MIN_CONFIDENCE = 0.5f
-        private const val BITMAP_POOL_CAPACITY = 2
+        private const val FRAME_BUFFER_POOL_CAPACITY = 2
+        private const val RGBA_BYTES_PER_PIXEL = 4
     }
 }

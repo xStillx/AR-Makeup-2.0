@@ -49,6 +49,7 @@ import com.google.android.filament.android.FilamentHelper
 import com.google.android.filament.android.UiHelper
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.concurrent.atomic.AtomicBoolean
 
 /** Main-thread-owned Filament compositor. */
 internal class FilamentMakeupRenderer(
@@ -107,6 +108,7 @@ internal class FilamentMakeupRenderer(
     private var cameraInput: CameraInput? = null
     private var activeSurfaceRequest: SurfaceRequest? = null
     private var latestLandmarks: LandmarkState? = null
+    private var latestCameraTransform: VulkanCameraTransform? = null
     private var lipEntityVisible = false
     private var resumed = false
     private var destroyRequested = false
@@ -119,6 +121,8 @@ internal class FilamentMakeupRenderer(
     internal val renderBackendLabelRes: Int
         get() = when {
             activeBackend == MakeupRenderBackend.VULKAN -> R.string.render_backend_vulkan
+            cameraInput is VulkanCameraInput ->
+                R.string.render_backend_opengl_fallback_vulkan_camera
             nativeVulkanRuntime?.isReady == true ->
                 R.string.render_backend_opengl_fallback_vulkan_runtime
             engineSelection.requestedBackend == MakeupRenderBackend.VULKAN ->
@@ -175,6 +179,7 @@ internal class FilamentMakeupRenderer(
         sourceHeight: Int,
         rotationDegrees: Int,
         mirrorHorizontal: Boolean,
+        sensorTimestampNs: Long,
     ) {
         ensureMainThread()
         latestLandmarks = LandmarkState(
@@ -183,6 +188,7 @@ internal class FilamentMakeupRenderer(
             sourceHeight,
             rotationDegrees,
             mirrorHorizontal,
+            sensorTimestampNs,
         )
     }
 
@@ -280,7 +286,7 @@ internal class FilamentMakeupRenderer(
         }
         current?.close()
         val created = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            AcquiredCameraInput(width, height)
+            createVulkanCameraInputOrNull(width, height) ?: AcquiredCameraInput(width, height)
         } else {
             NativeCameraInput(width, height)
         }
@@ -290,6 +296,17 @@ internal class FilamentMakeupRenderer(
         )
         cameraInput = created
         return created
+    }
+
+    @RequiresApi(Build.VERSION_CODES.Q)
+    private fun createVulkanCameraInputOrNull(width: Int, height: Int): CameraInput? {
+        val runtime = nativeVulkanRuntime?.takeIf { it.isReady } ?: return null
+        return runCatching {
+            VulkanCameraInput(width, height, runtime)
+        }.onFailure { error ->
+            runtime.closeCamera()
+            Log.e(NATIVE_VULKAN_LOG_TAG, "Native camera bridge unavailable; using GL reader", error)
+        }.getOrNull()
     }
 
     private fun applyCameraTransform(
@@ -311,6 +328,15 @@ internal class FilamentMakeupRenderer(
             invertDisplayHorizontally =
                 cameraInput?.requiresHorizontalUvCompensation == true,
             invertDisplayVertically = cameraInput?.requiresVerticalUvCompensation == true,
+        )
+        latestCameraTransform = VulkanCameraTransform(
+            cropLeft = cropRect.left,
+            cropTop = cropRect.top,
+            cropRight = cropRect.right,
+            cropBottom = cropRect.bottom,
+            rotationDegrees = ((info.rotationDegrees % FULL_ROTATION) + FULL_ROTATION) % FULL_ROTATION,
+            mirrorHorizontal = info.isMirroring,
+            matrix = matrix,
         )
         listOf(
             cameraMaterialInstance,
@@ -570,10 +596,10 @@ internal class FilamentMakeupRenderer(
     private fun finishDestroy() {
         if (destroyed) return
         destroyed = true
-        nativeVulkanRuntime?.close()
         hideLipEntity()
         cameraInput?.close()
         cameraInput = null
+        nativeVulkanRuntime?.close()
         destroyMesh(lipMesh)
         destroyMesh(cameraMesh)
         engine.destroyMaterialInstance(lowerLipMaterialInstance)
@@ -657,6 +683,7 @@ internal class FilamentMakeupRenderer(
         val sourceHeight: Int,
         val rotationDegrees: Int,
         val mirrorHorizontal: Boolean,
+        val sensorTimestampNs: Long,
     )
 
     private data class MeshResources(
@@ -707,6 +734,65 @@ internal class FilamentMakeupRenderer(
     }
 
     /** API 29+ OpenGL bridge with explicit HardwareBuffer acquisition and release callbacks. */
+    @RequiresApi(Build.VERSION_CODES.Q)
+    private inner class VulkanCameraInput(
+        override val width: Int,
+        override val height: Int,
+        private val runtime: NativeVulkanDiagnosticRuntime,
+    ) : CameraInput {
+        private val stream = Stream.Builder()
+            .width(width)
+            .height(height)
+            .build(engine)
+        override val surface: Surface = checkNotNull(runtime.configureCamera(width, height)) {
+            "Native Vulkan camera surface creation failed"
+        }
+        override val requiresHorizontalUvCompensation: Boolean = true
+        override val requiresVerticalUvCompensation: Boolean = true
+        private val firstFrameLogged = AtomicBoolean(false)
+
+        init {
+            cameraTexture.setExternalStream(engine, stream)
+        }
+
+        override fun pushLatestFrame() {
+            val transform = latestCameraTransform
+            if (transform == null) return
+            val frame = runtime.acquireCameraFrame(
+                transform = transform,
+                landmarkSensorTimestampNs = latestLandmarks?.sensorTimestampNs,
+            )
+            if (frame == null) return
+            try {
+                stream.setAcquiredImage(frame.hardwareBuffer, mainHandler) {
+                    runtime.releaseCameraFrame(frame)
+                }
+                if (firstFrameLogged.compareAndSet(false, true)) {
+                    val landmarkAgeMs = frame.landmarkAgeNs?.div(NANOS_PER_MILLISECOND)
+                    Log.i(
+                        NATIVE_VULKAN_LOG_TAG,
+                        "cameraFrame token=${frame.nativeToken} " +
+                            "timestampNs=${frame.sensorTimestampNs} size=${frame.width}x${frame.height} " +
+                            "format=${frame.hardwareBufferFormat} usage=${frame.hardwareBufferUsage} " +
+                            "acquireFence=${frame.acquireFenceImported} " +
+                            "releaseFence=${frame.releaseFenceExported} landmarkAgeMs=$landmarkAgeMs",
+                    )
+                }
+            } catch (error: RuntimeException) {
+                runtime.releaseCameraFrame(frame)
+                throw error
+            }
+        }
+
+        override fun close() {
+            engine.destroyStream(stream)
+            engine.flushAndWait()
+            surface.release()
+            runtime.closeCamera()
+        }
+    }
+
+    /** API 29+ fallback when the native AImageReader/importer is unavailable. */
     @RequiresApi(Build.VERSION_CODES.Q)
     private inner class AcquiredCameraInput(
         override val width: Int,
@@ -811,6 +897,8 @@ internal class FilamentMakeupRenderer(
         private const val MAX_ALPHA = 255f
         private const val MAX_COLOR_CHANNEL = 255f
         private const val ACQUIRED_MAX_IMAGES = 4
+        private const val FULL_ROTATION = 360
+        private const val NANOS_PER_MILLISECOND = 1_000_000L
         private const val RENDER_LOG_TAG = "ARMakeupRender"
         private const val NATIVE_VULKAN_LOG_TAG = "ARMakeupVulkan"
         private val IDENTITY_MATRIX = floatArrayOf(

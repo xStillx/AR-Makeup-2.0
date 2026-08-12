@@ -8,18 +8,21 @@ import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
+import android.view.Surface
 import androidx.annotation.RequiresApi
 import java.io.Closeable
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * V2.1 offscreen proof for persistent native Vulkan ownership.
+ * Persistent native Vulkan runtime and V3 camera-buffer ownership bridge.
  *
  * A tiny ImageReader-backed Android Surface receives a real Vulkan swapchain. Native code owns the
  * instance, device, queue, command buffers and synchronization while Kotlin only drains and verifies
- * presented diagnostic frames. The production camera surface remains owned by the Filament/OpenGL
- * bridge until V3 implements direct AHardwareBuffer import and fences.
+ * presented diagnostic frames. On supported devices V3 additionally creates the camera
+ * AImageReader in native code, imports every latest-only AHardwareBuffer into the same VkDevice,
+ * waits on the camera acquire sync-fd and exports a Vulkan release sync-fd before handing the
+ * buffer to the temporary Filament/OpenGL compositor.
  */
 internal class NativeVulkanDiagnosticRuntime private constructor(
     private val imageReader: ImageReader,
@@ -27,7 +30,9 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
 ) : Closeable {
 
     private val consumedFrameCount = AtomicLong(0L)
+    private val cameraFrameCount = AtomicLong(0L)
     private val firstFrameReported = AtomicBoolean(false)
+    private val cameraFrameReported = AtomicBoolean(false)
     private var nativeHandle = nativeCreate(
         imageReader.surface,
         DIAGNOSTIC_WIDTH,
@@ -36,6 +41,9 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
 
     val isReady: Boolean
         get() = nativeHandle != 0L && nativeIsReady(nativeHandle)
+
+    val isCameraBridgeReady: Boolean
+        get() = nativeHandle != 0L && nativeIsCameraBridgeReady(nativeHandle)
 
     val diagnostic: String
         get() = if (nativeHandle == 0L) {
@@ -62,11 +70,69 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
         Log.i(LOG_TAG, "stopped ${diagnostic}")
     }
 
+    fun configureCamera(width: Int, height: Int): Surface? {
+        val handle = nativeHandle
+        if (handle == 0L) return null
+        return nativeConfigureCamera(handle, width, height)?.also {
+            Log.i(LOG_TAG, "cameraConfigured=${width}x$height ${diagnostic}")
+        }
+    }
+
+    fun acquireCameraFrame(
+        transform: VulkanCameraTransform,
+        landmarkSensorTimestampNs: Long?,
+    ): VulkanCameraFrameState? {
+        val handle = nativeHandle
+        if (handle == 0L) return null
+        val metadata = LongArray(CAMERA_METADATA_COUNT)
+        val hardwareBuffer = nativeAcquireCameraFrame(
+            handle,
+            metadata,
+            transform.matrixCopy(),
+        ) ?: return null
+        return VulkanCameraFrameState(
+            hardwareBuffer = hardwareBuffer,
+            nativeToken = metadata[CAMERA_TOKEN_INDEX],
+            sensorTimestampNs = metadata[CAMERA_TIMESTAMP_INDEX],
+            width = metadata[CAMERA_WIDTH_INDEX].toInt(),
+            height = metadata[CAMERA_HEIGHT_INDEX].toInt(),
+            hardwareBufferFormat = metadata[CAMERA_FORMAT_INDEX].toInt(),
+            hardwareBufferUsage = metadata[CAMERA_USAGE_INDEX],
+            transform = transform,
+            landmarkSensorTimestampNs = landmarkSensorTimestampNs,
+            acquireFenceImported = metadata[CAMERA_ACQUIRE_FENCE_INDEX] != 0L,
+            releaseFenceExported = metadata[CAMERA_RELEASE_FENCE_INDEX] != 0L,
+        ).also { frame ->
+            val count = cameraFrameCount.incrementAndGet()
+            if (count % CAMERA_PROGRESS_INTERVAL == 0L) {
+                Log.i(
+                    LOG_TAG,
+                    "cameraProgress delivered=$count timestampNs=${frame.sensorTimestampNs} " +
+                        "landmarkAgeMs=${frame.landmarkAgeNs?.div(NANOS_PER_MILLISECOND)} " +
+                        diagnostic,
+                )
+            }
+        }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.Q)
+    fun releaseCameraFrame(frame: VulkanCameraFrameState) {
+        val handle = nativeHandle
+        if (handle != 0L) nativeReleaseCameraFrame(handle, frame.nativeToken)
+        frame.hardwareBuffer.close()
+    }
+
+    fun closeCamera() {
+        val handle = nativeHandle
+        if (handle != 0L) nativeCloseCamera(handle)
+    }
+
     override fun close() {
         val handle = nativeHandle
         nativeHandle = 0L
         if (handle != 0L) {
             nativeStop(handle)
+            nativeCloseCamera(handle)
             nativeDestroy(handle)
         }
         imageReader.setOnImageAvailableListener(null, null)
@@ -84,27 +150,37 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
 
         image.use {
             val consumed = consumedFrameCount.incrementAndGet()
+            val sample = sampleCenterPixel(image)
             if (firstFrameReported.compareAndSet(false, true)) {
-                val sample = sampleCenterPixel(image)
                 Log.i(
                     LOG_TAG,
                     "firstFrame consumed=$consumed sample=$sample",
                 )
             }
+            if (
+                sample.cameraColorVisible &&
+                cameraFrameReported.compareAndSet(false, true)
+            ) {
+                Log.i(LOG_TAG, "cameraFrameVisible consumed=$consumed sample=${sample.description}")
+            }
         }
     }
 
-    private fun sampleCenterPixel(image: Image): String {
-        val plane = image.planes.firstOrNull() ?: return "unavailable:no_plane"
+    private fun sampleCenterPixel(image: Image): PixelSample {
+        val plane = image.planes.firstOrNull()
+            ?: return PixelSample("unavailable:no_plane", cameraColorVisible = false)
         if (plane.pixelStride < RGBA_CHANNEL_COUNT) {
-            return "unavailable:pixel_stride_${plane.pixelStride}"
+            return PixelSample(
+                "unavailable:pixel_stride_${plane.pixelStride}",
+                cameraColorVisible = false,
+            )
         }
         val x = image.width / 2
         val y = image.height / 2
         val offset = y * plane.rowStride + x * plane.pixelStride
         val buffer = plane.buffer
         if (offset < 0 || offset + RGBA_CHANNEL_COUNT > buffer.limit()) {
-            return "unavailable:buffer_bounds"
+            return PixelSample("unavailable:buffer_bounds", cameraColorVisible = false)
         }
 
         val red = buffer.get(offset).toInt() and BYTE_MASK
@@ -112,7 +188,24 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
         val blue = buffer.get(offset + 2).toInt() and BYTE_MASK
         val alpha = buffer.get(offset + 3).toInt() and BYTE_MASK
         val clearVisible = alpha >= MIN_CLEAR_ALPHA && maxOf(red, green, blue) >= MIN_CLEAR_COLOR
-        return "rgba=$red,$green,$blue,$alpha clearVisible=$clearVisible"
+        val differsFromClear =
+            kotlin.math.abs(red - DIAGNOSTIC_CLEAR_RED) > CLEAR_COLOR_TOLERANCE ||
+                kotlin.math.abs(green - DIAGNOSTIC_CLEAR_GREEN) > CLEAR_COLOR_TOLERANCE ||
+                kotlin.math.abs(blue - DIAGNOSTIC_CLEAR_BLUE) > CLEAR_COLOR_TOLERANCE
+        val cameraColorVisible = alpha >= MIN_CLEAR_ALPHA && differsFromClear &&
+            maxOf(red, green, blue) >= MIN_CAMERA_COLOR
+        return PixelSample(
+            description = "rgba=$red,$green,$blue,$alpha clearVisible=$clearVisible " +
+                "cameraColorVisible=$cameraColorVisible",
+            cameraColorVisible = cameraColorVisible,
+        )
+    }
+
+    private data class PixelSample(
+        val description: String,
+        val cameraColorVisible: Boolean,
+    ) {
+        override fun toString(): String = description
     }
 
     private external fun nativeCreate(
@@ -126,6 +219,15 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
     private external fun nativeStop(handle: Long)
     private external fun nativeDestroy(handle: Long)
     private external fun nativeDiagnostic(handle: Long): String
+    private external fun nativeConfigureCamera(handle: Long, width: Int, height: Int): Surface?
+    private external fun nativeIsCameraBridgeReady(handle: Long): Boolean
+    private external fun nativeAcquireCameraFrame(
+        handle: Long,
+        metadata: LongArray,
+        uvTransform: FloatArray,
+    ): HardwareBuffer?
+    private external fun nativeReleaseCameraFrame(handle: Long, token: Long)
+    private external fun nativeCloseCamera(handle: Long)
 
     companion object {
         private const val LOG_TAG = "ARMakeupVulkanRuntime"
@@ -137,6 +239,22 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
         private const val BYTE_MASK = 0xff
         private const val MIN_CLEAR_ALPHA = 200
         private const val MIN_CLEAR_COLOR = 96
+        private const val MIN_CAMERA_COLOR = 8
+        private const val DIAGNOSTIC_CLEAR_RED = 209
+        private const val DIAGNOSTIC_CLEAR_GREEN = 31
+        private const val DIAGNOSTIC_CLEAR_BLUE = 87
+        private const val CLEAR_COLOR_TOLERANCE = 12
+        private const val CAMERA_METADATA_COUNT = 8
+        private const val CAMERA_TOKEN_INDEX = 0
+        private const val CAMERA_TIMESTAMP_INDEX = 1
+        private const val CAMERA_WIDTH_INDEX = 2
+        private const val CAMERA_HEIGHT_INDEX = 3
+        private const val CAMERA_FORMAT_INDEX = 4
+        private const val CAMERA_USAGE_INDEX = 5
+        private const val CAMERA_ACQUIRE_FENCE_INDEX = 6
+        private const val CAMERA_RELEASE_FENCE_INDEX = 7
+        private const val CAMERA_PROGRESS_INTERVAL = 60L
+        private const val NANOS_PER_MILLISECOND = 1_000_000L
 
         init {
             System.loadLibrary(NATIVE_LIBRARY)

@@ -264,6 +264,7 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
                 sourceHeight = result.inputHeight,
                 rotationDegrees = result.rotationDegrees,
                 mirrorHorizontal = result.mirrorHorizontal,
+                sensorTimestampNs = result.sensorTimestampNs,
             )
             binding.faceMeshOverlay.setResult(
                 landmarks = renderLandmarks,
