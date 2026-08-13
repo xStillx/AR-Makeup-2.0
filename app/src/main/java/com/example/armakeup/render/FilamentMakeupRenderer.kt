@@ -24,6 +24,7 @@ import com.example.armakeup.makeup.ReferenceMatteLipstickProfile
 import com.example.armakeup.tracking.FillCenterTransform
 import com.example.armakeup.tracking.LandmarkRenderFrame
 import com.example.armakeup.tracking.NormalizedImageTransform
+import com.example.armakeup.tracking.TemporalLandmarkRefiner
 import com.google.android.filament.Box
 import com.google.android.filament.Camera
 import com.google.android.filament.Colors
@@ -93,6 +94,7 @@ internal class FilamentMakeupRenderer(
     )
     private val skybox = Skybox.Builder().color(0f, 0f, 0f, 1f).build(engine)
     private val lipTessellator = LipMeshTessellator()
+    private val temporalLandmarkRefiner = TemporalLandmarkRefiner()
     private val cameraMesh = createCameraMesh()
     private val lipMesh = createLipMesh()
     private val lipVertexUploader = DynamicVertexUploader(
@@ -195,6 +197,7 @@ internal class FilamentMakeupRenderer(
     fun clear() {
         ensureMainThread()
         latestLandmarks = null
+        temporalLandmarkRefiner.clear()
         hideLipEntity()
     }
 
@@ -373,7 +376,15 @@ internal class FilamentMakeupRenderer(
             return
         }
 
-        val predictionSeconds = state.landmarks.predictionSeconds(renderTimestampMs)
+        val temporalCorrection = temporalLandmarkRefiner.correctionFor(
+            anchorSensorTimestampNs = state.sensorTimestampNs,
+            nowElapsedRealtimeNs = SystemClock.elapsedRealtimeNanos(),
+        )
+        val predictionSeconds = if (temporalCorrection == null) {
+            state.landmarks.predictionSeconds(renderTimestampMs)
+        } else {
+            0f
+        }
         val fillTransform = FillCenterTransform.calculate(
             viewWidth = viewportWidth,
             viewHeight = viewportHeight,
@@ -391,6 +402,7 @@ internal class FilamentMakeupRenderer(
             imageTransform,
             LipLandmarkTopology.outerContour,
             outerPoints,
+            temporalCorrection,
         )
         writeContour(
             state,
@@ -399,6 +411,7 @@ internal class FilamentMakeupRenderer(
             imageTransform,
             LipLandmarkTopology.innerContour,
             innerPoints,
+            temporalCorrection,
         )
         val tessellated = lipTessellator.tessellate(
             outerPoints,
@@ -417,16 +430,69 @@ internal class FilamentMakeupRenderer(
         imageTransform: NormalizedImageTransform,
         topology: IntArray,
         output: FloatArray,
+        temporalCorrection: TemporalLandmarkRefiner.SimilarityTransform?,
     ) {
         topology.forEachIndexed { pointIndex, landmarkIndex ->
             val rawX = state.landmarks.x(landmarkIndex, predictionSeconds)
             val rawY = state.landmarks.y(landmarkIndex, predictionSeconds)
             val displayX = imageTransform.mapX(rawX, rawY)
             val displayY = imageTransform.mapY(rawX, rawY)
+            val correctedDisplayX: Float
+            val correctedDisplayY: Float
+            if (temporalCorrection == null) {
+                correctedDisplayX = displayX
+                correctedDisplayY = displayY
+            } else {
+                val displayUvY = 1f - displayY
+                correctedDisplayX = temporalCorrection.mapX(displayX, displayUvY)
+                correctedDisplayY = 1f - temporalCorrection.mapY(displayX, displayUvY)
+            }
             val outputIndex = pointIndex * POINT_SIZE
-            output[outputIndex] = fillTransform.mapX(displayX, state.sourceWidth) / viewportWidth
-            output[outputIndex + 1] = fillTransform.mapY(displayY, state.sourceHeight) / viewportHeight
+            output[outputIndex] =
+                fillTransform.mapX(correctedDisplayX, state.sourceWidth) / viewportWidth
+            output[outputIndex + 1] =
+                fillTransform.mapY(correctedDisplayY, state.sourceHeight) / viewportHeight
         }
+    }
+
+    private fun temporalTrackingRoi(): VulkanTemporalTrackingRoi {
+        val state = latestLandmarks ?: return VulkanTemporalTrackingRoi.INVALID
+        if (state.landmarks.size <= MAX_REQUIRED_LANDMARK_INDEX) {
+            return VulkanTemporalTrackingRoi.INVALID
+        }
+        val predictionSeconds = state.landmarks.predictionSeconds(SystemClock.uptimeMillis())
+        val imageTransform = NormalizedImageTransform(
+            state.rotationDegrees,
+            state.mirrorHorizontal,
+        )
+        var minX = Float.POSITIVE_INFINITY
+        var minY = Float.POSITIVE_INFINITY
+        var maxX = Float.NEGATIVE_INFINITY
+        var maxY = Float.NEGATIVE_INFINITY
+        LipLandmarkTopology.outerContour.forEach { landmarkIndex ->
+            val rawX = state.landmarks.x(landmarkIndex, predictionSeconds)
+            val rawY = state.landmarks.y(landmarkIndex, predictionSeconds)
+            val displayX = imageTransform.mapX(rawX, rawY)
+            val displayUvY = 1f - imageTransform.mapY(rawX, rawY)
+            minX = minOf(minX, displayX)
+            minY = minOf(minY, displayUvY)
+            maxX = maxOf(maxX, displayX)
+            maxY = maxOf(maxY, displayUvY)
+        }
+        val centerX = (minX + maxX) * 0.5f
+        val centerY = (minY + maxY) * 0.5f
+        val halfWidth = maxOf((maxX - minX) * ROI_WIDTH_SCALE, MIN_ROI_HALF_WIDTH)
+        val halfHeight = maxOf(
+            (maxY - minY) * ROI_HEIGHT_SCALE,
+            halfWidth * ROI_ASPECT_HEIGHT,
+            MIN_ROI_HALF_HEIGHT,
+        )
+        return VulkanTemporalTrackingRoi(
+            left = (centerX - halfWidth).coerceIn(0f, 1f),
+            bottom = (centerY - halfHeight).coerceIn(0f, 1f),
+            right = (centerX + halfWidth).coerceIn(0f, 1f),
+            top = (centerY + halfHeight).coerceIn(0f, 1f),
+        ).takeIf { it.isValid } ?: VulkanTemporalTrackingRoi.INVALID
     }
 
     private fun writeLipVertices(buffer: ByteBuffer, tessellated: FloatArray) {
@@ -761,9 +827,19 @@ internal class FilamentMakeupRenderer(
             val frame = runtime.acquireCameraFrame(
                 transform = transform,
                 landmarkSensorTimestampNs = latestLandmarks?.sensorTimestampNs,
+                trackingRoi = temporalTrackingRoi(),
             )
             if (frame == null) return
             try {
+                val temporalTracking = frame.temporalTracking
+                if (temporalTracking != null) {
+                    temporalLandmarkRefiner.offer(
+                        result = temporalTracking,
+                        deliveryElapsedRealtimeNs = SystemClock.elapsedRealtimeNanos(),
+                    )
+                } else if (frame.temporalTrackingAttempted) {
+                    temporalLandmarkRefiner.clear()
+                }
                 stream.setAcquiredImage(frame.hardwareBuffer, mainHandler) {
                     runtime.releaseCameraFrame(frame)
                 }
@@ -899,6 +975,11 @@ internal class FilamentMakeupRenderer(
         private const val ACQUIRED_MAX_IMAGES = 4
         private const val FULL_ROTATION = 360
         private const val NANOS_PER_MILLISECOND = 1_000_000L
+        private const val ROI_WIDTH_SCALE = 1.35f
+        private const val ROI_HEIGHT_SCALE = 2.2f
+        private const val ROI_ASPECT_HEIGHT = 0.75f
+        private const val MIN_ROI_HALF_WIDTH = 0.12f
+        private const val MIN_ROI_HALF_HEIGHT = 0.10f
         private const val RENDER_LOG_TAG = "ARMakeupRender"
         private const val NATIVE_VULKAN_LOG_TAG = "ARMakeupVulkan"
         private val IDENTITY_MATRIX = floatArrayOf(

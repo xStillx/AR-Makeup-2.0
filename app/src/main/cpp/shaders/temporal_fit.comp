@@ -1,0 +1,128 @@
+#version 450
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 6) readonly buffer FlowVectors {
+    vec4 vectors[];
+} inputFlow;
+layout(std430, set = 0, binding = 7) buffer FitResult {
+    vec4 values[2];
+} outputFit;
+
+layout(push_constant) uniform TemporalState {
+    mat4 uvTransform;
+    vec4 roi;
+    ivec4 parameters;
+} state;
+
+const ivec2 GRID_SIZE = ivec2(8, 6);
+const int POINT_COUNT = GRID_SIZE.x * GRID_SIZE.y;
+
+vec2 pointAt(int index) {
+    ivec2 grid = ivec2(index % GRID_SIZE.x, index / GRID_SIZE.x);
+    vec2 gridUv = (vec2(grid) + vec2(0.5)) / vec2(GRID_SIZE);
+    return mix(state.roi.xy, state.roi.zw, gridUv);
+}
+
+float baseWeight(vec4 flow) {
+    if (flow.z < 0.14 || flow.w > 0.14) {
+        return 0.0;
+    }
+    return flow.z * clamp(1.0 - flow.w / 0.14, 0.0, 1.0);
+}
+
+vec4 fitSimilarity(vec4 initial, bool robustPass) {
+    float weightSum = 0.0;
+    vec2 meanSource = vec2(0.0);
+    vec2 meanTarget = vec2(0.0);
+    for (int index = 0; index < POINT_COUNT; ++index) {
+        vec4 flow = inputFlow.vectors[index];
+        vec2 source = pointAt(index);
+        vec2 target = source + flow.xy;
+        float weight = baseWeight(flow);
+        if (robustPass && weight > 0.0) {
+            vec2 predicted = vec2(
+                initial.x * source.x - initial.y * source.y + initial.z,
+                initial.y * source.x + initial.x * source.y + initial.w
+            );
+            float residual = length(predicted - target);
+            float normalized = residual / 0.009;
+            weight *= 1.0 / (1.0 + normalized * normalized);
+        }
+        weightSum += weight;
+        meanSource += source * weight;
+        meanTarget += target * weight;
+    }
+    if (weightSum < 1e-5) {
+        return vec4(1.0, 0.0, 0.0, 0.0);
+    }
+    meanSource /= weightSum;
+    meanTarget /= weightSum;
+    float denominator = 0.0;
+    float scaleCosNumerator = 0.0;
+    float scaleSinNumerator = 0.0;
+    for (int index = 0; index < POINT_COUNT; ++index) {
+        vec4 flow = inputFlow.vectors[index];
+        vec2 source = pointAt(index);
+        vec2 target = source + flow.xy;
+        float weight = baseWeight(flow);
+        if (robustPass && weight > 0.0) {
+            vec2 predicted = vec2(
+                initial.x * source.x - initial.y * source.y + initial.z,
+                initial.y * source.x + initial.x * source.y + initial.w
+            );
+            float residual = length(predicted - target);
+            float normalized = residual / 0.009;
+            weight *= 1.0 / (1.0 + normalized * normalized);
+        }
+        vec2 centeredSource = source - meanSource;
+        vec2 centeredTarget = target - meanTarget;
+        denominator += weight * dot(centeredSource, centeredSource);
+        scaleCosNumerator += weight * dot(centeredSource, centeredTarget);
+        scaleSinNumerator += weight * (
+            centeredSource.x * centeredTarget.y - centeredSource.y * centeredTarget.x
+        );
+    }
+    float scaleCos = denominator > 1e-7 ? scaleCosNumerator / denominator : 1.0;
+    float scaleSin = denominator > 1e-7 ? scaleSinNumerator / denominator : 0.0;
+    float translationX = meanTarget.x - scaleCos * meanSource.x + scaleSin * meanSource.y;
+    float translationY = meanTarget.y - scaleSin * meanSource.x - scaleCos * meanSource.y;
+    return vec4(scaleCos, scaleSin, translationX, translationY);
+}
+
+void main() {
+    vec4 initial = fitSimilarity(vec4(1.0, 0.0, 0.0, 0.0), false);
+    vec4 fitted = fitSimilarity(initial, true);
+    float squaredResidual = 0.0;
+    float confidenceSum = 0.0;
+    int inliers = 0;
+    for (int index = 0; index < POINT_COUNT; ++index) {
+        vec4 flow = inputFlow.vectors[index];
+        vec2 source = pointAt(index);
+        vec2 target = source + flow.xy;
+        vec2 predicted = vec2(
+            fitted.x * source.x - fitted.y * source.y + fitted.z,
+            fitted.y * source.x + fitted.x * source.y + fitted.w
+        );
+        float residual = length(predicted - target);
+        if (baseWeight(flow) > 0.0 && residual <= 0.014) {
+            squaredResidual += residual * residual;
+            confidenceSum += flow.z;
+            inliers++;
+        }
+    }
+    float rms = inliers > 0 ? sqrt(squaredResidual / float(inliers)) : 1.0;
+    float confidence = inliers > 0
+        ? (confidenceSum / float(inliers)) * sqrt(float(inliers) / float(POINT_COUNT))
+        : 0.0;
+    float scale = length(fitted.xy);
+    float rotation = abs(atan(fitted.y, fitted.x));
+    float translation = length(fitted.zw);
+    // Confidence already includes sqrt(inlier coverage), so requiring 0.52
+    // effectively rejected otherwise coherent fits with 25-35% textured ROI
+    // coverage. Keep the geometric bounds strict and admit those sparse fits.
+    bool valid = inliers >= 12 && confidence >= 0.36 && rms <= 0.014 &&
+        scale >= 0.975 && scale <= 1.025 && rotation <= 0.05 && translation <= 0.045;
+    outputFit.values[0] = fitted;
+    outputFit.values[1] = vec4(confidence, rms, float(inliers), valid ? 1.0 : 0.0);
+}

@@ -81,15 +81,24 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
     fun acquireCameraFrame(
         transform: VulkanCameraTransform,
         landmarkSensorTimestampNs: Long?,
+        trackingRoi: VulkanTemporalTrackingRoi,
     ): VulkanCameraFrameState? {
         val handle = nativeHandle
         if (handle == 0L) return null
         val metadata = LongArray(CAMERA_METADATA_COUNT)
+        val temporalValues = FloatArray(VulkanTemporalTrackingResult.VALUE_COUNT)
         val hardwareBuffer = nativeAcquireCameraFrame(
             handle,
             metadata,
             transform.matrixCopy(),
+            trackingRoi.toFloatArray(),
+            temporalValues,
         ) ?: return null
+        val temporalTracking = VulkanTemporalTrackingResult.fromNative(
+            fromSensorTimestampNs = metadata[CAMERA_TEMPORAL_FROM_TIMESTAMP_INDEX],
+            toSensorTimestampNs = metadata[CAMERA_TIMESTAMP_INDEX],
+            values = temporalValues,
+        )
         return VulkanCameraFrameState(
             hardwareBuffer = hardwareBuffer,
             nativeToken = metadata[CAMERA_TOKEN_INDEX],
@@ -102,13 +111,20 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
             landmarkSensorTimestampNs = landmarkSensorTimestampNs,
             acquireFenceImported = metadata[CAMERA_ACQUIRE_FENCE_INDEX] != 0L,
             releaseFenceExported = metadata[CAMERA_RELEASE_FENCE_INDEX] != 0L,
+            temporalTrackingAttempted =
+                metadata[CAMERA_TEMPORAL_FROM_TIMESTAMP_INDEX] > 0L,
+            temporalTracking = temporalTracking,
         ).also { frame ->
             val count = cameraFrameCount.incrementAndGet()
             if (count % CAMERA_PROGRESS_INTERVAL == 0L) {
+                val temporalRaw = temporalValues.joinToString(",", prefix = "[", postfix = "]") {
+                    "%.4f".format(java.util.Locale.US, it)
+                }
                 Log.i(
                     LOG_TAG,
                     "cameraProgress delivered=$count timestampNs=${frame.sensorTimestampNs} " +
                         "landmarkAgeMs=${frame.landmarkAgeNs?.div(NANOS_PER_MILLISECOND)} " +
+                        "temporalRaw=$temporalRaw " +
                         diagnostic,
                 )
             }
@@ -225,6 +241,8 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
         handle: Long,
         metadata: LongArray,
         uvTransform: FloatArray,
+        trackingRoi: FloatArray,
+        temporalValues: FloatArray,
     ): HardwareBuffer?
     private external fun nativeReleaseCameraFrame(handle: Long, token: Long)
     private external fun nativeCloseCamera(handle: Long)
@@ -244,7 +262,7 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
         private const val DIAGNOSTIC_CLEAR_GREEN = 31
         private const val DIAGNOSTIC_CLEAR_BLUE = 87
         private const val CLEAR_COLOR_TOLERANCE = 12
-        private const val CAMERA_METADATA_COUNT = 8
+        private const val CAMERA_METADATA_COUNT = 9
         private const val CAMERA_TOKEN_INDEX = 0
         private const val CAMERA_TIMESTAMP_INDEX = 1
         private const val CAMERA_WIDTH_INDEX = 2
@@ -253,6 +271,7 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
         private const val CAMERA_USAGE_INDEX = 5
         private const val CAMERA_ACQUIRE_FENCE_INDEX = 6
         private const val CAMERA_RELEASE_FENCE_INDEX = 7
+        private const val CAMERA_TEMPORAL_FROM_TIMESTAMP_INDEX = 8
         private const val CAMERA_PROGRESS_INTERVAL = 60L
         private const val NANOS_PER_MILLISECOND = 1_000_000L
 

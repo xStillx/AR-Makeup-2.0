@@ -1,0 +1,112 @@
+#version 450
+
+layout(local_size_x = 8, local_size_y = 6, local_size_z = 1) in;
+
+layout(set = 0, binding = 4) uniform sampler2D previousPyramid;
+layout(set = 0, binding = 5) uniform sampler2D currentPyramid;
+layout(std430, set = 0, binding = 6) buffer FlowVectors {
+    vec4 vectors[];
+} outputFlow;
+
+layout(push_constant) uniform TemporalState {
+    mat4 uvTransform;
+    vec4 roi;
+    ivec4 parameters;
+} state;
+
+const ivec2 GRID_SIZE = ivec2(8, 6);
+const int PYRAMID_LEVELS = 3;
+const int ITERATIONS = 3;
+const int WINDOW_RADIUS = 2;
+
+float bilinearSample(sampler2D source, vec2 uv, int level) {
+    ivec2 sizeAtLevel = textureSize(source, level);
+    vec2 position = uv * vec2(sizeAtLevel) - vec2(0.5);
+    ivec2 base = ivec2(floor(position));
+    vec2 weight = fract(position);
+    ivec2 limit = sizeAtLevel - ivec2(1);
+    float p00 = texelFetch(source, clamp(base, ivec2(0), limit), level).r;
+    float p10 = texelFetch(source, clamp(base + ivec2(1, 0), ivec2(0), limit), level).r;
+    float p01 = texelFetch(source, clamp(base + ivec2(0, 1), ivec2(0), limit), level).r;
+    float p11 = texelFetch(source, clamp(base + ivec2(1, 1), ivec2(0), limit), level).r;
+    return mix(mix(p00, p10, weight.x), mix(p01, p11, weight.x), weight.y);
+}
+
+void main() {
+    ivec2 grid = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(grid, GRID_SIZE))) {
+        return;
+    }
+    vec2 gridUv = (vec2(grid) + vec2(0.5)) / vec2(GRID_SIZE);
+    vec2 point = mix(state.roi.xy, state.roi.zw, gridUv);
+    vec2 flow = vec2(0.0);
+    float textureConfidence = 0.0;
+
+    for (int level = PYRAMID_LEVELS - 1; level >= 0; --level) {
+        vec2 texel = 1.0 / vec2(textureSize(previousPyramid, level));
+        for (int iteration = 0; iteration < ITERATIONS; ++iteration) {
+            float gxx = 0.0;
+            float gxy = 0.0;
+            float gyy = 0.0;
+            float bx = 0.0;
+            float by = 0.0;
+            for (int y = -WINDOW_RADIUS; y <= WINDOW_RADIUS; ++y) {
+                for (int x = -WINDOW_RADIUS; x <= WINDOW_RADIUS; ++x) {
+                    vec2 offset = vec2(x, y) * texel;
+                    vec2 currentUv = point + flow + offset;
+                    float previous = bilinearSample(previousPyramid, point + offset, level);
+                    float current = bilinearSample(currentPyramid, currentUv, level);
+                    float ix = 0.5 * (
+                        bilinearSample(currentPyramid, currentUv + vec2(texel.x, 0.0), level) -
+                        bilinearSample(currentPyramid, currentUv - vec2(texel.x, 0.0), level)
+                    );
+                    float iy = 0.5 * (
+                        bilinearSample(currentPyramid, currentUv + vec2(0.0, texel.y), level) -
+                        bilinearSample(currentPyramid, currentUv - vec2(0.0, texel.y), level)
+                    );
+                    float it = current - previous;
+                    gxx += ix * ix;
+                    gxy += ix * iy;
+                    gyy += iy * iy;
+                    bx += ix * it;
+                    by += iy * it;
+                }
+            }
+            float determinant = gxx * gyy - gxy * gxy;
+            float trace = gxx + gyy;
+            float discriminant = sqrt(max(trace * trace - 4.0 * determinant, 0.0));
+            float minEigenvalue = 0.5 * (trace - discriminant);
+            textureConfidence = max(
+                textureConfidence,
+                clamp(minEigenvalue * 1800.0, 0.0, 1.0)
+            );
+            if (determinant <= 1e-8) {
+                break;
+            }
+            vec2 delta = -vec2(
+                gyy * bx - gxy * by,
+                -gxy * bx + gxx * by
+            ) / determinant;
+            delta = clamp(delta, -2.0 * texel, 2.0 * texel);
+            flow += delta;
+        }
+    }
+
+    float residual = 0.0;
+    int sampleCount = 0;
+    vec2 baseTexel = 1.0 / vec2(textureSize(previousPyramid, 0));
+    for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
+            vec2 offset = vec2(x, y) * baseTexel;
+            float previous = bilinearSample(previousPyramid, point + offset, 0);
+            float current = bilinearSample(currentPyramid, point + flow + offset, 0);
+            residual += abs(current - previous);
+            sampleCount++;
+        }
+    }
+    residual /= float(sampleCount);
+    float residualConfidence = clamp(1.0 - residual * 8.0, 0.0, 1.0);
+    float confidence = textureConfidence * residualConfidence;
+    uint outputIndex = uint(grid.y * GRID_SIZE.x + grid.x);
+    outputFlow.vectors[outputIndex] = vec4(flow, confidence, residual);
+}

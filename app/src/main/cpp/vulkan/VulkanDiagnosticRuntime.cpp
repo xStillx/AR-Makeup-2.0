@@ -16,6 +16,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstdint>
 #include <exception>
@@ -38,7 +39,20 @@ constexpr std::uint64_t kAcquireTimeoutNs = 1'000'000'000ULL;
 constexpr std::chrono::milliseconds kDiagnosticFrameInterval{100};
 constexpr std::uint32_t kCameraMaxImages = 4;
 constexpr std::size_t kTransformElementCount = 16;
-constexpr std::size_t kCameraMetadataCount = 8;
+constexpr std::size_t kCameraMetadataCount = 9;
+constexpr std::size_t kTemporalRoiElementCount = 4;
+constexpr std::size_t kTemporalResultElementCount = 8;
+constexpr std::uint32_t kTemporalPyramidLevels = 3;
+constexpr std::uint32_t kTemporalPyramidSize = 192;
+constexpr std::uint32_t kTemporalFlowPointCount = 48;
+
+struct alignas(16) TemporalPushConstants final {
+    std::array<float, kTransformElementCount> uvTransform{};
+    std::array<float, kTemporalRoiElementCount> roi{};
+    std::array<std::int32_t, 4> parameters{};
+};
+
+static_assert(sizeof(TemporalPushConstants) == 96U);
 
 struct MediaDispatch final {
     using NewWithUsage = media_status_t (*)(
@@ -232,7 +246,10 @@ public:
                << " cameraReleased=" << cameraReleasedFrames_.load()
                << " cameraDropped=" << cameraDroppedFrames_.load()
                << " acquireFences=" << cameraAcquireFences_.load()
-               << " releaseFences=" << cameraReleaseFences_.load();
+               << " releaseFences=" << cameraReleaseFences_.load()
+               << " temporalComputed=" << temporalComputedFrames_.load()
+               << " temporalAccepted=" << temporalAcceptedFrames_.load()
+               << " temporalRejected=" << temporalRejectedFrames_.load();
         if (lastCameraWidth_.load() > 0U) {
             output << " camera=" << lastCameraWidth_.load() << 'x' << lastCameraHeight_.load()
                    << " ahbFormat=" << lastCameraFormat_.load()
@@ -244,6 +261,9 @@ public:
         }
         if (!cameraError_.empty()) {
             output << " cameraReason=" << cameraError_;
+        }
+        if (!temporalError_.empty()) {
+            output << " temporalReason=" << temporalError_;
         }
         return output.str();
     }
@@ -301,20 +321,34 @@ public:
     jobject acquireCameraFrame(
         JNIEnv* environment,
         jlongArray metadata,
-        jfloatArray uvTransform
+        jfloatArray uvTransform,
+        jfloatArray trackingRoi,
+        jfloatArray temporalValues
     ) {
-        if (metadata == nullptr || uvTransform == nullptr ||
+        if (metadata == nullptr || uvTransform == nullptr || trackingRoi == nullptr ||
+            temporalValues == nullptr ||
             environment->GetArrayLength(metadata) < static_cast<jsize>(kCameraMetadataCount) ||
             environment->GetArrayLength(uvTransform) !=
-                static_cast<jsize>(kTransformElementCount)) {
+                static_cast<jsize>(kTransformElementCount) ||
+            environment->GetArrayLength(trackingRoi) !=
+                static_cast<jsize>(kTemporalRoiElementCount) ||
+            environment->GetArrayLength(temporalValues) <
+                static_cast<jsize>(kTemporalResultElementCount)) {
             return nullptr;
         }
         std::array<float, kTransformElementCount> transform{};
+        std::array<float, kTemporalRoiElementCount> roi{};
         environment->GetFloatArrayRegion(
             uvTransform,
             0,
             static_cast<jsize>(transform.size()),
             transform.data()
+        );
+        environment->GetFloatArrayRegion(
+            trackingRoi,
+            0,
+            static_cast<jsize>(roi.size()),
+            roi.data()
         );
         if (environment->ExceptionCheck() == JNI_TRUE) {
             return nullptr;
@@ -328,7 +362,7 @@ public:
             if (!finalizePendingCameraFrame()) {
                 return nullptr;
             }
-            return deliverPendingCameraFrame(environment, metadata);
+            return deliverPendingCameraFrame(environment, metadata, temporalValues);
         }
         if (deliveredCameraFrames_.size() >= kCameraMaxImages - 1U) {
             return nullptr;
@@ -369,6 +403,7 @@ public:
         pendingCameraFrame_.description = description;
         pendingCameraFrame_.token = nextCameraToken_++;
         pendingCameraFrame_.transform = transform;
+        pendingCameraFrame_.temporalRoi = roi;
         pendingCameraFrame_.acquireFenceImported = acquireFenceFd >= 0;
 
         if (!importAndRenderCameraFrame(acquireFenceFd)) {
@@ -380,7 +415,7 @@ public:
         if (!finalizePendingCameraFrame()) {
             return nullptr;
         }
-        return deliverPendingCameraFrame(environment, metadata);
+        return deliverPendingCameraFrame(environment, metadata, temporalValues);
     }
 
     void releaseCameraFrame(std::uint64_t token) {
@@ -431,6 +466,11 @@ private:
         std::int64_t timestampNs = 0;
         std::uint64_t token = 0;
         std::array<float, kTransformElementCount> transform{};
+        std::array<float, kTemporalRoiElementCount> temporalRoi{};
+        std::array<float, kTemporalResultElementCount> temporalResult{};
+        std::int64_t temporalFromTimestampNs = 0;
+        std::uint32_t temporalWriteIndex = 0;
+        bool temporalComputed = false;
         bool acquireFenceImported = false;
         bool releaseFenceExported = false;
         int releaseFenceFd = -1;
@@ -438,6 +478,7 @@ private:
         VkDeviceMemory importedMemory = VK_NULL_HANDLE;
         VkImageView importedImageView = VK_NULL_HANDLE;
         VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+        VkDescriptorSet temporalDescriptorSet = VK_NULL_HANDLE;
         VkSemaphore acquireSemaphore = VK_NULL_HANDLE;
         VkSemaphore releaseSemaphore = VK_NULL_HANDLE;
         VkFormat vkFormat = VK_FORMAT_UNDEFINED;
@@ -552,6 +593,10 @@ private:
         getPhysicalDeviceProperties_ = loadInstance<PFN_vkGetPhysicalDeviceProperties>(
             "vkGetPhysicalDeviceProperties"
         );
+        getPhysicalDeviceMemoryProperties_ =
+            loadInstance<PFN_vkGetPhysicalDeviceMemoryProperties>(
+                "vkGetPhysicalDeviceMemoryProperties"
+            );
         getPhysicalDeviceQueueFamilyProperties_ =
             loadInstance<PFN_vkGetPhysicalDeviceQueueFamilyProperties>(
                 "vkGetPhysicalDeviceQueueFamilyProperties"
@@ -584,6 +629,7 @@ private:
             destroySurface_ == nullptr ||
             enumeratePhysicalDevices_ == nullptr ||
             getPhysicalDeviceProperties_ == nullptr ||
+            getPhysicalDeviceMemoryProperties_ == nullptr ||
             getPhysicalDeviceQueueFamilyProperties_ == nullptr ||
             getPhysicalDeviceSurfaceSupport_ == nullptr ||
             getPhysicalDeviceSurfaceCapabilities_ == nullptr ||
@@ -645,6 +691,7 @@ private:
                     queueFamilyIndex_ = index;
                     VkPhysicalDeviceProperties properties{};
                     getPhysicalDeviceProperties_(candidate, &properties);
+                    getPhysicalDeviceMemoryProperties_(candidate, &memoryProperties_);
                     deviceName_ = properties.deviceName;
                     deviceApiVersion_ = properties.apiVersion;
                     return true;
@@ -759,6 +806,7 @@ private:
             loadDevice<PFN_vkCmdBindDescriptorSets>("vkCmdBindDescriptorSets");
         cmdPushConstants_ = loadDevice<PFN_vkCmdPushConstants>("vkCmdPushConstants");
         cmdDraw_ = loadDevice<PFN_vkCmdDraw>("vkCmdDraw");
+        cmdDispatch_ = loadDevice<PFN_vkCmdDispatch>("vkCmdDispatch");
         createSemaphore_ = loadDevice<PFN_vkCreateSemaphore>("vkCreateSemaphore");
         destroySemaphore_ = loadDevice<PFN_vkDestroySemaphore>("vkDestroySemaphore");
         createFence_ = loadDevice<PFN_vkCreateFence>("vkCreateFence");
@@ -776,6 +824,13 @@ private:
         allocateMemory_ = loadDevice<PFN_vkAllocateMemory>("vkAllocateMemory");
         freeMemory_ = loadDevice<PFN_vkFreeMemory>("vkFreeMemory");
         bindImageMemory_ = loadDevice<PFN_vkBindImageMemory>("vkBindImageMemory");
+        createBuffer_ = loadDevice<PFN_vkCreateBuffer>("vkCreateBuffer");
+        destroyBuffer_ = loadDevice<PFN_vkDestroyBuffer>("vkDestroyBuffer");
+        getBufferMemoryRequirements_ =
+            loadDevice<PFN_vkGetBufferMemoryRequirements>("vkGetBufferMemoryRequirements");
+        bindBufferMemory_ = loadDevice<PFN_vkBindBufferMemory>("vkBindBufferMemory");
+        mapMemory_ = loadDevice<PFN_vkMapMemory>("vkMapMemory");
+        unmapMemory_ = loadDevice<PFN_vkUnmapMemory>("vkUnmapMemory");
         getAndroidHardwareBufferProperties_ =
             loadDevice<PFN_vkGetAndroidHardwareBufferPropertiesANDROID>(
                 "vkGetAndroidHardwareBufferPropertiesANDROID"
@@ -807,6 +862,8 @@ private:
             loadDevice<PFN_vkDestroyPipelineLayout>("vkDestroyPipelineLayout");
         createGraphicsPipelines_ =
             loadDevice<PFN_vkCreateGraphicsPipelines>("vkCreateGraphicsPipelines");
+        createComputePipelines_ =
+            loadDevice<PFN_vkCreateComputePipelines>("vkCreateComputePipelines");
         destroyPipeline_ = loadDevice<PFN_vkDestroyPipeline>("vkDestroyPipeline");
         importSemaphoreFd_ =
             loadDevice<PFN_vkImportSemaphoreFdKHR>("vkImportSemaphoreFdKHR");
@@ -836,6 +893,7 @@ private:
             cmdBindDescriptorSets_ == nullptr ||
             cmdPushConstants_ == nullptr ||
             cmdDraw_ == nullptr ||
+            cmdDispatch_ == nullptr ||
             createSemaphore_ == nullptr ||
             destroySemaphore_ == nullptr ||
             createFence_ == nullptr ||
@@ -852,6 +910,12 @@ private:
             allocateMemory_ == nullptr ||
             freeMemory_ == nullptr ||
             bindImageMemory_ == nullptr ||
+            createBuffer_ == nullptr ||
+            destroyBuffer_ == nullptr ||
+            getBufferMemoryRequirements_ == nullptr ||
+            bindBufferMemory_ == nullptr ||
+            mapMemory_ == nullptr ||
+            unmapMemory_ == nullptr ||
             getAndroidHardwareBufferProperties_ == nullptr ||
             createSamplerYcbcrConversion_ == nullptr ||
             destroySamplerYcbcrConversion_ == nullptr ||
@@ -869,6 +933,7 @@ private:
             createPipelineLayout_ == nullptr ||
             destroyPipelineLayout_ == nullptr ||
             createGraphicsPipelines_ == nullptr ||
+            createComputePipelines_ == nullptr ||
             destroyPipeline_ == nullptr ||
             importSemaphoreFd_ == nullptr ||
             getSemaphoreFd_ == nullptr) {
@@ -1606,6 +1671,7 @@ private:
 
         cameraPipelineVkFormat_ = imageFormat;
         cameraPipelineExternalFormat_ = externalFormat;
+        temporalReady_ = createTemporalPipeline();
         return true;
     }
 
@@ -1630,6 +1696,527 @@ private:
             setCameraVulkanError("create_shader_module", result);
             return false;
         }
+        return true;
+    }
+
+    [[nodiscard]] std::uint32_t findMemoryType(
+        std::uint32_t compatibleTypes,
+        VkMemoryPropertyFlags requiredProperties
+    ) const {
+        for (std::uint32_t index = 0; index < memoryProperties_.memoryTypeCount; ++index) {
+            if ((compatibleTypes & (1U << index)) != 0U &&
+                (memoryProperties_.memoryTypes[index].propertyFlags & requiredProperties) ==
+                    requiredProperties) {
+                return index;
+            }
+        }
+        return std::numeric_limits<std::uint32_t>::max();
+    }
+
+    bool createOwnedBuffer(
+        VkDeviceSize size,
+        VkBufferUsageFlags usage,
+        VkMemoryPropertyFlags memoryProperties,
+        VkBuffer* buffer,
+        VkDeviceMemory* memory
+    ) {
+        const VkBufferCreateInfo createInfo{
+            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .size = size,
+            .usage = usage,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+            .queueFamilyIndexCount = 0,
+            .pQueueFamilyIndices = nullptr,
+        };
+        VkResult result = createBuffer_(device_, &createInfo, nullptr, buffer);
+        if (result != VK_SUCCESS) {
+            setTemporalVulkanError("create_buffer", result);
+            return false;
+        }
+        VkMemoryRequirements requirements{};
+        getBufferMemoryRequirements_(device_, *buffer, &requirements);
+        const std::uint32_t memoryType = findMemoryType(
+            requirements.memoryTypeBits,
+            memoryProperties
+        );
+        if (memoryType == std::numeric_limits<std::uint32_t>::max()) {
+            setTemporalError("buffer_memory_type_unavailable");
+            return false;
+        }
+        const VkMemoryAllocateInfo allocateInfo{
+            .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+            .pNext = nullptr,
+            .allocationSize = requirements.size,
+            .memoryTypeIndex = memoryType,
+        };
+        result = allocateMemory_(device_, &allocateInfo, nullptr, memory);
+        if (result != VK_SUCCESS) {
+            setTemporalVulkanError("allocate_buffer_memory", result);
+            return false;
+        }
+        result = bindBufferMemory_(device_, *buffer, *memory, 0);
+        if (result != VK_SUCCESS) {
+            setTemporalVulkanError("bind_buffer_memory", result);
+            return false;
+        }
+        return true;
+    }
+
+    bool createTemporalPyramid(std::uint32_t index) {
+        const VkImageCreateInfo createInfo{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .imageType = VK_IMAGE_TYPE_2D,
+            .format = VK_FORMAT_R32_SFLOAT,
+            .extent = VkExtent3D{
+                .width = kTemporalPyramidSize,
+                .height = kTemporalPyramidSize,
+                .depth = 1,
+            },
+            .mipLevels = kTemporalPyramidLevels,
+            .arrayLayers = 1,
+            .samples = VK_SAMPLE_COUNT_1_BIT,
+            .tiling = VK_IMAGE_TILING_OPTIMAL,
+            .usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+            .queueFamilyIndexCount = 0,
+            .pQueueFamilyIndices = nullptr,
+            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        };
+        VkResult result = createImage_(device_, &createInfo, nullptr, &temporalPyramids_[index]);
+        if (result != VK_SUCCESS) {
+            setTemporalVulkanError("create_pyramid", result);
+            return false;
+        }
+        VkMemoryRequirements requirements{};
+        getImageMemoryRequirements_(device_, temporalPyramids_[index], &requirements);
+        const std::uint32_t memoryType = findMemoryType(
+            requirements.memoryTypeBits,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+        );
+        if (memoryType == std::numeric_limits<std::uint32_t>::max()) {
+            setTemporalError("pyramid_memory_type_unavailable");
+            return false;
+        }
+        const VkMemoryAllocateInfo allocateInfo{
+            .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+            .pNext = nullptr,
+            .allocationSize = requirements.size,
+            .memoryTypeIndex = memoryType,
+        };
+        result = allocateMemory_(
+            device_,
+            &allocateInfo,
+            nullptr,
+            &temporalPyramidMemory_[index]
+        );
+        if (result != VK_SUCCESS) {
+            setTemporalVulkanError("allocate_pyramid_memory", result);
+            return false;
+        }
+        result = bindImageMemory_(
+            device_,
+            temporalPyramids_[index],
+            temporalPyramidMemory_[index],
+            0
+        );
+        if (result != VK_SUCCESS) {
+            setTemporalVulkanError("bind_pyramid_memory", result);
+            return false;
+        }
+        for (std::uint32_t level = 0; level < kTemporalPyramidLevels; ++level) {
+            const VkImageViewCreateInfo viewInfo{
+                .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+                .pNext = nullptr,
+                .flags = 0,
+                .image = temporalPyramids_[index],
+                .viewType = VK_IMAGE_VIEW_TYPE_2D,
+                .format = VK_FORMAT_R32_SFLOAT,
+                .components = VkComponentMapping{
+                    .r = VK_COMPONENT_SWIZZLE_IDENTITY,
+                    .g = VK_COMPONENT_SWIZZLE_IDENTITY,
+                    .b = VK_COMPONENT_SWIZZLE_IDENTITY,
+                    .a = VK_COMPONENT_SWIZZLE_IDENTITY,
+                },
+                .subresourceRange = VkImageSubresourceRange{
+                    .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                    .baseMipLevel = level,
+                    .levelCount = 1,
+                    .baseArrayLayer = 0,
+                    .layerCount = 1,
+                },
+            };
+            result = createImageView_(
+                device_,
+                &viewInfo,
+                nullptr,
+                &temporalPyramidLevelViews_[index][level]
+            );
+            if (result != VK_SUCCESS) {
+                setTemporalVulkanError("create_pyramid_level_view", result);
+                return false;
+            }
+        }
+        const VkImageViewCreateInfo sampledViewInfo{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .image = temporalPyramids_[index],
+            .viewType = VK_IMAGE_VIEW_TYPE_2D,
+            .format = VK_FORMAT_R32_SFLOAT,
+            .components = VkComponentMapping{
+                .r = VK_COMPONENT_SWIZZLE_IDENTITY,
+                .g = VK_COMPONENT_SWIZZLE_IDENTITY,
+                .b = VK_COMPONENT_SWIZZLE_IDENTITY,
+                .a = VK_COMPONENT_SWIZZLE_IDENTITY,
+            },
+            .subresourceRange = VkImageSubresourceRange{
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = kTemporalPyramidLevels,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+        };
+        result = createImageView_(
+            device_,
+            &sampledViewInfo,
+            nullptr,
+            &temporalPyramidSampledViews_[index]
+        );
+        if (result != VK_SUCCESS) {
+            setTemporalVulkanError("create_pyramid_sampled_view", result);
+            return false;
+        }
+        return true;
+    }
+
+    bool createComputePipeline(
+        const std::uint8_t* byteCode,
+        std::size_t byteCount,
+        VkPipeline* pipeline
+    ) {
+        VkShaderModule shaderModule = VK_NULL_HANDLE;
+        if (!createShaderModule(byteCode, byteCount, &shaderModule)) {
+            return false;
+        }
+        const VkComputePipelineCreateInfo createInfo{
+            .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .stage = VkPipelineShaderStageCreateInfo{
+                .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                .pNext = nullptr,
+                .flags = 0,
+                .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+                .module = shaderModule,
+                .pName = "main",
+                .pSpecializationInfo = nullptr,
+            },
+            .layout = temporalPipelineLayout_,
+            .basePipelineHandle = VK_NULL_HANDLE,
+            .basePipelineIndex = -1,
+        };
+        const VkResult result = createComputePipelines_(
+            device_,
+            VK_NULL_HANDLE,
+            1,
+            &createInfo,
+            nullptr,
+            pipeline
+        );
+        destroyShaderModule_(device_, shaderModule, nullptr);
+        if (result != VK_SUCCESS) {
+            setTemporalVulkanError("create_compute_pipeline", result);
+            return false;
+        }
+        return true;
+    }
+
+    bool createTemporalPipeline() {
+        temporalError_.clear();
+        temporalHistoryValid_ = false;
+        temporalPyramidInitialized_.fill(false);
+        for (std::uint32_t index = 0; index < temporalPyramids_.size(); ++index) {
+            if (!createTemporalPyramid(index)) {
+                destroyTemporalPipeline();
+                return false;
+            }
+        }
+        const VkSamplerCreateInfo samplerCreateInfo{
+            .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .magFilter = VK_FILTER_NEAREST,
+            .minFilter = VK_FILTER_NEAREST,
+            .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+            .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            .mipLodBias = 0.0F,
+            .anisotropyEnable = VK_FALSE,
+            .maxAnisotropy = 1.0F,
+            .compareEnable = VK_FALSE,
+            .compareOp = VK_COMPARE_OP_ALWAYS,
+            .minLod = 0.0F,
+            .maxLod = static_cast<float>(kTemporalPyramidLevels - 1U),
+            .borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK,
+            .unnormalizedCoordinates = VK_FALSE,
+        };
+        VkResult result = createSampler_(
+            device_,
+            &samplerCreateInfo,
+            nullptr,
+            &temporalSampler_
+        );
+        if (result != VK_SUCCESS) {
+            setTemporalVulkanError("create_sampler", result);
+            destroyTemporalPipeline();
+            return false;
+        }
+        const std::array<VkDescriptorSetLayoutBinding, 8> bindings{
+            VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
+                VK_SHADER_STAGE_COMPUTE_BIT, &cameraSampler_},
+            VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1,
+                VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+            VkDescriptorSetLayoutBinding{2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1,
+                VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+            VkDescriptorSetLayoutBinding{3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1,
+                VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+            VkDescriptorSetLayoutBinding{4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
+                VK_SHADER_STAGE_COMPUTE_BIT, &temporalSampler_},
+            VkDescriptorSetLayoutBinding{5, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
+                VK_SHADER_STAGE_COMPUTE_BIT, &temporalSampler_},
+            VkDescriptorSetLayoutBinding{6, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
+                VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+            VkDescriptorSetLayoutBinding{7, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
+                VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+        };
+        const VkDescriptorSetLayoutCreateInfo layoutInfo{
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .bindingCount = static_cast<std::uint32_t>(bindings.size()),
+            .pBindings = bindings.data(),
+        };
+        result = createDescriptorSetLayout_(
+            device_,
+            &layoutInfo,
+            nullptr,
+            &temporalDescriptorSetLayout_
+        );
+        if (result != VK_SUCCESS) {
+            setTemporalVulkanError("create_descriptor_layout", result);
+            destroyTemporalPipeline();
+            return false;
+        }
+        const std::array<VkDescriptorPoolSize, 3> poolSizes{
+            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                kCameraMaxImages * 3U},
+            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                kCameraMaxImages * kTemporalPyramidLevels},
+            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                kCameraMaxImages * 2U},
+        };
+        const VkDescriptorPoolCreateInfo poolInfo{
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
+            .maxSets = kCameraMaxImages,
+            .poolSizeCount = static_cast<std::uint32_t>(poolSizes.size()),
+            .pPoolSizes = poolSizes.data(),
+        };
+        result = createDescriptorPool_(device_, &poolInfo, nullptr, &temporalDescriptorPool_);
+        if (result != VK_SUCCESS) {
+            setTemporalVulkanError("create_descriptor_pool", result);
+            destroyTemporalPipeline();
+            return false;
+        }
+        const VkPushConstantRange pushRange{
+            .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+            .offset = 0,
+            .size = static_cast<std::uint32_t>(sizeof(TemporalPushConstants)),
+        };
+        const VkPipelineLayoutCreateInfo pipelineLayoutInfo{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .setLayoutCount = 1,
+            .pSetLayouts = &temporalDescriptorSetLayout_,
+            .pushConstantRangeCount = 1,
+            .pPushConstantRanges = &pushRange,
+        };
+        result = createPipelineLayout_(
+            device_,
+            &pipelineLayoutInfo,
+            nullptr,
+            &temporalPipelineLayout_
+        );
+        if (result != VK_SUCCESS) {
+            setTemporalVulkanError("create_pipeline_layout", result);
+            destroyTemporalPipeline();
+            return false;
+        }
+        if (!createOwnedBuffer(
+                sizeof(float) * 4U * kTemporalFlowPointCount,
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                &temporalFlowBuffer_,
+                &temporalFlowMemory_
+            ) ||
+            !createOwnedBuffer(
+                sizeof(float) * kTemporalResultElementCount,
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                &temporalFitBuffer_,
+                &temporalFitMemory_
+            )) {
+            destroyTemporalPipeline();
+            return false;
+        }
+        result = mapMemory_(
+            device_,
+            temporalFitMemory_,
+            0,
+            sizeof(float) * kTemporalResultElementCount,
+            0,
+            &temporalFitMapped_
+        );
+        if (result != VK_SUCCESS || temporalFitMapped_ == nullptr) {
+            setTemporalVulkanError("map_fit_buffer", result);
+            destroyTemporalPipeline();
+            return false;
+        }
+        if (!createComputePipeline(
+                armakeup::shaders::kTemporalLuma,
+                sizeof(armakeup::shaders::kTemporalLuma),
+                &temporalLumaPipeline_
+            ) ||
+            !createComputePipeline(
+                armakeup::shaders::kTemporalDownsample,
+                sizeof(armakeup::shaders::kTemporalDownsample),
+                &temporalDownsamplePipeline_
+            ) ||
+            !createComputePipeline(
+                armakeup::shaders::kTemporalFlow,
+                sizeof(armakeup::shaders::kTemporalFlow),
+                &temporalFlowPipeline_
+            ) ||
+            !createComputePipeline(
+                armakeup::shaders::kTemporalFit,
+                sizeof(armakeup::shaders::kTemporalFit),
+                &temporalFitPipeline_
+            )) {
+            destroyTemporalPipeline();
+            return false;
+        }
+        return true;
+    }
+
+    bool prepareTemporalDescriptorSet() {
+        if (!temporalReady_) {
+            return false;
+        }
+        pendingCameraFrame_.temporalWriteIndex = temporalHistoryValid_
+            ? 1U - temporalHistoryIndex_
+            : 0U;
+        const std::uint32_t writeIndex = pendingCameraFrame_.temporalWriteIndex;
+        const std::uint32_t previousIndex = temporalHistoryValid_
+            ? temporalHistoryIndex_
+            : 1U - writeIndex;
+        const VkDescriptorSetAllocateInfo allocateInfo{
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+            .pNext = nullptr,
+            .descriptorPool = temporalDescriptorPool_,
+            .descriptorSetCount = 1,
+            .pSetLayouts = &temporalDescriptorSetLayout_,
+        };
+        VkResult result = allocateDescriptorSets_(
+            device_,
+            &allocateInfo,
+            &pendingCameraFrame_.temporalDescriptorSet
+        );
+        if (result != VK_SUCCESS) {
+            setTemporalVulkanError("allocate_descriptor", result);
+            return false;
+        }
+        std::array<VkDescriptorImageInfo, 6> imageInfos{};
+        imageInfos[0] = VkDescriptorImageInfo{
+            .sampler = VK_NULL_HANDLE,
+            .imageView = pendingCameraFrame_.importedImageView,
+            .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+        };
+        for (std::uint32_t level = 0; level < kTemporalPyramidLevels; ++level) {
+            imageInfos[level + 1U] = VkDescriptorImageInfo{
+                .sampler = VK_NULL_HANDLE,
+                .imageView = temporalPyramidLevelViews_[writeIndex][level],
+                .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+            };
+        }
+        imageInfos[4] = VkDescriptorImageInfo{
+            .sampler = VK_NULL_HANDLE,
+            .imageView = temporalPyramidSampledViews_[previousIndex],
+            .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+        };
+        imageInfos[5] = VkDescriptorImageInfo{
+            .sampler = VK_NULL_HANDLE,
+            .imageView = temporalPyramidSampledViews_[writeIndex],
+            .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+        };
+        const std::array<VkDescriptorBufferInfo, 2> bufferInfos{
+            VkDescriptorBufferInfo{
+                .buffer = temporalFlowBuffer_,
+                .offset = 0,
+                .range = sizeof(float) * 4U * kTemporalFlowPointCount,
+            },
+            VkDescriptorBufferInfo{
+                .buffer = temporalFitBuffer_,
+                .offset = 0,
+                .range = sizeof(float) * kTemporalResultElementCount,
+            },
+        };
+        std::array<VkWriteDescriptorSet, 8> writes{};
+        for (std::uint32_t binding = 0; binding < 6U; ++binding) {
+            writes[binding] = VkWriteDescriptorSet{
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .pNext = nullptr,
+                .dstSet = pendingCameraFrame_.temporalDescriptorSet,
+                .dstBinding = binding,
+                .dstArrayElement = 0,
+                .descriptorCount = 1,
+                .descriptorType = binding == 0U || binding >= 4U
+                    ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
+                    : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                .pImageInfo = &imageInfos[binding],
+                .pBufferInfo = nullptr,
+                .pTexelBufferView = nullptr,
+            };
+        }
+        for (std::uint32_t index = 0; index < bufferInfos.size(); ++index) {
+            const std::uint32_t binding = index + 6U;
+            writes[binding] = VkWriteDescriptorSet{
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .pNext = nullptr,
+                .dstSet = pendingCameraFrame_.temporalDescriptorSet,
+                .dstBinding = binding,
+                .dstArrayElement = 0,
+                .descriptorCount = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .pImageInfo = nullptr,
+                .pBufferInfo = &bufferInfos[index],
+                .pTexelBufferView = nullptr,
+            };
+        }
+        updateDescriptorSets_(
+            device_,
+            static_cast<std::uint32_t>(writes.size()),
+            writes.data(),
+            0,
+            nullptr
+        );
         return true;
     }
 
@@ -1836,6 +2423,10 @@ private:
         };
         updateDescriptorSets_(device_, 1, &descriptorWrite, 0, nullptr);
 
+        if (temporalReady_ && !prepareTemporalDescriptorSet()) {
+            pendingCameraFrame_.temporalDescriptorSet = VK_NULL_HANDLE;
+        }
+
         pendingCameraFrame_.vkFormat = imageFormat;
         pendingCameraFrame_.externalFormat = formatProperties.externalFormat;
         lastCameraWidth_.store(pendingCameraFrame_.description.width);
@@ -1984,7 +2575,7 @@ private:
         };
         std::array<VkPipelineStageFlags, 2> waitStages{
             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
         };
         const std::uint32_t waitCount = pendingCameraFrame_.acquireSemaphore == VK_NULL_HANDLE
             ? 1U
@@ -2076,7 +2667,7 @@ private:
         cmdPipelineBarrier_(
             commandBuffer,
             VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
             0,
             0,
             nullptr,
@@ -2085,6 +2676,9 @@ private:
             1,
             &acquireBarrier
         );
+        if (!recordTemporalCommands(commandBuffer)) {
+            return false;
+        }
         const VkClearValue clearValue{
             .color = VkClearColorValue{.float32 = {0.0F, 0.0F, 0.0F, 1.0F}},
         };
@@ -2136,7 +2730,7 @@ private:
         };
         cmdPipelineBarrier_(
             commandBuffer,
-            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
             VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
             0,
             0,
@@ -2151,6 +2745,252 @@ private:
             setCameraVulkanError("end_camera_command_buffer", result);
             return false;
         }
+        return true;
+    }
+
+    [[nodiscard]] bool temporalRoiValid() const {
+        const auto& roi = pendingCameraFrame_.temporalRoi;
+        return std::all_of(roi.begin(), roi.end(), [](float value) {
+            return std::isfinite(value);
+        }) && roi[0] >= 0.0F && roi[1] >= 0.0F &&
+            roi[2] <= 1.0F && roi[3] <= 1.0F &&
+            roi[2] - roi[0] >= 0.01F && roi[3] - roi[1] >= 0.01F;
+    }
+
+    [[nodiscard]] bool temporalTransformMatchesHistory() const {
+        if (!temporalHistoryValid_) {
+            return false;
+        }
+        for (std::size_t index = 0; index < kTransformElementCount; ++index) {
+            if (std::abs(
+                    pendingCameraFrame_.transform[index] - temporalHistoryTransform_[index]
+                ) > 0.0001F) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool recordTemporalCommands(VkCommandBuffer commandBuffer) {
+        if (!temporalReady_ ||
+            pendingCameraFrame_.temporalDescriptorSet == VK_NULL_HANDLE) {
+            return true;
+        }
+        const std::uint32_t writeIndex = pendingCameraFrame_.temporalWriteIndex;
+        const bool initialized = temporalPyramidInitialized_[writeIndex];
+        const VkImageMemoryBarrier preparePyramidBarrier{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .pNext = nullptr,
+            .srcAccessMask = initialized
+                ? VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT
+                : 0U,
+            .dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+            .oldLayout = initialized ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_UNDEFINED,
+            .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image = temporalPyramids_[writeIndex],
+            .subresourceRange = VkImageSubresourceRange{
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = kTemporalPyramidLevels,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+        };
+        cmdPipelineBarrier_(
+            commandBuffer,
+            initialized ? VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0,
+            0,
+            nullptr,
+            0,
+            nullptr,
+            1,
+            &preparePyramidBarrier
+        );
+        TemporalPushConstants pushConstants{};
+        pushConstants.uvTransform = pendingCameraFrame_.transform;
+        pushConstants.roi = pendingCameraFrame_.temporalRoi;
+        cmdBindDescriptorSets_(
+            commandBuffer,
+            VK_PIPELINE_BIND_POINT_COMPUTE,
+            temporalPipelineLayout_,
+            0,
+            1,
+            &pendingCameraFrame_.temporalDescriptorSet,
+            0,
+            nullptr
+        );
+        cmdBindPipeline_(
+            commandBuffer,
+            VK_PIPELINE_BIND_POINT_COMPUTE,
+            temporalLumaPipeline_
+        );
+        cmdPushConstants_(
+            commandBuffer,
+            temporalPipelineLayout_,
+            VK_SHADER_STAGE_COMPUTE_BIT,
+            0,
+            static_cast<std::uint32_t>(sizeof(pushConstants)),
+            &pushConstants
+        );
+        cmdDispatch_(
+            commandBuffer,
+            (kTemporalPyramidSize + 15U) / 16U,
+            (kTemporalPyramidSize + 15U) / 16U,
+            1
+        );
+        cmdBindPipeline_(
+            commandBuffer,
+            VK_PIPELINE_BIND_POINT_COMPUTE,
+            temporalDownsamplePipeline_
+        );
+        for (std::uint32_t level = 1; level < kTemporalPyramidLevels; ++level) {
+            const VkImageMemoryBarrier sourceReadyBarrier{
+                .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                .pNext = nullptr,
+                .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+                .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+                .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+                .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .image = temporalPyramids_[writeIndex],
+                .subresourceRange = VkImageSubresourceRange{
+                    .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                    .baseMipLevel = level - 1U,
+                    .levelCount = 1,
+                    .baseArrayLayer = 0,
+                    .layerCount = 1,
+                },
+            };
+            cmdPipelineBarrier_(
+                commandBuffer,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                0,
+                0,
+                nullptr,
+                0,
+                nullptr,
+                1,
+                &sourceReadyBarrier
+            );
+            pushConstants.parameters[0] = static_cast<std::int32_t>(level);
+            cmdPushConstants_(
+                commandBuffer,
+                temporalPipelineLayout_,
+                VK_SHADER_STAGE_COMPUTE_BIT,
+                0,
+                static_cast<std::uint32_t>(sizeof(pushConstants)),
+                &pushConstants
+            );
+            const std::uint32_t levelSize = kTemporalPyramidSize >> level;
+            cmdDispatch_(
+                commandBuffer,
+                (levelSize + 15U) / 16U,
+                (levelSize + 15U) / 16U,
+                1
+            );
+        }
+        const VkImageMemoryBarrier pyramidReadyBarrier{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .pNext = nullptr,
+            .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+            .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+            .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image = temporalPyramids_[writeIndex],
+            .subresourceRange = preparePyramidBarrier.subresourceRange,
+        };
+        cmdPipelineBarrier_(
+            commandBuffer,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0,
+            0,
+            nullptr,
+            0,
+            nullptr,
+            1,
+            &pyramidReadyBarrier
+        );
+        if (!temporalRoiValid() || !temporalTransformMatchesHistory()) {
+            return true;
+        }
+        pendingCameraFrame_.temporalComputed = true;
+        pendingCameraFrame_.temporalFromTimestampNs = temporalHistoryTimestampNs_;
+        pushConstants.parameters.fill(0);
+        cmdBindPipeline_(
+            commandBuffer,
+            VK_PIPELINE_BIND_POINT_COMPUTE,
+            temporalFlowPipeline_
+        );
+        cmdPushConstants_(
+            commandBuffer,
+            temporalPipelineLayout_,
+            VK_SHADER_STAGE_COMPUTE_BIT,
+            0,
+            static_cast<std::uint32_t>(sizeof(pushConstants)),
+            &pushConstants
+        );
+        cmdDispatch_(commandBuffer, 1, 1, 1);
+        const VkBufferMemoryBarrier flowReadyBarrier{
+            .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+            .pNext = nullptr,
+            .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .buffer = temporalFlowBuffer_,
+            .offset = 0,
+            .size = VK_WHOLE_SIZE,
+        };
+        cmdPipelineBarrier_(
+            commandBuffer,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0,
+            0,
+            nullptr,
+            1,
+            &flowReadyBarrier,
+            0,
+            nullptr
+        );
+        cmdBindPipeline_(
+            commandBuffer,
+            VK_PIPELINE_BIND_POINT_COMPUTE,
+            temporalFitPipeline_
+        );
+        cmdDispatch_(commandBuffer, 1, 1, 1);
+        const VkBufferMemoryBarrier fitHostBarrier{
+            .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+            .pNext = nullptr,
+            .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_HOST_READ_BIT,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .buffer = temporalFitBuffer_,
+            .offset = 0,
+            .size = VK_WHOLE_SIZE,
+        };
+        cmdPipelineBarrier_(
+            commandBuffer,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_HOST_BIT,
+            0,
+            0,
+            nullptr,
+            1,
+            &fitHostBarrier,
+            0,
+            nullptr
+        );
         return true;
     }
 
@@ -2173,11 +3013,36 @@ private:
         }
         closeFileDescriptor(pendingCameraFrame_.releaseFenceFd);
         pendingCameraFrame_.releaseFenceFd = -1;
+        if (pendingCameraFrame_.temporalDescriptorSet != VK_NULL_HANDLE && temporalReady_) {
+            if (pendingCameraFrame_.temporalComputed && temporalFitMapped_ != nullptr) {
+                const auto* result = static_cast<const float*>(temporalFitMapped_);
+                std::copy_n(
+                    result,
+                    kTemporalResultElementCount,
+                    pendingCameraFrame_.temporalResult.begin()
+                );
+                temporalComputedFrames_.fetch_add(1);
+                if (pendingCameraFrame_.temporalResult[7] >= 0.5F) {
+                    temporalAcceptedFrames_.fetch_add(1);
+                } else {
+                    temporalRejectedFrames_.fetch_add(1);
+                }
+            }
+            temporalHistoryIndex_ = pendingCameraFrame_.temporalWriteIndex;
+            temporalPyramidInitialized_[temporalHistoryIndex_] = true;
+            temporalHistoryTimestampNs_ = pendingCameraFrame_.timestampNs;
+            temporalHistoryTransform_ = pendingCameraFrame_.transform;
+            temporalHistoryValid_ = true;
+        }
         destroyPendingCameraGpuResources();
         return true;
     }
 
-    jobject deliverPendingCameraFrame(JNIEnv* environment, jlongArray metadata) {
+    jobject deliverPendingCameraFrame(
+        JNIEnv* environment,
+        jlongArray metadata,
+        jfloatArray temporalValues
+    ) {
         if (pendingCameraFrame_.image == nullptr ||
             pendingCameraFrame_.hardwareBuffer == nullptr) {
             return nullptr;
@@ -2201,12 +3066,25 @@ private:
             static_cast<jlong>(pendingCameraFrame_.description.usage),
             pendingCameraFrame_.acquireFenceImported ? 1L : 0L,
             pendingCameraFrame_.releaseFenceExported ? 1L : 0L,
+            static_cast<jlong>(pendingCameraFrame_.temporalFromTimestampNs),
         };
         environment->SetLongArrayRegion(
             metadata,
             0,
             static_cast<jsize>(values.size()),
             values.data()
+        );
+        if (environment->ExceptionCheck() == JNI_TRUE) {
+            environment->DeleteLocalRef(hardwareBuffer);
+            destroyPendingCameraFrame(/* deleteImage = */ true);
+            cameraDroppedFrames_.fetch_add(1);
+            return nullptr;
+        }
+        environment->SetFloatArrayRegion(
+            temporalValues,
+            0,
+            static_cast<jsize>(pendingCameraFrame_.temporalResult.size()),
+            pendingCameraFrame_.temporalResult.data()
         );
         if (environment->ExceptionCheck() == JNI_TRUE) {
             environment->DeleteLocalRef(hardwareBuffer);
@@ -2237,6 +3115,16 @@ private:
                 &pendingCameraFrame_.descriptorSet
             );
             pendingCameraFrame_.descriptorSet = VK_NULL_HANDLE;
+        }
+        if (pendingCameraFrame_.temporalDescriptorSet != VK_NULL_HANDLE &&
+            temporalDescriptorPool_ != VK_NULL_HANDLE) {
+            freeDescriptorSets_(
+                device_,
+                temporalDescriptorPool_,
+                1,
+                &pendingCameraFrame_.temporalDescriptorSet
+            );
+            pendingCameraFrame_.temporalDescriptorSet = VK_NULL_HANDLE;
         }
         if (pendingCameraFrame_.importedImageView != VK_NULL_HANDLE) {
             destroyImageView_(device_, pendingCameraFrame_.importedImageView, nullptr);
@@ -2271,10 +3159,89 @@ private:
         pendingCameraFrame_ = PendingCameraFrame{};
     }
 
+    void destroyTemporalPipeline() {
+        temporalReady_ = false;
+        temporalHistoryValid_ = false;
+        temporalHistoryTimestampNs_ = 0;
+        temporalPyramidInitialized_.fill(false);
+        if (device_ == VK_NULL_HANDLE) {
+            return;
+        }
+        const std::array<VkPipeline*, 4> pipelines{
+            &temporalLumaPipeline_,
+            &temporalDownsamplePipeline_,
+            &temporalFlowPipeline_,
+            &temporalFitPipeline_,
+        };
+        for (VkPipeline* pipeline : pipelines) {
+            if (*pipeline != VK_NULL_HANDLE) {
+                destroyPipeline_(device_, *pipeline, nullptr);
+                *pipeline = VK_NULL_HANDLE;
+            }
+        }
+        if (temporalPipelineLayout_ != VK_NULL_HANDLE) {
+            destroyPipelineLayout_(device_, temporalPipelineLayout_, nullptr);
+            temporalPipelineLayout_ = VK_NULL_HANDLE;
+        }
+        if (temporalDescriptorPool_ != VK_NULL_HANDLE) {
+            destroyDescriptorPool_(device_, temporalDescriptorPool_, nullptr);
+            temporalDescriptorPool_ = VK_NULL_HANDLE;
+        }
+        if (temporalDescriptorSetLayout_ != VK_NULL_HANDLE) {
+            destroyDescriptorSetLayout_(device_, temporalDescriptorSetLayout_, nullptr);
+            temporalDescriptorSetLayout_ = VK_NULL_HANDLE;
+        }
+        if (temporalFitMapped_ != nullptr && temporalFitMemory_ != VK_NULL_HANDLE) {
+            unmapMemory_(device_, temporalFitMemory_);
+            temporalFitMapped_ = nullptr;
+        }
+        if (temporalFlowBuffer_ != VK_NULL_HANDLE) {
+            destroyBuffer_(device_, temporalFlowBuffer_, nullptr);
+            temporalFlowBuffer_ = VK_NULL_HANDLE;
+        }
+        if (temporalFlowMemory_ != VK_NULL_HANDLE) {
+            freeMemory_(device_, temporalFlowMemory_, nullptr);
+            temporalFlowMemory_ = VK_NULL_HANDLE;
+        }
+        if (temporalFitBuffer_ != VK_NULL_HANDLE) {
+            destroyBuffer_(device_, temporalFitBuffer_, nullptr);
+            temporalFitBuffer_ = VK_NULL_HANDLE;
+        }
+        if (temporalFitMemory_ != VK_NULL_HANDLE) {
+            freeMemory_(device_, temporalFitMemory_, nullptr);
+            temporalFitMemory_ = VK_NULL_HANDLE;
+        }
+        if (temporalSampler_ != VK_NULL_HANDLE) {
+            destroySampler_(device_, temporalSampler_, nullptr);
+            temporalSampler_ = VK_NULL_HANDLE;
+        }
+        for (std::uint32_t index = 0; index < temporalPyramids_.size(); ++index) {
+            if (temporalPyramidSampledViews_[index] != VK_NULL_HANDLE) {
+                destroyImageView_(device_, temporalPyramidSampledViews_[index], nullptr);
+                temporalPyramidSampledViews_[index] = VK_NULL_HANDLE;
+            }
+            for (VkImageView& view : temporalPyramidLevelViews_[index]) {
+                if (view != VK_NULL_HANDLE) {
+                    destroyImageView_(device_, view, nullptr);
+                    view = VK_NULL_HANDLE;
+                }
+            }
+            if (temporalPyramids_[index] != VK_NULL_HANDLE) {
+                destroyImage_(device_, temporalPyramids_[index], nullptr);
+                temporalPyramids_[index] = VK_NULL_HANDLE;
+            }
+            if (temporalPyramidMemory_[index] != VK_NULL_HANDLE) {
+                freeMemory_(device_, temporalPyramidMemory_[index], nullptr);
+                temporalPyramidMemory_[index] = VK_NULL_HANDLE;
+            }
+        }
+    }
+
     void destroyCameraPipeline() {
         if (device_ == VK_NULL_HANDLE) {
             return;
         }
+        destroyTemporalPipeline();
         if (cameraPipeline_ != VK_NULL_HANDLE) {
             destroyPipeline_(device_, cameraPipeline_, nullptr);
             cameraPipeline_ = VK_NULL_HANDLE;
@@ -2517,6 +3484,15 @@ private:
         setCameraError(operation + "_vk_" + std::to_string(result));
     }
 
+    void setTemporalError(const std::string& reason) {
+        std::lock_guard lock(statusMutex_);
+        temporalError_ = reason;
+    }
+
+    void setTemporalVulkanError(const std::string& operation, VkResult result) {
+        setTemporalError(operation + "_vk_" + std::to_string(result));
+    }
+
     [[nodiscard]] static std::string versionName(std::uint32_t version) {
         std::ostringstream output;
         output << VK_API_VERSION_MAJOR(version) << '.'
@@ -2584,6 +3560,30 @@ private:
     VkPipeline cameraPipeline_ = VK_NULL_HANDLE;
     VkFormat cameraPipelineVkFormat_ = VK_FORMAT_UNDEFINED;
     std::uint64_t cameraPipelineExternalFormat_ = 0;
+    bool temporalReady_ = false;
+    bool temporalHistoryValid_ = false;
+    std::uint32_t temporalHistoryIndex_ = 0;
+    std::int64_t temporalHistoryTimestampNs_ = 0;
+    std::array<float, kTransformElementCount> temporalHistoryTransform_{};
+    std::array<bool, 2> temporalPyramidInitialized_{};
+    std::array<VkImage, 2> temporalPyramids_{};
+    std::array<VkDeviceMemory, 2> temporalPyramidMemory_{};
+    std::array<std::array<VkImageView, kTemporalPyramidLevels>, 2>
+        temporalPyramidLevelViews_{};
+    std::array<VkImageView, 2> temporalPyramidSampledViews_{};
+    VkSampler temporalSampler_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout temporalDescriptorSetLayout_ = VK_NULL_HANDLE;
+    VkDescriptorPool temporalDescriptorPool_ = VK_NULL_HANDLE;
+    VkPipelineLayout temporalPipelineLayout_ = VK_NULL_HANDLE;
+    VkPipeline temporalLumaPipeline_ = VK_NULL_HANDLE;
+    VkPipeline temporalDownsamplePipeline_ = VK_NULL_HANDLE;
+    VkPipeline temporalFlowPipeline_ = VK_NULL_HANDLE;
+    VkPipeline temporalFitPipeline_ = VK_NULL_HANDLE;
+    VkBuffer temporalFlowBuffer_ = VK_NULL_HANDLE;
+    VkDeviceMemory temporalFlowMemory_ = VK_NULL_HANDLE;
+    VkBuffer temporalFitBuffer_ = VK_NULL_HANDLE;
+    VkDeviceMemory temporalFitMemory_ = VK_NULL_HANDLE;
+    void* temporalFitMapped_ = nullptr;
 
     std::atomic<bool> ready_{false};
     std::atomic<bool> stopRequested_{false};
@@ -2595,6 +3595,9 @@ private:
     std::atomic<std::uint64_t> cameraDroppedFrames_{0};
     std::atomic<std::uint64_t> cameraAcquireFences_{0};
     std::atomic<std::uint64_t> cameraReleaseFences_{0};
+    std::atomic<std::uint64_t> temporalComputedFrames_{0};
+    std::atomic<std::uint64_t> temporalAcceptedFrames_{0};
+    std::atomic<std::uint64_t> temporalRejectedFrames_{0};
     std::atomic<std::uint32_t> lastCameraWidth_{0};
     std::atomic<std::uint32_t> lastCameraHeight_{0};
     std::atomic<std::uint32_t> lastCameraFormat_{0};
@@ -2611,8 +3614,10 @@ private:
     std::string status_ = "initializing";
     std::string errorReason_;
     std::string cameraError_;
+    std::string temporalError_;
     std::string deviceName_ = "none";
     std::uint32_t deviceApiVersion_ = 0;
+    VkPhysicalDeviceMemoryProperties memoryProperties_{};
 
     PFN_vkGetInstanceProcAddr getInstanceProcAddress_ = nullptr;
     PFN_vkGetDeviceProcAddr getDeviceProcAddress_ = nullptr;
@@ -2621,6 +3626,7 @@ private:
     PFN_vkDestroySurfaceKHR destroySurface_ = nullptr;
     PFN_vkEnumeratePhysicalDevices enumeratePhysicalDevices_ = nullptr;
     PFN_vkGetPhysicalDeviceProperties getPhysicalDeviceProperties_ = nullptr;
+    PFN_vkGetPhysicalDeviceMemoryProperties getPhysicalDeviceMemoryProperties_ = nullptr;
     PFN_vkGetPhysicalDeviceQueueFamilyProperties getPhysicalDeviceQueueFamilyProperties_ = nullptr;
     PFN_vkGetPhysicalDeviceSurfaceSupportKHR getPhysicalDeviceSurfaceSupport_ = nullptr;
     PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR getPhysicalDeviceSurfaceCapabilities_ = nullptr;
@@ -2652,6 +3658,7 @@ private:
     PFN_vkCmdBindDescriptorSets cmdBindDescriptorSets_ = nullptr;
     PFN_vkCmdPushConstants cmdPushConstants_ = nullptr;
     PFN_vkCmdDraw cmdDraw_ = nullptr;
+    PFN_vkCmdDispatch cmdDispatch_ = nullptr;
     PFN_vkCreateSemaphore createSemaphore_ = nullptr;
     PFN_vkDestroySemaphore destroySemaphore_ = nullptr;
     PFN_vkCreateFence createFence_ = nullptr;
@@ -2668,6 +3675,12 @@ private:
     PFN_vkAllocateMemory allocateMemory_ = nullptr;
     PFN_vkFreeMemory freeMemory_ = nullptr;
     PFN_vkBindImageMemory bindImageMemory_ = nullptr;
+    PFN_vkCreateBuffer createBuffer_ = nullptr;
+    PFN_vkDestroyBuffer destroyBuffer_ = nullptr;
+    PFN_vkGetBufferMemoryRequirements getBufferMemoryRequirements_ = nullptr;
+    PFN_vkBindBufferMemory bindBufferMemory_ = nullptr;
+    PFN_vkMapMemory mapMemory_ = nullptr;
+    PFN_vkUnmapMemory unmapMemory_ = nullptr;
     PFN_vkGetAndroidHardwareBufferPropertiesANDROID getAndroidHardwareBufferProperties_ = nullptr;
     PFN_vkCreateSamplerYcbcrConversion createSamplerYcbcrConversion_ = nullptr;
     PFN_vkDestroySamplerYcbcrConversion destroySamplerYcbcrConversion_ = nullptr;
@@ -2685,6 +3698,7 @@ private:
     PFN_vkCreatePipelineLayout createPipelineLayout_ = nullptr;
     PFN_vkDestroyPipelineLayout destroyPipelineLayout_ = nullptr;
     PFN_vkCreateGraphicsPipelines createGraphicsPipelines_ = nullptr;
+    PFN_vkCreateComputePipelines createComputePipelines_ = nullptr;
     PFN_vkDestroyPipeline destroyPipeline_ = nullptr;
     PFN_vkImportSemaphoreFdKHR importSemaphoreFd_ = nullptr;
     PFN_vkGetSemaphoreFdKHR getSemaphoreFd_ = nullptr;
@@ -2808,13 +3822,21 @@ Java_com_example_armakeup_render_NativeVulkanDiagnosticRuntime_nativeAcquireCame
     jobject /* runtime */,
     jlong handle,
     jlongArray metadata,
-    jfloatArray uvTransform
+    jfloatArray uvTransform,
+    jfloatArray trackingRoi,
+    jfloatArray temporalValues
 ) {
     VulkanDiagnosticRuntime* runtime = fromHandle(handle);
     if (runtime == nullptr) {
         return nullptr;
     }
-    return runtime->acquireCameraFrame(environment, metadata, uvTransform);
+    return runtime->acquireCameraFrame(
+        environment,
+        metadata,
+        uvTransform,
+        trackingRoi,
+        temporalValues
+    );
 }
 
 extern "C" JNIEXPORT void JNICALL

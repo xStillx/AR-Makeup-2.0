@@ -1,6 +1,6 @@
 # AR Makeup — контекст и технические решения
 
-Последнее обновление: 2026-08-12.
+Последнее обновление: 2026-08-13.
 
 Этот файл — источник долгоживущего контекста проекта. Его нужно обновлять, когда меняются продуктовые требования, выбранный стек, архитектура или измеренные ограничения устройств.
 
@@ -25,7 +25,7 @@ Android-приложение для виртуальной примерки ма
 - UI: XML/View system и `AppCompatActivity`.
 - `minSdk = 24`, `targetSdk = 37`, `compileSdk = 37`.
 - Android Gradle Plugin 9.3.1.
-- Реализованы диагностический camera/ML pipeline, зафиксированный tracking baseline и первый production-срез единого Filament-композитора для матовой помады. Semantic face parsing и полноценная normals/BRDF-модель ещё не добавлены.
+- Реализованы диагностический camera/ML pipeline, зафиксированный tracking baseline, Vulkan V4 temporal-compute vertical slice и первый production-срез единого Filament-композитора для матовой помады. Semantic face parsing и полноценная normals/BRDF-модель ещё не добавлены.
 
 Пока нет причин менять `minSdk = 24`: он совместим с выбранным ML-стеком и позволяет использовать современный GPU-пайплайн на Android 7+.
 
@@ -103,6 +103,16 @@ Device acceptance V3 на SM-G990B: camera input `1440×1080`, AHB format `34`, 
 
 V3 считается завершённым как camera-import/synchronization vertical slice. Видимый lipstick compositor пока остаётся Filament/OpenGL fallback: Vulkan уже владеет импортом, fences и контрольным camera pass, но ещё не выводит финальную lip scene в экранный swapchain. Это сохраняет проверенный visual baseline и позволяет перейти к V4 temporal compute без преждевременного удаления fallback. Перед production cutover всё ещё обязательны 10–15-минутный thermal soak, повороты display 0/90/180/270° и acceptance на нескольких GPU.
 
+V4 temporal GPU tracking реализован 2026-08-13 как следующий Vulkan vertical slice. Тот же импортированный camera `AHardwareBuffer` в одном command buffer преобразуется из external YCbCr в persistent `R32_SFLOAT` luma pyramid `192×192` с тремя mip-уровнями. Две пирамиды работают ping-pong без покадровых allocation. По расширенному ROI губ compute shader считает pyramidal iterative Lucas–Kanade flow для сетки `8×6` (48 точек, три итерации и окно `5×5`), затем второй GPU pass выполняет двухпроходный robust weighted similarity fit. Offline `glslc` теперь компилирует четыре V4 compute shader вместе с camera pass; compute/image/buffer/host переходы имеют явные Vulkan barriers, а camera ownership по-прежнему завершается тем же release sync-fd.
+
+Результат V4 содержит scale+rotation+translation, confidence, RMS residual, число inliers и пару raw sensor timestamps. Native и Kotlin повторно проверяют один строгий контракт: interval не больше 80 ms, минимум 12 из 48 согласованных точек, coverage-weighted confidence не ниже `0.36`, RMS не выше `0.014` display UV, scale `0.975…1.025`, модуль rotation не больше `0.05 rad`, translation не больше `0.045`. Порог confidence учитывает уже встроенный множитель `sqrt(inliers / 48)`: первоначальные `0.52` и 16 inliers почти полностью отключали качественные sparse-texture fits, поэтому после device telemetry они откалиброваны до `0.36` и 12 при сохранении геометрических ограничений.
+
+`TemporalLandmarkRefiner` хранит только непрерывную timestamped цепочку принятых transforms, интерполирует первый неполный interval и ограничивает render reprojection 42 ms. Lip mesh получает V4 correction относительно последнего Face Landmarker anchor; любой пропуск timestamp, rejected fit, слишком большой cumulative transform или смена camera transform немедленно очищает цепочку. В этом случае без скачка включается зафиксированный `LandmarkMotionPredictor`; его параметры и 16-ms continuity correction не изменены. Следовательно, ошибочный optical flow не переносится через rejected frame и V4 не ухудшает доказанный baseline при низкой текстуре или резком движении.
+
+Device acceptance V4 на SM-G990B/Adreno 660: camera `1440×1080`, AHB format `34`, external format `506`. В длинном foreground-интервале до pause вычислено 1626 temporal fits, принято 776 (`47.7%`); после стабилизации лица встречались серии 36–40 принятых из 60 кадров. За те же 1655 camera imports получено `cameraDropped=0`, release fence создан для каждого кадра, а released закономерно отставал на два in-flight Filament buffer. Home/resume остановил camera session и продолжил тот же runtime без black frame, crash или накопления очереди. Контрольное прогретое 12-секундное окно `gfxinfo`: 300 UI frames, 5.67% janky, CPU p50/p90/p95/p99 = 11/15/17/24 ms, GPU = 4/6/7/8 ms. GPU укладывается в верхнюю границу бюджета, но CPU p95 и jank хуже V3 baseline; необходимы thermal soak и профиль потока перед production acceptance.
+
+Локальная приёмка V4: native C++20 с `-Werror` и все compute shaders собраны для `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`; 61 unit-тест пройден без failures/errors, Android lint завершён без ошибок, debug APK собран, установлен и запущен на устройстве. Визуальная проверка статического кадра не выявила регрессий orientation/mirror/lip alignment. Она не доказывает превосходство в движении: до удаления predictor fallback обязательны записанные A/B-сценарии со статикой, медленным/резким поворотом, разговором, улыбкой и dropout, а также acceptance на нескольких GPU. V4 считается завершённым как безопасный temporal-compute vertical slice, но ещё не production-calibrated tracker.
+
 Официальный model bundle сохранён в `app/src/main/assets/face_landmarker.task`. Его SHA-256: `64184E229B263107BC2B804C6625DB1341FF2BB731874B0BCC2FE6544E0BC9FF`. BlazeFace, Face Mesh V2 и Blendshape V2 проверены по официальным model cards; все три компонента имеют лицензию Apache 2.0. Детали находятся в `app/src/main/assets/MODEL_LICENSES.md`.
 
 Текущий `FaceMeshOverlay` на Canvas является только диагностическим инструментом для проверки координат и jitter. Он не используется и не будет использоваться для финального макияжа.
@@ -175,7 +185,7 @@ Debug APK после добавления V2.0 native bootstrap имеет ра�
 | Язык и платформа | Native Android, Kotlin | Прямой доступ к CameraX, GPU, профилировщикам и минимальная лишняя задержка. |
 | Камера | CameraX 1.6.1, Camera2 backend | Стабильная версия, единое поведение на разных устройствах, lifecycle, точные настройки FPS и неблокирующий analysis-поток. |
 | Геометрия лица | MediaPipe Tasks Vision / Face Landmarker `1.0.0` | 478 3D landmarks, 52 blendshape-коэффициента, матрица трансформации, `LIVE_STREAM`, on-device GPU delegate. |
-| Рендер | Google Filament `1.74.0` как временный видимый OpenGL ES bridge; native Vulkan V3 camera importer/pass | Filament сохраняет проверенный camera/makeup visual baseline. Vulkan напрямую импортирует тот же camera AHB, выполняет YCbCr sampling и fence-controlled handoff без CPU-копии; финальный экранный compositor будет перенесён после следующих vertical slices. |
+| Рендер | Google Filament `1.74.0` как временный видимый OpenGL ES bridge; native Vulkan V4 camera importer/temporal compute | Filament сохраняет проверенный camera/makeup visual baseline. Vulkan напрямую импортирует тот же camera AHB, выполняет YCbCr sampling, luma pyramid, pyramidal LK flow, robust similarity fit и fence-controlled handoff без CPU-копии; финальный экранный compositor будет перенесён после следующих vertical slices. |
 | Native GPU toolchain | NDK r29 `29.0.14206865`, CMake `3.31.6`, C++20, NDK `glslc` | JNI/Vulkan frame graph, offline SPIR-V и строгая компиляция четырёх ABI с `-Werror`; dynamic Vulkan/media dispatch, AHB external memory, YCbCr conversion и sync-fd semaphores подключены. |
 | Семантические маски | MediaPipe Image Segmenter API + собственная LiteRT-модель face parsing | Нужны точные вероятностные маски губ, кожи, век и глаз; стандартной selfie segmentation для этого недостаточно. |
 | Асинхронность | Kotlin Coroutines + Flow | Изоляция camera, inference и render потоков; latest-only state без очереди устаревших кадров. |
@@ -298,7 +308,7 @@ Preview и ImageAnalysis должны использовать общий `ViewP
 1. **Camera + diagnostics — Vulkan V3 vertical slice реализован:** фронтальная камера, единые transforms/timestamps, FPS/latency overlay; CameraX пишет в native `AImageReader`, тот же `AHardwareBuffer` импортируется и семплируется Vulkan с acquire/release synchronization, затем передаётся видимому Filament fallback.
 2. **Face mesh — реализована диагностическая версия:** Face Landmarker в live-stream режиме, синхронизация timestamp и mesh overlay. Стабильность ещё нужно проверить на реальных устройствах.
 3. **Вертикальный срез «помада» — первый Filament production-срез реализован:** camera texture и динамическая upper/lower lip mesh сведены в одной GPU scene; есть linear-RGB luminance-preserving pigment, cubic subdivision, мягкое coverage и исключение рта/зубов. Остаются device runtime calibration, semantic lip refinement, face normals/lighting, полноценные BRDF-профили matte/satin/gloss и калибровка на разных губах/освещении.
-4. **Temporal quality — частично реализовано:** зафиксированный adaptive tracking baseline, отдельный быстрый канал общего translation, sensor-based frame timestamp, bounded capture alignment, 42-мс render-only extrapolation window, 16-мс smoothstep continuity correction между delivered frames и удержание при dropout; остаются визуальная device/video calibration, компенсация rotation/scale и стабилизация будущих semantic masks.
+4. **Temporal quality — Vulkan V4 vertical slice реализован:** V3 camera AHB в compute-программе преобразуется в трёхуровневую luma pyramid; 48-точечный pyramidal LK и robust similarity fit дают timestamped translation/rotation/scale для lip mesh. Confidence/geometric gate и немедленный fallback сохраняют зафиксированный predictor при недостоверном flow. Остаются записанное динамическое A/B, multi-device/thermal calibration и стабилизация будущих semantic masks.
 5. **Face parsing:** подготовленная и лицензированная модель для skin/lips/eyes/eyelids; LiteRT GPU/NPU/CPU benchmark.
 6. **Остальные эффекты:** lip liner, blush, eyeshadow, eyeliner.
 7. **Калибровка:** разные тона кожи, освещение, front-camera mirroring, HDR/SDR и цветовые пространства устройств.
@@ -353,6 +363,10 @@ Preview и ImageAnalysis должны использовать общий `ViewP
 - MediaPipe Android setup and GPU delegate: https://developers.google.com/edge/mediapipe/solutions/setup_android
 - Vulkan Android Hardware Buffer external memory: https://docs.vulkan.org/refpages/latest/refpages/source/VK_ANDROID_external_memory_android_hardware_buffer.html
 - Vulkan AHB format/YCbCr properties: https://docs.vulkan.org/refpages/latest/refpages/source/VkAndroidHardwareBufferFormatPropertiesANDROID.html
+- Vulkan compute shaders: https://docs.vulkan.org/guide/latest/compute_shaders.html
+- Vulkan storage images and texel buffers: https://docs.vulkan.org/guide/latest/storage_image_and_texel_buffers.html
+- Vulkan synchronization examples: https://docs.vulkan.org/guide/latest/synchronization_examples.html
+- Vulkan synchronization specification: https://docs.vulkan.org/spec/latest/chapters/synchronization.html
 - Android `AImageReader` / `ImageReader` acquire-latest semantics: https://developer.android.com/reference/android/media/ImageReader
 - Android synchronization fences: https://developer.android.com/reference/android/hardware/SyncFence.html
 - CameraX releases: https://developer.android.com/jetpack/androidx/releases/camera

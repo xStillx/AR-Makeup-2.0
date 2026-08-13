@@ -1,0 +1,25 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D cameraTexture;
+layout(r32f, set = 0, binding = 1) uniform writeonly image2D pyramidLevel0;
+
+layout(push_constant) uniform TemporalState {
+    mat4 uvTransform;
+    vec4 roi;
+    ivec4 parameters;
+} state;
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 outputSize = imageSize(pyramidLevel0);
+    if (any(greaterThanEqual(pixel, outputSize))) {
+        return;
+    }
+    vec2 displayUv = (vec2(pixel) + vec2(0.5)) / vec2(outputSize);
+    vec2 cameraUv = (state.uvTransform * vec4(displayUv, 0.0, 1.0)).xy;
+    vec3 color = texture(cameraTexture, cameraUv).rgb;
+    float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
+    imageStore(pyramidLevel0, pixel, vec4(luma, 0.0, 0.0, 1.0));
+}

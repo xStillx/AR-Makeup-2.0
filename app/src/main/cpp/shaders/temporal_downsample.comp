@@ -1,0 +1,47 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(r32f, set = 0, binding = 1) uniform image2D pyramidLevel0;
+layout(r32f, set = 0, binding = 2) uniform image2D pyramidLevel1;
+layout(r32f, set = 0, binding = 3) uniform image2D pyramidLevel2;
+
+layout(push_constant) uniform TemporalState {
+    mat4 uvTransform;
+    vec4 roi;
+    ivec4 parameters;
+} state;
+
+float sourcePixel(ivec2 pixel, int destinationLevel) {
+    if (destinationLevel == 1) {
+        ivec2 limit = imageSize(pyramidLevel0) - ivec2(1);
+        return imageLoad(pyramidLevel0, clamp(pixel, ivec2(0), limit)).r;
+    }
+    ivec2 limit = imageSize(pyramidLevel1) - ivec2(1);
+    return imageLoad(pyramidLevel1, clamp(pixel, ivec2(0), limit)).r;
+}
+
+void storeDestination(ivec2 pixel, int destinationLevel, float value) {
+    if (destinationLevel == 1) {
+        imageStore(pyramidLevel1, pixel, vec4(value, 0.0, 0.0, 1.0));
+    } else {
+        imageStore(pyramidLevel2, pixel, vec4(value, 0.0, 0.0, 1.0));
+    }
+}
+
+void main() {
+    int destinationLevel = state.parameters.x;
+    ivec2 destinationSize = destinationLevel == 1
+        ? imageSize(pyramidLevel1)
+        : imageSize(pyramidLevel2);
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(pixel, destinationSize))) {
+        return;
+    }
+    ivec2 source = pixel * 2;
+    float value = sourcePixel(source, destinationLevel) +
+        sourcePixel(source + ivec2(1, 0), destinationLevel) +
+        sourcePixel(source + ivec2(0, 1), destinationLevel) +
+        sourcePixel(source + ivec2(1, 1), destinationLevel);
+    storeDestination(pixel, destinationLevel, value * 0.25);
+}

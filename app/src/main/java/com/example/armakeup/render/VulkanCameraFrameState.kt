@@ -47,6 +47,8 @@ internal data class VulkanCameraFrameState(
     val landmarkSensorTimestampNs: Long?,
     val acquireFenceImported: Boolean,
     val releaseFenceExported: Boolean,
+    val temporalTrackingAttempted: Boolean,
+    val temporalTracking: VulkanTemporalTrackingResult?,
 ) {
     val landmarkAgeNs: Long?
         get() = landmarkSensorTimestampNs?.let { landmarkTimestamp ->

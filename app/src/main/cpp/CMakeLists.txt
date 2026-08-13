@@ -16,6 +16,10 @@ set(generated_shader_directory "${CMAKE_CURRENT_BINARY_DIR}/generated")
 set(camera_vertex_spirv "${generated_shader_directory}/camera_frame.vert.spv")
 set(camera_fragment_spirv "${generated_shader_directory}/camera_frame.frag.spv")
 set(camera_shader_header "${generated_shader_directory}/CameraShaders.generated.h")
+set(temporal_luma_spirv "${generated_shader_directory}/temporal_luma.comp.spv")
+set(temporal_downsample_spirv "${generated_shader_directory}/temporal_downsample.comp.spv")
+set(temporal_flow_spirv "${generated_shader_directory}/temporal_flow.comp.spv")
+set(temporal_fit_spirv "${generated_shader_directory}/temporal_fit.comp.spv")
 
 add_custom_command(
     OUTPUT "${camera_vertex_spirv}"
@@ -36,15 +40,55 @@ add_custom_command(
     VERBATIM
 )
 add_custom_command(
+    OUTPUT "${temporal_luma_spirv}"
+    COMMAND "${GLSLC_EXECUTABLE}" -O -fshader-stage=compute
+        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/temporal_luma.comp"
+        -o "${temporal_luma_spirv}"
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/temporal_luma.comp"
+    VERBATIM
+)
+add_custom_command(
+    OUTPUT "${temporal_downsample_spirv}"
+    COMMAND "${GLSLC_EXECUTABLE}" -O -fshader-stage=compute
+        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/temporal_downsample.comp"
+        -o "${temporal_downsample_spirv}"
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/temporal_downsample.comp"
+    VERBATIM
+)
+add_custom_command(
+    OUTPUT "${temporal_flow_spirv}"
+    COMMAND "${GLSLC_EXECUTABLE}" -O -fshader-stage=compute
+        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/temporal_flow.comp"
+        -o "${temporal_flow_spirv}"
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/temporal_flow.comp"
+    VERBATIM
+)
+add_custom_command(
+    OUTPUT "${temporal_fit_spirv}"
+    COMMAND "${GLSLC_EXECUTABLE}" -O -fshader-stage=compute
+        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/temporal_fit.comp"
+        -o "${temporal_fit_spirv}"
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/temporal_fit.comp"
+    VERBATIM
+)
+add_custom_command(
     OUTPUT "${camera_shader_header}"
     COMMAND "${CMAKE_COMMAND}"
         -DVERTEX_SHADER=${camera_vertex_spirv}
         -DFRAGMENT_SHADER=${camera_fragment_spirv}
+        -DTEMPORAL_LUMA_SHADER=${temporal_luma_spirv}
+        -DTEMPORAL_DOWNSAMPLE_SHADER=${temporal_downsample_spirv}
+        -DTEMPORAL_FLOW_SHADER=${temporal_flow_spirv}
+        -DTEMPORAL_FIT_SHADER=${temporal_fit_spirv}
         -DOUTPUT_HEADER=${camera_shader_header}
         -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/GenerateShaderHeader.cmake"
     DEPENDS
         "${camera_vertex_spirv}"
         "${camera_fragment_spirv}"
+        "${temporal_luma_spirv}"
+        "${temporal_downsample_spirv}"
+        "${temporal_flow_spirv}"
+        "${temporal_fit_spirv}"
         "${CMAKE_CURRENT_SOURCE_DIR}/cmake/GenerateShaderHeader.cmake"
     VERBATIM
 )
