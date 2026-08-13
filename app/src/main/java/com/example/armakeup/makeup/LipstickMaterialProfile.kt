@@ -51,3 +51,68 @@ internal object ReferenceMatteLipstickProfile {
     const val MID_INSET_FRACTION = 0.07f
     const val CORE_INSET_FRACTION = 0.16f
 }
+
+/** User-visible optical finish. Pigment coverage remains identical between finishes. */
+internal enum class LipstickFinish {
+    MATTE,
+    SATIN,
+    GLOSS,
+}
+
+/**
+ * Camera-conditioned optical response used by the lipstick shader.
+ *
+ * These parameters deliberately do not contain a baked highlight. The shader combines them with
+ * the current camera luminance, its low-frequency lighting gradient and the reconstructed lip
+ * normal, so the finish remains attached to the face and responds to the captured illumination.
+ */
+internal data class LipstickOpticalProfile(
+    val roughness: Float,
+    val specularStrength: Float,
+    val highlightRetention: Float,
+    val microTextureRetention: Float,
+    val wetInnerEdgeStrength: Float,
+) {
+    init {
+        require(roughness in MIN_ROUGHNESS..1f)
+        require(specularStrength in UNIT_RANGE)
+        require(highlightRetention in UNIT_RANGE)
+        require(microTextureRetention in UNIT_RANGE)
+        require(wetInnerEdgeStrength in UNIT_RANGE)
+    }
+
+    private companion object {
+        private const val MIN_ROUGHNESS = 0.08f
+        private val UNIT_RANGE = 0f..1f
+    }
+}
+
+internal object ReferenceLipstickOptics {
+    val matte = LipstickOpticalProfile(
+        roughness = 0.82f,
+        specularStrength = 0.07f,
+        highlightRetention = 0.24f,
+        microTextureRetention = 0.94f,
+        wetInnerEdgeStrength = 0.03f,
+    )
+    val satin = LipstickOpticalProfile(
+        roughness = 0.48f,
+        specularStrength = 0.20f,
+        highlightRetention = 0.68f,
+        microTextureRetention = 0.86f,
+        wetInnerEdgeStrength = 0.11f,
+    )
+    val gloss = LipstickOpticalProfile(
+        roughness = 0.20f,
+        specularStrength = 0.46f,
+        highlightRetention = 1f,
+        microTextureRetention = 0.72f,
+        wetInnerEdgeStrength = 0.32f,
+    )
+
+    fun forFinish(finish: LipstickFinish): LipstickOpticalProfile = when (finish) {
+        LipstickFinish.MATTE -> matte
+        LipstickFinish.SATIN -> satin
+        LipstickFinish.GLOSS -> gloss
+    }
+}

@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.AttributeSet
 import android.view.SurfaceView
 import androidx.camera.core.Preview
+import com.example.armakeup.makeup.LipstickFinish
 import com.example.armakeup.tracking.LandmarkRenderFrame
 import com.google.android.filament.Filament
 
@@ -74,6 +75,10 @@ class FilamentMakeupView @JvmOverloads constructor(
 
     fun clear() {
         compositor?.clear()
+    }
+
+    internal fun setLipstickFinish(finish: LipstickFinish) {
+        compositor?.setLipstickFinish(finish)
     }
 
     fun onResumeRenderer() {

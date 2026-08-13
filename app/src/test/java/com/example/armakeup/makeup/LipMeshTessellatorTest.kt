@@ -1,6 +1,7 @@
 package com.example.armakeup.makeup
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -62,6 +63,44 @@ class LipMeshTessellatorTest {
         )
     }
 
+    @Test
+    fun reconstructedNormalsAreFiniteUnitVectorsFacingCamera() {
+        val vertices = tessellate()
+
+        repeat(tessellator.vertexCount) { vertexIndex ->
+            val offset = vertexIndex * LipMeshTessellator.VERTEX_COMPONENT_COUNT
+            val normalX = vertices[offset + LipMeshTessellator.NORMAL_X_COMPONENT_OFFSET]
+            val normalY = vertices[offset + LipMeshTessellator.NORMAL_Y_COMPONENT_OFFSET]
+            val normalZ = vertices[offset + LipMeshTessellator.NORMAL_Z_COMPONENT_OFFSET]
+            val length = kotlin.math.sqrt(
+                normalX * normalX + normalY * normalY + normalZ * normalZ,
+            )
+            assertFalse(length.isNaN())
+            assertEquals(1f, length, 0.001f)
+            assertTrue(normalZ >= 0f)
+        }
+    }
+
+    @Test
+    fun materialCoordinatesCoverFullArcAndOuterToInnerSpan() {
+        val vertices = tessellate()
+        val firstVertex = 0
+        val lastUpperVertex = tessellator.verticesPerLip - 1
+
+        assertEquals(0f, component(vertices, firstVertex, LipMeshTessellator.RING_COMPONENT_OFFSET), EPSILON)
+        assertEquals(0f, component(vertices, firstVertex, LipMeshTessellator.ARC_COMPONENT_OFFSET), EPSILON)
+        assertEquals(
+            1f,
+            component(vertices, lastUpperVertex, LipMeshTessellator.RING_COMPONENT_OFFSET),
+            EPSILON,
+        )
+        assertEquals(
+            1f,
+            component(vertices, lastUpperVertex, LipMeshTessellator.ARC_COMPONENT_OFFSET),
+            EPSILON,
+        )
+    }
+
     private fun tessellate(): FloatArray = tessellator.tessellate(
         outerContour = contour(outer = true),
         innerContour = contour(outer = false),
@@ -80,7 +119,10 @@ class LipMeshTessellatorTest {
     }
 
     private fun coverage(vertices: FloatArray, vertexIndex: Int): Float =
-        vertices[vertexIndex * LipMeshTessellator.VERTEX_COMPONENT_COUNT + 2]
+        component(vertices, vertexIndex, LipMeshTessellator.COVERAGE_COMPONENT_OFFSET)
+
+    private fun component(vertices: FloatArray, vertexIndex: Int, componentOffset: Int): Float =
+        vertices[vertexIndex * LipMeshTessellator.VERTEX_COMPONENT_COUNT + componentOffset]
 
     companion object {
         private const val CORE_RING_INDEX = 3

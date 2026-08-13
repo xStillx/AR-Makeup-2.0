@@ -27,6 +27,7 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import com.example.armakeup.databinding.ActivityMainBinding
+import com.example.armakeup.makeup.LipstickFinish
 import com.example.armakeup.tracking.FaceLandmarkerTracker
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -65,6 +66,15 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
         setContentView(binding.root)
         binding.root.keepScreenOn = true
         binding.makeupRenderer.setErrorListener(::showFatalRendererState)
+        binding.finishToggleGroup.addOnButtonCheckedListener { _, checkedId, isChecked ->
+            if (!isChecked) return@addOnButtonCheckedListener
+            val finish = when (checkedId) {
+                R.id.finish_matte -> LipstickFinish.MATTE
+                R.id.finish_gloss -> LipstickFinish.GLOSS
+                else -> LipstickFinish.SATIN
+            }
+            binding.makeupRenderer.setLipstickFinish(finish)
+        }
 
         cameraExecutor = Executors.newSingleThreadExecutor { runnable ->
             Thread(runnable, "ar-makeup-camera-ml")

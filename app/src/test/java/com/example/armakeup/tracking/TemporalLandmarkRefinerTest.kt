@@ -2,14 +2,24 @@ package com.example.armakeup.tracking
 
 import com.example.armakeup.render.VulkanTemporalTrackingResult
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertNotNull
 import org.junit.Test
 
 class TemporalLandmarkRefinerTest {
     @Test
-    fun composesContiguousFlowAfterAnchor() {
+    fun defaultsToShadowModeSoExperimentalFlowCannotMoveVisibleMesh() {
         val refiner = TemporalLandmarkRefiner(maxRenderExtrapolationNs = 0L)
+        refiner.offer(sample(1_000L, 34_000_000L, translationX = 0.04f), 100L)
+
+        assertFalse(refiner.visibleApplicationEnabled)
+        assertNull(refiner.correctionFor(1_000L, 100L))
+    }
+
+    @Test
+    fun composesContiguousFlowAfterAnchor() {
+        val refiner = liveRefiner(maxRenderExtrapolationNs = 0L)
         refiner.offer(sample(1_000L, 34_000_000L, translationX = 0.01f), 100L)
         refiner.offer(sample(34_000_000L, 67_000_000L, translationX = 0.02f), 200L)
 
@@ -22,7 +32,7 @@ class TemporalLandmarkRefinerTest {
 
     @Test
     fun interpolatesFirstIntervalWhenAnchorFallsInsideIt() {
-        val refiner = TemporalLandmarkRefiner(maxRenderExtrapolationNs = 0L)
+        val refiner = liveRefiner(maxRenderExtrapolationNs = 0L)
         refiner.offer(sample(1_000L, 40_001_000L, translationX = 0.04f), 100L)
 
         val correction = refiner.correctionFor(20_001_000L, 100L)
@@ -33,7 +43,7 @@ class TemporalLandmarkRefinerTest {
 
     @Test
     fun rejectsTimestampGapInsteadOfPropagatingDrift() {
-        val refiner = TemporalLandmarkRefiner(
+        val refiner = liveRefiner(
             maxGapNs = 50_000_000L,
             maxRenderExtrapolationNs = 0L,
         )
@@ -44,7 +54,7 @@ class TemporalLandmarkRefinerTest {
 
     @Test
     fun extrapolatesOnlyWithinRenderWindow() {
-        val refiner = TemporalLandmarkRefiner(maxRenderExtrapolationNs = 20_000_000L)
+        val refiner = liveRefiner(maxRenderExtrapolationNs = 20_000_000L)
         refiner.offer(
             sample(1_000L, 20_001_000L, translationX = 0.02f),
             deliveryElapsedRealtimeNs = 1_000_000_000L,
@@ -55,6 +65,15 @@ class TemporalLandmarkRefinerTest {
 
         assertEquals(0.54f, correction!!.mapX(0.5f, 0.5f), 0.0001f)
     }
+
+    private fun liveRefiner(
+        maxGapNs: Long = 85_000_000L,
+        maxRenderExtrapolationNs: Long,
+    ) = TemporalLandmarkRefiner(
+        visibleApplicationEnabled = true,
+        maxGapNs = maxGapNs,
+        maxRenderExtrapolationNs = maxRenderExtrapolationNs,
+    )
 
     private fun sample(
         from: Long,

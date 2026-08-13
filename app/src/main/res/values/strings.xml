@@ -21,6 +21,9 @@
     <string name="camera_fps_auto">авто</string>
     <string name="delegate_gpu">GPU</string>
     <string name="delegate_cpu">CPU fallback</string>
-    <string name="phase_label">ЭТАП 03 · GPU COMPOSITOR</string>
-    <string name="phase_description">Камера и матовая помада сводятся в единой Filament-сцене с обработкой цвета в linear RGB.</string>
+    <string name="phase_label">ЭТАП 05 · MATERIAL MODEL</string>
+    <string name="phase_description">Нормали губ и освещение камеры управляют физикой покрытия без статичных нарисованных бликов.</string>
+    <string name="finish_matte">Матовая</string>
+    <string name="finish_satin">Сатин</string>
+    <string name="finish_gloss">Глянец</string>
 </resources>

@@ -62,4 +62,31 @@ class LipstickMaterialProfileTest {
             matteCoverage = 8,
         )
     }
+
+    @Test
+    fun finishesProgressFromDiffuseMatteToWetGloss() {
+        val matte = ReferenceLipstickOptics.matte
+        val satin = ReferenceLipstickOptics.satin
+        val gloss = ReferenceLipstickOptics.gloss
+
+        assertTrue(matte.roughness > satin.roughness)
+        assertTrue(satin.roughness > gloss.roughness)
+        assertTrue(matte.specularStrength < satin.specularStrength)
+        assertTrue(satin.specularStrength < gloss.specularStrength)
+        assertTrue(matte.highlightRetention < satin.highlightRetention)
+        assertTrue(satin.highlightRetention < gloss.highlightRetention)
+        assertTrue(matte.microTextureRetention > gloss.microTextureRetention)
+        assertTrue(matte.wetInnerEdgeStrength < gloss.wetInnerEdgeStrength)
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun physicallyInvalidRoughnessIsRejected() {
+        LipstickOpticalProfile(
+            roughness = 0f,
+            specularStrength = 0.2f,
+            highlightRetention = 0.5f,
+            microTextureRetention = 0.8f,
+            wetInnerEdgeStrength = 0.1f,
+        )
+    }
 }

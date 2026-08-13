@@ -20,7 +20,10 @@ import androidx.core.content.ContextCompat
 import com.example.armakeup.R
 import com.example.armakeup.makeup.LipLandmarkTopology
 import com.example.armakeup.makeup.LipMeshTessellator
+import com.example.armakeup.makeup.LipstickFinish
+import com.example.armakeup.makeup.LipstickOpticalProfile
 import com.example.armakeup.makeup.ReferenceMatteLipstickProfile
+import com.example.armakeup.makeup.ReferenceLipstickOptics
 import com.example.armakeup.tracking.FillCenterTransform
 import com.example.armakeup.tracking.LandmarkRenderFrame
 import com.example.armakeup.tracking.NormalizedImageTransform
@@ -118,6 +121,7 @@ internal class FilamentMakeupRenderer(
     private var fatalErrorDelivered = false
     private var viewportWidth = 0
     private var viewportHeight = 0
+    private var lipstickFinish = LipstickFinish.SATIN
 
     @get:StringRes
     internal val renderBackendLabelRes: Int
@@ -134,6 +138,10 @@ internal class FilamentMakeupRenderer(
 
     init {
         Log.i(RENDER_LOG_TAG, engineSelection.diagnostic)
+        Log.i(
+            RENDER_LOG_TAG,
+            "temporalFlowVisible=${temporalLandmarkRefiner.visibleApplicationEnabled}",
+        )
         Log.i(NATIVE_VULKAN_LOG_TAG, nativeVulkanProbe.diagnostic)
         configureMaterialInstances(context)
         configureScene()
@@ -201,6 +209,14 @@ internal class FilamentMakeupRenderer(
         hideLipEntity()
     }
 
+    fun setLipstickFinish(finish: LipstickFinish) {
+        ensureMainThread()
+        if (lipstickFinish == finish) return
+        lipstickFinish = finish
+        applyLipstickOptics(ReferenceLipstickOptics.forFinish(finish))
+        Log.i(RENDER_LOG_TAG, "lipstickFinish=${finish.name}")
+    }
+
     fun resume() {
         ensureMainThread()
         if (destroyRequested || destroyed || resumed) return
@@ -248,14 +264,24 @@ internal class FilamentMakeupRenderer(
             lowerLipMaterialInstance,
             ContextCompat.getColor(context, R.color.lipstick_matte_lower),
         )
-        upperLipMaterialInstance.setParameter(
-            "matteCompression",
-            ReferenceMatteLipstickProfile.upper.matteCoverage / MAX_ALPHA,
-        )
-        lowerLipMaterialInstance.setParameter(
-            "matteCompression",
-            ReferenceMatteLipstickProfile.lower.matteCoverage / MAX_ALPHA,
-        )
+        setIlluminationSampleStep(DEFAULT_ILLUMINATION_STEP, DEFAULT_ILLUMINATION_STEP)
+        applyLipstickOptics(ReferenceLipstickOptics.forFinish(lipstickFinish))
+    }
+
+    private fun applyLipstickOptics(profile: LipstickOpticalProfile) {
+        listOf(upperLipMaterialInstance, lowerLipMaterialInstance).forEach { material ->
+            material.setParameter("roughness", profile.roughness)
+            material.setParameter("specularStrength", profile.specularStrength)
+            material.setParameter("highlightRetention", profile.highlightRetention)
+            material.setParameter("microTextureRetention", profile.microTextureRetention)
+            material.setParameter("wetInnerEdgeStrength", profile.wetInnerEdgeStrength)
+        }
+    }
+
+    private fun setIlluminationSampleStep(horizontal: Float, vertical: Float) {
+        listOf(upperLipMaterialInstance, lowerLipMaterialInstance).forEach { material ->
+            material.setParameter("illuminationSampleStep", horizontal, vertical)
+        }
     }
 
     private fun setPigmentColor(material: MaterialInstance, color: Int) {
@@ -498,17 +524,24 @@ internal class FilamentMakeupRenderer(
     private fun writeLipVertices(buffer: ByteBuffer, tessellated: FloatArray) {
         var sourceIndex = 0
         while (sourceIndex < tessellated.size) {
-            val displayX = tessellated[sourceIndex]
-            val displayY = tessellated[sourceIndex + 1]
-            val coverage = tessellated[sourceIndex + 2]
+            val displayX = tessellated[sourceIndex + LipMeshTessellator.X_COMPONENT_OFFSET]
+            val displayY = tessellated[sourceIndex + LipMeshTessellator.Y_COMPONENT_OFFSET]
+            val normalX = tessellated[sourceIndex + LipMeshTessellator.NORMAL_X_COMPONENT_OFFSET]
+            val normalY = tessellated[sourceIndex + LipMeshTessellator.NORMAL_Y_COMPONENT_OFFSET]
+            val normalZ = tessellated[sourceIndex + LipMeshTessellator.NORMAL_Z_COMPONENT_OFFSET]
+            val coverage = tessellated[sourceIndex + LipMeshTessellator.COVERAGE_COMPONENT_OFFSET]
+            val ring = tessellated[sourceIndex + LipMeshTessellator.RING_COMPONENT_OFFSET]
+            val arc = tessellated[sourceIndex + LipMeshTessellator.ARC_COMPONENT_OFFSET]
             buffer.putFloat(displayX * 2f - 1f)
             buffer.putFloat(1f - displayY * 2f)
             buffer.putFloat(LIP_Z)
             buffer.putFloat(displayX)
             buffer.putFloat(1f - displayY)
-            buffer.putFloat(1f)
-            buffer.putFloat(1f)
-            buffer.putFloat(1f)
+            buffer.putFloat(ring)
+            buffer.putFloat(arc)
+            buffer.putFloat(normalX * 0.5f + 0.5f)
+            buffer.putFloat(normalY * 0.5f + 0.5f)
+            buffer.putFloat(normalZ * 0.5f + 0.5f)
             buffer.putFloat(coverage)
             sourceIndex += LipMeshTessellator.VERTEX_COMPONENT_COUNT
         }
@@ -602,6 +635,13 @@ internal class FilamentMakeupRenderer(
                 VertexBuffer.VertexAttribute.COLOR,
                 0,
                 VertexBuffer.AttributeType.FLOAT4,
+                (POSITION_COMPONENT_COUNT + UV_COMPONENT_COUNT * 2) * FLOAT_BYTES,
+                LIP_VERTEX_STRIDE_BYTES,
+            )
+            .attribute(
+                VertexBuffer.VertexAttribute.UV1,
+                0,
+                VertexBuffer.AttributeType.FLOAT2,
                 (POSITION_COMPONENT_COUNT + UV_COMPONENT_COUNT) * FLOAT_BYTES,
                 LIP_VERTEX_STRIDE_BYTES,
             )
@@ -739,6 +779,10 @@ internal class FilamentMakeupRenderer(
             viewportWidth = width
             viewportHeight = height
             view.viewport = Viewport(0, 0, width, height)
+            setIlluminationSampleStep(
+                ILLUMINATION_SAMPLE_RADIUS_PIXELS / width.coerceAtLeast(1),
+                ILLUMINATION_SAMPLE_RADIUS_PIXELS / height.coerceAtLeast(1),
+            )
             FilamentHelper.synchronizePendingFrames(engine)
         }
     }
@@ -966,7 +1010,7 @@ internal class FilamentMakeupRenderer(
         private const val CAMERA_VERTEX_STRIDE_BYTES =
             (POSITION_COMPONENT_COUNT + UV_COMPONENT_COUNT) * FLOAT_BYTES
         private const val LIP_VERTEX_STRIDE_BYTES =
-            (POSITION_COMPONENT_COUNT + UV_COMPONENT_COUNT + COLOR_COMPONENT_COUNT) * FLOAT_BYTES
+            (POSITION_COMPONENT_COUNT + UV_COMPONENT_COUNT * 2 + COLOR_COMPONENT_COUNT) * FLOAT_BYTES
         private const val POINT_SIZE = 2
         private const val CAMERA_Z = 0f
         private const val LIP_Z = 0.05f
@@ -980,6 +1024,8 @@ internal class FilamentMakeupRenderer(
         private const val ROI_ASPECT_HEIGHT = 0.75f
         private const val MIN_ROI_HALF_WIDTH = 0.12f
         private const val MIN_ROI_HALF_HEIGHT = 0.10f
+        private const val ILLUMINATION_SAMPLE_RADIUS_PIXELS = 14f
+        private const val DEFAULT_ILLUMINATION_STEP = 0.01f
         private const val RENDER_LOG_TAG = "ARMakeupRender"
         private const val NATIVE_VULKAN_LOG_TAG = "ARMakeupVulkan"
         private val IDENTITY_MATRIX = floatArrayOf(

@@ -12,8 +12,10 @@ import kotlin.math.sin
  *
  * Only a contiguous chain newer than the MediaPipe anchor is composed. A bad measurement or a
  * timestamp gap makes the caller use the existing motion predictor instead of propagating drift.
+ * Visible application is disabled by default while V4 is being measured as a shadow signal.
  */
 internal class TemporalLandmarkRefiner(
+    internal val visibleApplicationEnabled: Boolean = DEFAULT_VISIBLE_APPLICATION_ENABLED,
     private val maxHistoryNs: Long = DEFAULT_MAX_HISTORY_NS,
     private val maxGapNs: Long = DEFAULT_MAX_GAP_NS,
     private val maxRenderExtrapolationNs: Long = DEFAULT_MAX_RENDER_EXTRAPOLATION_NS,
@@ -101,6 +103,11 @@ internal class TemporalLandmarkRefiner(
         anchorSensorTimestampNs: Long,
         nowElapsedRealtimeNs: Long,
     ): SimilarityTransform? {
+        // V4 optical flow remains a shadow signal until recorded device A/B proves that it is
+        // more stable than the accepted motion-predictor baseline. Applying intermittent flow
+        // results and falling back on rejected frames makes the visible mesh switch coordinate
+        // sources at camera frequency, which is perceived as severe stationary jitter.
+        if (!visibleApplicationEnabled) return null
         if (anchorSensorTimestampNs <= 0L || samples.isEmpty()) return null
         var composed = SimilarityTransform()
         var previousTimestampNs = anchorSensorTimestampNs
@@ -151,6 +158,7 @@ internal class TemporalLandmarkRefiner(
         )
 
     companion object {
+        private const val DEFAULT_VISIBLE_APPLICATION_ENABLED = false
         private const val DEFAULT_MAX_HISTORY_NS = 280_000_000L
         private const val DEFAULT_MAX_GAP_NS = 85_000_000L
         private const val DEFAULT_MAX_RENDER_EXTRAPOLATION_NS = 42_000_000L
