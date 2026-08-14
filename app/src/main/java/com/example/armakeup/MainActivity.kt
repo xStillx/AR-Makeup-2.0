@@ -29,6 +29,7 @@ import androidx.core.view.WindowInsetsCompat
 import com.example.armakeup.databinding.ActivityMainBinding
 import com.example.armakeup.makeup.LipstickFinish
 import com.example.armakeup.tracking.FaceLandmarkerTracker
+import com.example.armakeup.tracking.TrackingTelemetryRecorder
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
@@ -43,7 +44,9 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
     private var cameraStarted = false
     private var cameraBindingStarted = false
     private var cameraFpsLabel = "auto"
+    private var trackingTelemetryRecorder: TrackingTelemetryRecorder? = null
     private val fpsMeter = FpsMeter()
+    private val stopTrackingTelemetry = Runnable { stopTrackingTelemetryRecording() }
 
     private val cameraPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -66,6 +69,18 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
         setContentView(binding.root)
         binding.root.keepScreenOn = true
         binding.makeupRenderer.setErrorListener(::showFatalRendererState)
+        trackingTelemetryRecorder = TrackingTelemetryRecorder.createIfRequested(
+            context = applicationContext,
+            intent = intent,
+            debuggable = applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0,
+        )
+        trackingTelemetryRecorder?.let { recorder ->
+            binding.makeupRenderer.setTrackingTelemetrySink(recorder)
+            binding.root.postDelayed(
+                stopTrackingTelemetry,
+                recorder.requestedWarmupMs + recorder.requestedDurationMs,
+            )
+        }
         binding.finishToggleGroup.addOnButtonCheckedListener { _, checkedId, isChecked ->
             if (!isChecked) return@addOnButtonCheckedListener
             val finish = when (checkedId) {
@@ -140,6 +155,7 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
                     context = applicationContext,
                     callbackExecutor = cameraExecutor,
                     listener = this,
+                    telemetrySink = trackingTelemetryRecorder,
                 ).also { it.initialize() }
             }
         }
@@ -361,6 +377,12 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
         if (lower == upper) "$upper" else "$lower–$upper"
 
     override fun onDestroy() {
+        if (::binding.isInitialized) {
+            binding.root.removeCallbacks(stopTrackingTelemetry)
+            binding.makeupRenderer.setTrackingTelemetrySink(null)
+        }
+        trackingTelemetryRecorder?.close()
+        trackingTelemetryRecorder = null
         cameraProvider?.unbindAll()
         if (::cameraExecutor.isInitialized) {
             cameraExecutor.execute { faceTracker?.close() }
@@ -368,6 +390,11 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
         }
         if (::binding.isInitialized) binding.makeupRenderer.destroyRenderer()
         super.onDestroy()
+    }
+
+    private fun stopTrackingTelemetryRecording() {
+        binding.makeupRenderer.setTrackingTelemetrySink(null)
+        trackingTelemetryRecorder?.requestStop()
     }
 
     private class FpsMeter {

@@ -6,6 +6,7 @@ import android.view.SurfaceView
 import androidx.camera.core.Preview
 import com.example.armakeup.makeup.LipstickFinish
 import com.example.armakeup.tracking.LandmarkRenderFrame
+import com.example.armakeup.tracking.TrackingTelemetrySink
 import com.google.android.filament.Filament
 
 /**
@@ -53,6 +54,10 @@ class FilamentMakeupView @JvmOverloads constructor(
     fun setErrorListener(listener: (String) -> Unit) {
         errorListener = listener
         initializationError?.let(::dispatchError)
+    }
+
+    fun setTrackingTelemetrySink(sink: TrackingTelemetrySink?) {
+        compositor?.setTrackingTelemetrySink(sink)
     }
 
     fun setResult(

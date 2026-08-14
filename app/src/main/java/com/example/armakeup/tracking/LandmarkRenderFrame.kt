@@ -21,6 +21,12 @@ class LandmarkRenderFrame internal constructor(
 
     val size: Int = positions.size / COORDINATE_COUNT
 
+    /** Debug/replay snapshot before render extrapolation and visual continuity correction. */
+    internal fun copyBasePositions(): FloatArray = positions.copyOf()
+
+    /** Debug/replay snapshot of the bounded prediction velocity owned by the tracker. */
+    internal fun copyVelocities(): FloatArray = velocities.copyOf()
+
     fun predictionSeconds(renderTimestampMs: Long): Float {
         val deliveryTimestampMs = renderDeliveryTimestampMs
         val predictionMs = if (deliveryTimestampMs == null) {

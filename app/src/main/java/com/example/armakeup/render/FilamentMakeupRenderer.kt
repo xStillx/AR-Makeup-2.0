@@ -28,6 +28,8 @@ import com.example.armakeup.tracking.FillCenterTransform
 import com.example.armakeup.tracking.LandmarkRenderFrame
 import com.example.armakeup.tracking.NormalizedImageTransform
 import com.example.armakeup.tracking.TemporalLandmarkRefiner
+import com.example.armakeup.tracking.TrackingRenderSample
+import com.example.armakeup.tracking.TrackingTelemetrySink
 import com.google.android.filament.Box
 import com.google.android.filament.Camera
 import com.google.android.filament.Colors
@@ -108,6 +110,8 @@ internal class FilamentMakeupRenderer(
     )
     private val outerPoints = FloatArray(LipLandmarkTopology.outerContour.size * POINT_SIZE)
     private val innerPoints = FloatArray(LipLandmarkTopology.innerContour.size * POINT_SIZE)
+    private val displayedOuterPoints = FloatArray(outerPoints.size)
+    private val displayedInnerPoints = FloatArray(innerPoints.size)
 
     private var swapChain: SwapChain? = null
     private var cameraInput: CameraInput? = null
@@ -122,6 +126,10 @@ internal class FilamentMakeupRenderer(
     private var viewportWidth = 0
     private var viewportHeight = 0
     private var lipstickFinish = LipstickFinish.SATIN
+    private var trackingTelemetrySink: TrackingTelemetrySink? = null
+    private var displayedMeasurementTimestampMs = NO_TIMESTAMP
+    private var displayedSensorTimestampNs = NO_TIMESTAMP
+    private var displayedPredictionSeconds = 0f
 
     @get:StringRes
     internal val renderBackendLabelRes: Int
@@ -200,6 +208,11 @@ internal class FilamentMakeupRenderer(
             mirrorHorizontal,
             sensorTimestampNs,
         )
+    }
+
+    fun setTrackingTelemetrySink(sink: TrackingTelemetrySink?) {
+        ensureMainThread()
+        trackingTelemetrySink = sink
     }
 
     fun clear() {
@@ -387,6 +400,7 @@ internal class FilamentMakeupRenderer(
     private fun updateLipGeometry(renderTimestampMs: Long) {
         val state = latestLandmarks ?: run {
             hideLipEntity()
+            recordHiddenLip(renderTimestampMs)
             return
         }
         if (
@@ -399,6 +413,7 @@ internal class FilamentMakeupRenderer(
         }
         if (state.landmarks.size <= MAX_REQUIRED_LANDMARK_INDEX) {
             hideLipEntity()
+            recordHiddenLip(renderTimestampMs)
             return
         }
 
@@ -445,8 +460,55 @@ internal class FilamentMakeupRenderer(
             ReferenceMatteLipstickProfile.upper,
             ReferenceMatteLipstickProfile.lower,
         )
-        lipVertexUploader.upload { buffer -> writeLipVertices(buffer, tessellated) }
-        showLipEntity()
+        val uploaded = lipVertexUploader.upload { buffer -> writeLipVertices(buffer, tessellated) }
+        if (uploaded) {
+            if (trackingTelemetrySink != null) {
+                outerPoints.copyInto(displayedOuterPoints)
+                innerPoints.copyInto(displayedInnerPoints)
+                displayedMeasurementTimestampMs = state.landmarks.measurementTimestampMs
+                displayedSensorTimestampNs = state.sensorTimestampNs
+                displayedPredictionSeconds = predictionSeconds
+            }
+            showLipEntity()
+        }
+        recordDisplayedLip(renderTimestampMs)
+    }
+
+    private fun recordDisplayedLip(renderTimestampMs: Long) {
+        val sink = trackingTelemetrySink ?: return
+        if (!lipEntityVisible || displayedMeasurementTimestampMs == NO_TIMESTAMP) {
+            recordHiddenLip(renderTimestampMs)
+            return
+        }
+        sink.recordRender(
+            TrackingRenderSample(
+                renderTimestampMs = renderTimestampMs,
+                measurementTimestampMs = displayedMeasurementTimestampMs,
+                sensorTimestampNs = displayedSensorTimestampNs,
+                predictionSeconds = displayedPredictionSeconds,
+                viewportWidth = viewportWidth,
+                viewportHeight = viewportHeight,
+                lipVisible = true,
+                outerLipPoints = displayedOuterPoints.copyOf(),
+                innerLipPoints = displayedInnerPoints.copyOf(),
+            ),
+        )
+    }
+
+    private fun recordHiddenLip(renderTimestampMs: Long) {
+        trackingTelemetrySink?.recordRender(
+            TrackingRenderSample(
+                renderTimestampMs = renderTimestampMs,
+                measurementTimestampMs = NO_TIMESTAMP,
+                sensorTimestampNs = NO_TIMESTAMP,
+                predictionSeconds = 0f,
+                viewportWidth = viewportWidth,
+                viewportHeight = viewportHeight,
+                lipVisible = false,
+                outerLipPoints = FloatArray(0),
+                innerLipPoints = FloatArray(0),
+            ),
+        )
     }
 
     private fun writeContour(
@@ -557,6 +619,9 @@ internal class FilamentMakeupRenderer(
         if (!lipEntityVisible) return
         scene.removeEntity(lipMesh.entity)
         lipEntityVisible = false
+        displayedMeasurementTimestampMs = NO_TIMESTAMP
+        displayedSensorTimestampNs = NO_TIMESTAMP
+        displayedPredictionSeconds = 0f
     }
 
     private fun createCameraMesh(): MeshResources {
@@ -972,8 +1037,8 @@ internal class FilamentMakeupRenderer(
             UploadSlot(ByteBuffer.allocateDirect(byteCount).order(ByteOrder.nativeOrder()))
         }
 
-        fun upload(write: (ByteBuffer) -> Unit) {
-            val slot = slots.firstOrNull { !it.inUse } ?: return
+        fun upload(write: (ByteBuffer) -> Unit): Boolean {
+            val slot = slots.firstOrNull { !it.inUse } ?: return false
             slot.inUse = true
             slot.buffer.clear()
             write(slot.buffer)
@@ -988,6 +1053,7 @@ internal class FilamentMakeupRenderer(
             ) {
                 slot.inUse = false
             }
+            return true
         }
 
         private data class UploadSlot(
@@ -1018,6 +1084,7 @@ internal class FilamentMakeupRenderer(
         private const val MAX_COLOR_CHANNEL = 255f
         private const val ACQUIRED_MAX_IMAGES = 4
         private const val FULL_ROTATION = 360
+        private const val NO_TIMESTAMP = -1L
         private const val NANOS_PER_MILLISECOND = 1_000_000L
         private const val ROI_WIDTH_SCALE = 1.35f
         private const val ROI_HEIGHT_SCALE = 2.2f

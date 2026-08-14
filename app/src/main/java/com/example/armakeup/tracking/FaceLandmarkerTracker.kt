@@ -22,6 +22,7 @@ class FaceLandmarkerTracker(
     context: Context,
     private val callbackExecutor: Executor,
     private val listener: Listener,
+    private val telemetrySink: TrackingTelemetrySink? = null,
 ) : AutoCloseable {
 
     private val applicationContext = context.applicationContext
@@ -34,6 +35,8 @@ class FaceLandmarkerTracker(
     private var inFlightImage: MPImage? = null
     private var pendingFrame: PreparedFrame? = null
     private var lastDeliveredLandmarks: LandmarkRenderFrame? = null
+    private var lastResultDeliveryTimestampMs = 0L
+    private var smoothedMlFps = 0f
     private var closed = false
 
     fun initialize() {
@@ -193,17 +196,22 @@ class FaceLandmarkerTracker(
 
         val resultTimestampMs = SystemClock.uptimeMillis()
         val measuredLandmarks = result.faceLandmarks().firstOrNull()
-        val trackedLandmarks = if (measuredLandmarks != null) {
-            val coordinates = FloatArray(
+        val rawCoordinates = if (measuredLandmarks != null) {
+            FloatArray(
                 measuredLandmarks.size * LandmarkRenderFrame.COORDINATE_COUNT,
-            )
-            measuredLandmarks.forEachIndexed { index, landmark ->
-                val coordinateIndex = index * LandmarkRenderFrame.COORDINATE_COUNT
-                coordinates[coordinateIndex] = landmark.x()
-                coordinates[coordinateIndex + 1] = landmark.y()
-                coordinates[coordinateIndex + 2] = landmark.z()
+            ).also { coordinates ->
+                measuredLandmarks.forEachIndexed { index, landmark ->
+                    val coordinateIndex = index * LandmarkRenderFrame.COORDINATE_COUNT
+                    coordinates[coordinateIndex] = landmark.x()
+                    coordinates[coordinateIndex + 1] = landmark.y()
+                    coordinates[coordinateIndex + 2] = landmark.z()
+                }
             }
-            landmarkPredictor.update(coordinates, frame.timestampMs)
+        } else {
+            FloatArray(0)
+        }
+        val trackedLandmarks = if (rawCoordinates.isNotEmpty()) {
+            landmarkPredictor.update(rawCoordinates, frame.timestampMs)
         } else {
             landmarkPredictor.predictWithoutMeasurement(resultTimestampMs)
         }
@@ -211,6 +219,27 @@ class FaceLandmarkerTracker(
             ?.deliveredAt(resultTimestampMs)
             ?.smoothCorrectionFrom(lastDeliveredLandmarks, resultTimestampMs)
         lastDeliveredLandmarks = renderLandmarks
+
+        val filteredCoordinates = trackedLandmarks?.copyBasePositions() ?: FloatArray(0)
+        val latencyMs = (resultTimestampMs - frame.timestampMs).coerceAtLeast(0L)
+        telemetrySink?.recordMeasurement(
+            TrackingMeasurementSample(
+                captureTimestampMs = frame.timestampMs,
+                sensorTimestampNs = frame.sensorTimestampNs,
+                deliveryTimestampMs = resultTimestampMs,
+                latencyMs = latencyMs,
+                mlFps = updateMlFps(resultTimestampMs),
+                // FaceLandmarkerResult 1.0.0 does not expose one calibrated face confidence.
+                confidence = Float.NaN,
+                facePresent = measuredLandmarks != null,
+                predictedOnly = trackedLandmarks?.predictedOnly == true,
+                rawLandmarks = rawCoordinates,
+                filteredLandmarks = filteredCoordinates,
+                velocities = trackedLandmarks?.copyVelocities() ?: FloatArray(0),
+                rawGeometry = TrackingGeometryExtractor.extract(rawCoordinates),
+                filteredGeometry = TrackingGeometryExtractor.extract(filteredCoordinates),
+            ),
+        )
 
         listener.onTrackingResult(
             TrackingResult(
@@ -220,10 +249,25 @@ class FaceLandmarkerTracker(
                 rotationDegrees = frame.rotationDegrees,
                 mirrorHorizontal = true,
                 sensorTimestampNs = frame.sensorTimestampNs,
-                latencyMs = (resultTimestampMs - frame.timestampMs).coerceAtLeast(0L),
+                latencyMs = latencyMs,
                 delegate = activeDelegate,
             ),
         )
+    }
+
+    private fun updateMlFps(deliveryTimestampMs: Long): Float {
+        val previousTimestampMs = lastResultDeliveryTimestampMs
+        lastResultDeliveryTimestampMs = deliveryTimestampMs
+        if (previousTimestampMs <= 0L || deliveryTimestampMs <= previousTimestampMs) {
+            return smoothedMlFps
+        }
+        val instantaneousFps = MILLIS_PER_SECOND / (deliveryTimestampMs - previousTimestampMs)
+        smoothedMlFps = if (smoothedMlFps <= 0f) {
+            instantaneousFps
+        } else {
+            smoothedMlFps + ML_FPS_SMOOTHING * (instantaneousFps - smoothedMlFps)
+        }
+        return smoothedMlFps
     }
 
     private fun handleInferenceError(error: RuntimeException) {
@@ -327,6 +371,8 @@ class FaceLandmarkerTracker(
         frameBufferPool.clear()
         landmarkPredictor.reset()
         lastDeliveredLandmarks = null
+        lastResultDeliveryTimestampMs = 0L
+        smoothedMlFps = 0f
     }
 
     private data class RgbaFrameBuffer(
@@ -369,5 +415,7 @@ class FaceLandmarkerTracker(
         private const val MIN_CONFIDENCE = 0.5f
         private const val FRAME_BUFFER_POOL_CAPACITY = 2
         private const val RGBA_BYTES_PER_PIXEL = 4
+        private const val MILLIS_PER_SECOND = 1_000f
+        private const val ML_FPS_SMOOTHING = 0.2f
     }
 }
