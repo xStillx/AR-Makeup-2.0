@@ -9,8 +9,8 @@ Native Android-приложение виртуальной примерки ма
 ## Репозиторий и состояние
 
 - Путь: `C:\Users\User\AndroidStudioProjects\ARMakeup`.
-- Ветка: `master`, HEAD `e58dfe5` (`[UpdateContext]`). Текущие V6.0 edits ещё не закоммичены; сам `CHAT_HANDOFF.md` также untracked.
-- Основные коммиты: `4f8039b [V5]`, `3d3572e [V4]`, `395d3f3 [V3]`.
+- Ветка: `master`, checkpoint HEAD `8d48b46` (`[V6]`) уже отправлен в `origin/master`; при проверке ветки синхронизированы (`0 ahead / 0 behind`), рабочее дерево было чистым. Это обновление контекста после проверки само создаёт новый незакоммиченный documentation diff.
+- Основные коммиты: `8d48b46 [V6]`, `4f8039b [V5]`, `3d3572e [V4]`, `395d3f3 [V3]`.
 - Kotlin, XML/View UI, один модуль `:app`; `minSdk 24`, `targetSdk/compileSdk 37`.
 - Последняя полная проверка: 72 unit-теста, 0 failures/errors, lint и debug APK успешно; native код собирается для `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`.
 
@@ -32,6 +32,8 @@ Native Android-приложение виртуальной примерки ма
 ## Текущий обязательный этап — V6
 
 V6.0 measurement foundation уже реализован; новый production predictor ещё нет.
+
+- Весь V6.0 slice вместе с `PROJECT_CONTEXT.md` и этим handoff зафиксирован remote-checkpoint `8d48b46 [V6]`. Использовать его как baseline для replay/A/B следующего predictor.
 
 - Явно включаемый только в debug `.arv6` recorder пишет raw 478 landmarks, predictor base/velocities, stable-anchor global pose, head-local lip deformation, capture/delivery timestamps и реально загруженный lip contour на каждом render-vsync. Camera pixels не записываются; queue bounded/non-blocking, есть `droppedEventCount`.
 - Есть versioned codec/replay и analyzer для stationary RMS/peak, lag, stop overshoot и reacquisition. Stationary берётся из автоматически выбранного примерно двухсекундного спокойного окна; displayed jitter также считается в viewport pixels. FaceLandmarker 1.0.0 не даёт единый калиброванный confidence, поэтому поле честно хранит `NaN`.
