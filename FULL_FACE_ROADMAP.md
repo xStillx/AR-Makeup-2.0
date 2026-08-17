@@ -7,8 +7,10 @@
 - FF0 выполнен: V6.3 сохранён commit `dd095f7` и тегом `tracking-v6.3-gyro-experimental-2026-08-17` после полного unit/lint/assemble gate. Это experimental, не stable.
 - Первый shadow slice FF1/FF2 реализован поверх checkpoint: `.arv6` v6 разделяет tracker latency на camera→analysis, analysis→submit, MediaPipe inference и callback queue, отдельно пишет RGBA/quality/result-processing CPU duration.
 - MediaPipe 4×4 facial transformation matrix включается только при debug telemetry, сохраняется с timestamp исходного camera frame и пока не передаётся в renderer.
-- Локальный gate shadow slice: `113` unit tests, `0` failures/errors, lint и debug APK/четыре ABI успешны.
-- До завершения FF1 ещё нужны camera presentation/vsync и geometry-upload timestamps; до завершения FF2 — device benchmark, оси/handedness/matrix-layout tests и сравнение с текущим 22-anchor estimator.
+- Device stationary/head-motion/phone-motion/roll benchmark выполнен на SM-G990B при thermal status `0`: во всех валидных runs `dropped=0`, matrix coverage/right-handed/similarity `1.0`; callback/result CPU мал относительно camera→analysis и inference.
+- Column-major layout, metric axes/handedness, affine/similarity, yaw/pitch/roll, rotation/mirror/crop зафиксированы кодом и unit tests. Roll device correlation с текущим 22-anchor pose равна `0.999461`; matrix пока остаётся shadow-only.
+- Актуальный локальный gate: `124` unit tests, `0` failures/errors, lint и debug APK/четыре ABI успешны.
+- До завершения FF1 ещё нужны camera presentation/vsync и geometry-upload timestamps; до завершения FF2 — face-visible yaw/pitch, stop/dropout/light/thermal matrix runs и controlled continuity/overhead acceptance.
 
 Этот файл задаёт порядок дальнейшей разработки после V6.3. Полный исторический и технический контекст находится в `PROJECT_CONTEXT.md`; компактный перенос между чатами — в `CHAT_HANDOFF.md`.
 
@@ -206,8 +208,8 @@ Parsing выполняется ориентировочно 15–30 раз/с п
 
 ## Следующее действие
 
-1. Собрать/установить FF1/FF2 shadow APK и записать одинаковые stationary, head-motion и phone-motion `.arv6` v6 runs на холодном устройстве.
-2. Проверить p50/p95 новых стадий, `transform3dCoverage`, dropped events, CPU/GPU и thermal overhead относительно V6.3 checkpoint.
-3. Зафиксировать оси, handedness, matrix layout, rotation/crop/mirror и сравнить matrix с текущим 22-anchor estimator и gyro signals.
-4. Добавить недостающие geometry-upload/camera-presentation/vsync timestamps, не меняя видимый renderer.
-5. Только после анализа переходить к FF3 и видимому 3D path.
+1. Записать отдельные face-visible yaw и pitch runs, затем stop/dropout/weak-light/thermal; cold-start empty и no-face combined windows не считать acceptance.
+2. Добавить недостающие geometry-upload/camera-presentation/vsync timestamps, не меняя видимый renderer.
+3. Сопоставить matrix continuity с 22-anchor pose и gyro по sensor/display timestamps; абсолютный Euler zero не использовать, сравнивать baseline-centered motion.
+4. После полного FF1/FF2 numerical + visual gate перейти к FF3 model-independent `FaceObservation` / `FullFaceRenderState`.
+5. Matrix не подключать в renderer до этого gate; V6.3 strong phone-motion visual acceptance остаётся отдельной задачей.

@@ -385,6 +385,56 @@ class TrackingTelemetryTest {
         assertEquals(1.25f, metrics.pipelineLatency.medianResultProcessingMs, EPSILON)
         assertEquals(1, metrics.shadow3d.validTransformationMatrixCount)
         assertEquals(1f, metrics.shadow3d.facialTransformationMatrixCoverage, EPSILON)
+        assertEquals(1f, metrics.shadow3d.rightHandedFraction, EPSILON)
+        assertEquals(1f, metrics.shadow3d.affineSimilarityFraction, EPSILON)
+        assertEquals(1f, metrics.shadow3d.medianUniformScale, EPSILON)
+        assertEquals(0f, metrics.shadow3d.p95OrthogonalityError, EPSILON)
+        assertEquals(0f, metrics.shadow3d.p95ScaleAnisotropy, EPSILON)
+        assertEquals(0f, metrics.shadow3d.p95AffineBottomRowError, EPSILON)
+        assertEquals(0f, metrics.shadow3d.p95YawDeviationDegrees, EPSILON)
+        assertEquals(0f, metrics.shadow3d.p95PitchDeviationDegrees, EPSILON)
+        assertEquals(0f, metrics.shadow3d.p95RollDeviationDegrees, EPSILON)
+    }
+
+    @Test
+    fun analyzerCorrelatesCanonicalTransformWithLandmarkPose() {
+        val samples = (0..4).map { index ->
+            val centerX = 0.3f + index * 0.07f
+            val centerY = 0.35f + index * 0.04f
+            val scale = 0.7f + index * 0.1f
+            val rotation = -0.2f + index * 0.1f
+            val pose = TrackingPose(centerX, centerY, scale, rotation)
+            poseOnlyMeasurement(1_000L + index * 33L, centerX, centerX).copy(
+                rawGeometry = TrackingGeometry(pose, FloatArray(0)),
+                filteredGeometry = TrackingGeometry(pose, FloatArray(0)),
+                facialTransformationMatrix = canonicalMatrix(
+                    translationX = centerX * 10f,
+                    translationY = -centerY * 10f,
+                    translationZ = -50f + scale,
+                    scale = scale * 5f,
+                    normalizedImageRollRadians = rotation,
+                ),
+            )
+        }
+
+        val metrics = TrackingTelemetryAnalyzer.analyze(
+            TrackingTelemetrySession(
+                TrackingTelemetryHeader("canonical_correlation", 0L),
+                samples,
+                droppedEventCount = 0L,
+            ),
+        ).shadow3d
+
+        assertEquals(1f, metrics.rightHandedFraction, EPSILON)
+        assertEquals(1f, metrics.affineSimilarityFraction, EPSILON)
+        assertEquals(1f, metrics.translationXToPoseCenterCorrelation, EPSILON)
+        assertEquals(-1f, metrics.translationYToPoseCenterCorrelation, EPSILON)
+        assertEquals(1f, metrics.scaleToPoseScaleCorrelation, EPSILON)
+        assertEquals(1f, metrics.depthToPoseScaleCorrelation, EPSILON)
+        assertEquals(1f, metrics.rollToPoseRotationCorrelation, EPSILON)
+        assertEquals(0f, metrics.p95YawDeviationDegrees, EPSILON)
+        assertEquals(0f, metrics.p95PitchDeviationDegrees, EPSILON)
+        assertEquals(0.2f * RADIANS_TO_DEGREES, metrics.p95RollDeviationDegrees, EPSILON)
     }
 
     @Test
@@ -660,6 +710,23 @@ class TrackingTelemetryTest {
         )
     }
 
+    private fun canonicalMatrix(
+        translationX: Float,
+        translationY: Float,
+        translationZ: Float,
+        scale: Float,
+        normalizedImageRollRadians: Float,
+    ): FloatArray {
+        val cosine = cos(normalizedImageRollRadians)
+        val sine = sin(normalizedImageRollRadians)
+        return floatArrayOf(
+            scale * cosine, -scale * sine, 0f, 0f,
+            scale * sine, scale * cosine, 0f, 0f,
+            0f, 0f, scale, 0f,
+            translationX, translationY, translationZ, 1f,
+        )
+    }
+
     private fun faceCoordinates(translationX: Float): FloatArray {
         val coordinates = FloatArray(LANDMARK_COUNT * LandmarkRenderFrame.COORDINATE_COUNT)
         setPoint(coordinates, 33, 0.30f + translationX, 0.40f)
@@ -713,5 +780,6 @@ class TrackingTelemetryTest {
     companion object {
         private const val LANDMARK_COUNT = 478
         private const val EPSILON = 0.0001f
+        private const val RADIANS_TO_DEGREES = 57.29578f
     }
 }

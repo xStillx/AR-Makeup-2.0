@@ -50,6 +50,20 @@ data class TrackingPipelineLatencyMetrics(
 data class TrackingShadow3dMetrics(
     val validTransformationMatrixCount: Int,
     val facialTransformationMatrixCoverage: Float,
+    val rightHandedFraction: Float,
+    val affineSimilarityFraction: Float,
+    val medianUniformScale: Float,
+    val p95OrthogonalityError: Float,
+    val p95ScaleAnisotropy: Float,
+    val p95AffineBottomRowError: Float,
+    val p95YawDeviationDegrees: Float,
+    val p95PitchDeviationDegrees: Float,
+    val p95RollDeviationDegrees: Float,
+    val translationXToPoseCenterCorrelation: Float,
+    val translationYToPoseCenterCorrelation: Float,
+    val scaleToPoseScaleCorrelation: Float,
+    val depthToPoseScaleCorrelation: Float,
+    val rollToPoseRotationCorrelation: Float,
 )
 
 data class TrackingRenderPerformanceMetrics(
@@ -143,6 +157,34 @@ data class TrackingTelemetryMetrics(
         append(" transform3dValid=").append(shadow3d.validTransformationMatrixCount)
         append(" transform3dCoverage=")
             .append(shadow3d.facialTransformationMatrixCoverage.formatMetric())
+        append(" transform3dRightHanded=")
+            .append(shadow3d.rightHandedFraction.formatMetric())
+        append(" transform3dSimilarity=")
+            .append(shadow3d.affineSimilarityFraction.formatMetric())
+        append(" transform3dScaleMedian=")
+            .append(shadow3d.medianUniformScale.formatMetric())
+        append(" transform3dOrthoP95=")
+            .append(shadow3d.p95OrthogonalityError.formatMetric())
+        append(" transform3dAnisotropyP95=")
+            .append(shadow3d.p95ScaleAnisotropy.formatMetric())
+        append(" transform3dAffineRowP95=")
+            .append(shadow3d.p95AffineBottomRowError.formatMetric())
+        append(" transform3dYawDeviationP95Deg=")
+            .append(shadow3d.p95YawDeviationDegrees.formatMetric())
+        append(" transform3dPitchDeviationP95Deg=")
+            .append(shadow3d.p95PitchDeviationDegrees.formatMetric())
+        append(" transform3dRollDeviationP95Deg=")
+            .append(shadow3d.p95RollDeviationDegrees.formatMetric())
+        append(" transform3dTxPoseXCorrelation=")
+            .append(shadow3d.translationXToPoseCenterCorrelation.formatMetric())
+        append(" transform3dTyPoseYCorrelation=")
+            .append(shadow3d.translationYToPoseCenterCorrelation.formatMetric())
+        append(" transform3dScalePoseScaleCorrelation=")
+            .append(shadow3d.scaleToPoseScaleCorrelation.formatMetric())
+        append(" transform3dDepthPoseScaleCorrelation=")
+            .append(shadow3d.depthToPoseScaleCorrelation.formatMetric())
+        append(" transform3dRollPoseCorrelation=")
+            .append(shadow3d.rollToPoseRotationCorrelation.formatMetric())
         append(" captureIntervalMedianMs=")
             .append(inputQuality.medianCaptureIntervalMs.formatMetric())
         append(" captureIntervalP95Ms=")
@@ -223,6 +265,11 @@ data class TrackingTelemetryMetrics(
 /** Computes the first V6 numerical baseline from an exact recorded event stream. */
 object TrackingTelemetryAnalyzer {
     private val lipIndices = LipLandmarkTopology.outerContour + LipLandmarkTopology.innerContour
+
+    private data class ParsedShadow3dSample(
+        val measurement: TrackingMeasurementSample,
+        val transform: CanonicalFaceTransform,
+    )
 
     fun analyze(session: TrackingTelemetrySession): TrackingTelemetryMetrics {
         val measurements = session.measurements
@@ -354,10 +401,19 @@ object TrackingTelemetryAnalyzer {
     private fun analyzeShadow3d(
         measurements: List<TrackingMeasurementSample>,
     ): TrackingShadow3dMetrics {
-        val validCount = measurements.count { sample ->
-            sample.facialTransformationMatrix.size == FACIAL_TRANSFORMATION_MATRIX_SIZE &&
-                sample.facialTransformationMatrix.all { it.isFinite() }
+        val parsed = measurements.mapNotNull { sample ->
+            CanonicalFaceTransform.fromColumnMajor(sample.facialTransformationMatrix)?.let {
+                ParsedShadow3dSample(sample, it)
+            }
         }
+        val validCount = parsed.size
+        val posePairs = parsed.filter { it.measurement.rawGeometry.pose.isValid }
+        val matrixRolls = unwrapAngles(
+            posePairs.map { it.transform.normalizedImageRollRadians },
+        )
+        val poseRolls = unwrapAngles(
+            posePairs.map { it.measurement.rawGeometry.pose.rotationRadians },
+        )
         return TrackingShadow3dMetrics(
             validTransformationMatrixCount = validCount,
             facialTransformationMatrixCoverage = if (measurements.isEmpty()) {
@@ -365,7 +421,108 @@ object TrackingTelemetryAnalyzer {
             } else {
                 validCount.toFloat() / measurements.size
             },
+            rightHandedFraction = fractionOf(parsed) { it.transform.isRightHanded },
+            affineSimilarityFraction = fractionOf(parsed) {
+                it.transform.isApproximatelyAffineSimilarity
+            },
+            medianUniformScale = percentile(
+                parsed.map { it.transform.uniformScale }.filter(Float::isFinite),
+                0.5f,
+            ),
+            p95OrthogonalityError = percentile(
+                parsed.map { it.transform.orthogonalityError }.filter(Float::isFinite),
+                0.95f,
+            ),
+            p95ScaleAnisotropy = percentile(
+                parsed.map { it.transform.scaleAnisotropy }.filter(Float::isFinite),
+                0.95f,
+            ),
+            p95AffineBottomRowError = percentile(
+                parsed.map { it.transform.affineBottomRowError },
+                0.95f,
+            ),
+            p95YawDeviationDegrees = p95AngularDeviationDegrees(
+                parsed.map { it.transform.metricYawRadians },
+            ),
+            p95PitchDeviationDegrees = p95AngularDeviationDegrees(
+                parsed.map { it.transform.metricPitchRadians },
+            ),
+            p95RollDeviationDegrees = p95AngularDeviationDegrees(
+                parsed.map { it.transform.metricRollRadians },
+            ),
+            translationXToPoseCenterCorrelation = pearsonCorrelation(
+                posePairs.map {
+                    it.transform.translation.x to it.measurement.rawGeometry.pose.centerX
+                },
+            ),
+            translationYToPoseCenterCorrelation = pearsonCorrelation(
+                posePairs.map {
+                    it.transform.translation.y to it.measurement.rawGeometry.pose.centerY
+                },
+            ),
+            scaleToPoseScaleCorrelation = pearsonCorrelation(
+                posePairs.map {
+                    it.transform.uniformScale to it.measurement.rawGeometry.pose.scale
+                },
+            ),
+            depthToPoseScaleCorrelation = pearsonCorrelation(
+                posePairs.map {
+                    it.transform.translation.z to it.measurement.rawGeometry.pose.scale
+                },
+            ),
+            rollToPoseRotationCorrelation = pearsonCorrelation(matrixRolls.zip(poseRolls)),
         )
+    }
+
+    private fun <T> fractionOf(values: List<T>, predicate: (T) -> Boolean): Float =
+        if (values.isEmpty()) Float.NaN else values.count(predicate).toFloat() / values.size
+
+    private fun unwrapAngles(values: List<Float>): List<Float> {
+        if (values.isEmpty()) return emptyList()
+        val output = ArrayList<Float>(values.size)
+        var previous = values.first()
+        output += previous
+        values.drop(1).forEach { value ->
+            var unwrapped = value
+            while (unwrapped - previous > HALF_ANGLE_RADIANS) unwrapped -= FULL_ANGLE_RADIANS
+            while (unwrapped - previous < -HALF_ANGLE_RADIANS) unwrapped += FULL_ANGLE_RADIANS
+            output += unwrapped
+            previous = unwrapped
+        }
+        return output
+    }
+
+    private fun p95AngularDeviationDegrees(values: List<Float>): Float {
+        val unwrapped = unwrapAngles(values.filter(Float::isFinite))
+        if (unwrapped.isEmpty()) return Float.NaN
+        val center = percentile(unwrapped, 0.5f)
+        return percentile(
+            unwrapped.map { kotlin.math.abs(it - center) * RADIANS_TO_DEGREES },
+            0.95f,
+        )
+    }
+
+    private fun pearsonCorrelation(values: List<Pair<Float, Float>>): Float {
+        val finite = values.filter { (first, second) -> first.isFinite() && second.isFinite() }
+        if (finite.size < MINIMUM_CORRELATION_SAMPLE_COUNT) return Float.NaN
+        val meanFirst = finite.sumOf { it.first.toDouble() } / finite.size
+        val meanSecond = finite.sumOf { it.second.toDouble() } / finite.size
+        var covariance = 0.0
+        var firstVariance = 0.0
+        var secondVariance = 0.0
+        finite.forEach { (first, second) ->
+            val firstDelta = first.toDouble() - meanFirst
+            val secondDelta = second.toDouble() - meanSecond
+            covariance += firstDelta * secondDelta
+            firstVariance += firstDelta * firstDelta
+            secondVariance += secondDelta * secondDelta
+        }
+        val denominator = sqrt(firstVariance * secondVariance)
+        return if (denominator <= MINIMUM_CORRELATION_VARIANCE) {
+            Float.NaN
+        } else {
+            (covariance / denominator).toFloat().coerceIn(-1f, 1f)
+        }
     }
 
     private fun orderedDurationMs(startTimestampMs: Long, endTimestampMs: Long): Float? =
@@ -811,9 +968,12 @@ object TrackingTelemetryAnalyzer {
     private const val STATIONARY_WINDOW_MS = 2_000L
     private const val MINIMUM_STATIONARY_WINDOW_MS = 1_900L
     private const val NANOSECONDS_PER_MILLISECOND = 1_000_000f
-    private const val FACIAL_TRANSFORMATION_MATRIX_SIZE = 16
     private const val MILLISECONDS_PER_SECOND = 1_000f
     private const val RADIANS_TO_DEGREES = 57.29578f
+    private const val HALF_ANGLE_RADIANS = 3.1415927f
+    private const val FULL_ANGLE_RADIANS = 6.2831855f
+    private const val MINIMUM_CORRELATION_SAMPLE_COUNT = 3
+    private const val MINIMUM_CORRELATION_VARIANCE = 1e-12
     private const val MINIMUM_POSE_SCALE = 1e-5f
     private const val SCALE_MOTION_WEIGHT = 0.5f
     private const val ROTATION_MOTION_WEIGHT = 0.2f
