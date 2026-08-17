@@ -50,6 +50,7 @@ class LandmarkMotionPredictor(
     private var filteredGlobalSpeed = 0f
     private var previousGlobalSpeed = 0f
     private var globalPredictionGain = 0f
+    private var globalPredictionCoverage = 0f
     private var currentPredictionHorizonMs = maxPredictionMs
     private var filteredPoseFitQuality = 1f
     private var motionState = MotionState.STATIONARY
@@ -186,6 +187,9 @@ class LandmarkMotionPredictor(
             ).coerceIn(-maxVelocityPerSecond, maxVelocityPerSecond)
             lastMeasurements[index] = measurements[index]
         }
+        globalPredictionCoverage = calculateGlobalPredictionCoverage(
+            qualityResponse = qualityResponse,
+        )
         measuredGlobalVelocities.copyInto(previousMeasuredGlobalVelocities)
         previousGlobalSpeed = measuredGlobalSpeed
         lastMeasurementTimestampMs = timestampMs
@@ -213,6 +217,7 @@ class LandmarkMotionPredictor(
         filteredGlobalSpeed = 0f
         previousGlobalSpeed = 0f
         globalPredictionGain = 0f
+        globalPredictionCoverage = 0f
         currentPredictionHorizonMs = maxPredictionMs
         filteredPoseFitQuality = 1f
         motionState = MotionState.STATIONARY
@@ -233,6 +238,7 @@ class LandmarkMotionPredictor(
         filteredGlobalSpeed = 0f
         previousGlobalSpeed = 0f
         globalPredictionGain = 0f
+        globalPredictionCoverage = 0f
         currentPredictionHorizonMs = maxPredictionMs
         filteredPoseFitQuality = 1f
         motionState = MotionState.STATIONARY
@@ -442,6 +448,24 @@ class LandmarkMotionPredictor(
         return if (denominator <= MIN_DIRECTION_NORM) 1f else dot / denominator
     }
 
+    private fun calculateGlobalPredictionCoverage(qualityResponse: Float): Float {
+        if (motionState == MotionState.STATIONARY || globalPredictionGain <= 0f) return 0f
+        var dot = 0f
+        var measuredSquared = 0f
+        forEachMotionAnchor(measuredGlobalVelocities) { coordinateIndex ->
+            val measuredX = measuredGlobalVelocities[coordinateIndex]
+            val measuredY = measuredGlobalVelocities[coordinateIndex + 1]
+            val filteredX = filteredGlobalVelocities[coordinateIndex]
+            val filteredY = filteredGlobalVelocities[coordinateIndex + 1]
+            dot += filteredX * measuredX + filteredY * measuredY
+            measuredSquared += measuredX * measuredX + measuredY * measuredY
+        }
+        if (measuredSquared <= MIN_DIRECTION_NORM) return 0f
+        val velocityTrackingRatio = (dot / measuredSquared).coerceIn(0f, 1f)
+        return (globalPredictionGain * qualityResponse * velocityTrackingRatio)
+            .coerceIn(0f, 1f)
+    }
+
     private inline fun forEachMotionAnchor(
         coordinates: FloatArray,
         action: (coordinateIndex: Int) -> Unit,
@@ -477,6 +501,7 @@ class LandmarkMotionPredictor(
             predictedOnly = predictedOnly,
             renderLeadMs = renderLeadMs,
             maxPredictionMs = currentPredictionHorizonMs,
+            globalPredictionCoverage = globalPredictionCoverage,
         )
 
     private fun hasImplausibleCentroidJump(

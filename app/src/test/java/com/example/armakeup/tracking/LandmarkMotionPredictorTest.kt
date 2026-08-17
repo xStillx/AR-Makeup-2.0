@@ -22,6 +22,47 @@ class LandmarkMotionPredictorTest {
     }
 
     @Test
+    fun stationaryFrameDoesNotClaimUnusedHorizonAsCameraPrediction() {
+        val predictor = predictor(renderLeadMs = 0L, maxPredictionMs = 50L)
+        val frame = predictor.update(face(translationX = 0f), timestampMs = 1_000L)
+
+        assertEquals(0.05f, frame.predictionSeconds(1_050L), EPSILON)
+        assertEquals(0f, frame.cameraMotionPredictionSeconds(1_050L), EPSILON)
+        assertEquals(0f, frame.globalPredictionCoverage(), EPSILON)
+    }
+
+    @Test
+    fun firstCameraJerkReportsOnlyConfirmedGlobalPredictionCoverage() {
+        val predictor = predictor(renderLeadMs = 0L, maxPredictionMs = 50L)
+        predictor.update(face(translationX = 0f), timestampMs = 1_000L)
+        val candidate = predictor.update(face(translationX = 0.02f), timestampMs = 1_040L)
+
+        val geometricHorizon = candidate.predictionSeconds(1_080L)
+        val cameraMotionHorizon = candidate.cameraMotionPredictionSeconds(1_080L)
+
+        assertEquals(0.04f, geometricHorizon, EPSILON)
+        assertTrue(cameraMotionHorizon > 0f)
+        assertTrue(cameraMotionHorizon < geometricHorizon * 0.3f)
+        assertTrue(candidate.globalPredictionCoverage() < 0.3f)
+    }
+
+    @Test
+    fun coherentMotionIncreasesCameraPredictionCoverageWithoutExceedingHorizon() {
+        val predictor = predictor(renderLeadMs = 0L, maxPredictionMs = 50L)
+        predictor.update(face(translationX = 0f), timestampMs = 1_000L)
+        val candidate = predictor.update(face(translationX = 0.01f), timestampMs = 1_040L)
+        predictor.update(face(translationX = 0.02f), timestampMs = 1_080L)
+        val coherent = predictor.update(face(translationX = 0.03f), timestampMs = 1_120L)
+
+        assertTrue(coherent.globalPredictionCoverage() > candidate.globalPredictionCoverage())
+        assertTrue(coherent.globalPredictionCoverage() <= 1f)
+        assertTrue(
+            coherent.cameraMotionPredictionSeconds(1_160L) <=
+                coherent.predictionSeconds(1_160L),
+        )
+    }
+
+    @Test
     fun constantMotionIsExtrapolatedTowardRenderTimestamp() {
         val predictor = predictor(renderLeadMs = 0L)
         predictor.update(point(0.20f, 0.4f), timestampMs = 1_000L)

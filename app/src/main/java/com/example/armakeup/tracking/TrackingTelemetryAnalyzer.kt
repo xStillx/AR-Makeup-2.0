@@ -39,6 +39,12 @@ data class TrackingRenderPerformanceMetrics(
     val p05MaterialCameraCoherence: Float,
     val medianMaterialMotionSpeed: Float,
     val p95MaterialTemporalMismatchMs: Float,
+    val gyroscopeAppliedFrameFraction: Float,
+    val p95GyroscopeIntervalMs: Float,
+    val p95GyroscopeRotationDegrees: Float,
+    val p95GyroscopeTranslation: Float,
+    val medianCameraMotionPredictionMs: Float,
+    val medianGlobalPredictionCoverage: Float,
     val byFinish: List<TrackingFinishRenderPerformanceMetrics>,
 )
 
@@ -125,6 +131,18 @@ data class TrackingTelemetryMetrics(
             .append(renderPerformance.medianMaterialMotionSpeed.formatMetric())
         append(" materialMismatchP95Ms=")
             .append(renderPerformance.p95MaterialTemporalMismatchMs.formatMetric())
+        append(" gyroAppliedFraction=")
+            .append(renderPerformance.gyroscopeAppliedFrameFraction.formatMetric())
+        append(" gyroIntervalP95Ms=")
+            .append(renderPerformance.p95GyroscopeIntervalMs.formatMetric())
+        append(" gyroRotationP95Deg=")
+            .append(renderPerformance.p95GyroscopeRotationDegrees.formatMetric())
+        append(" gyroTranslationP95=")
+            .append(renderPerformance.p95GyroscopeTranslation.formatMetric())
+        append(" cameraMotionPredictionMedianMs=")
+            .append(renderPerformance.medianCameraMotionPredictionMs.formatMetric())
+        append(" globalPredictionCoverageMedian=")
+            .append(renderPerformance.medianGlobalPredictionCoverage.formatMetric())
         append(" finishFrameCpu=").append(
             renderPerformance.byFinish.joinToString("|") { finish ->
                 "${finish.finish}:${finish.renderCount}:" +
@@ -236,6 +254,23 @@ object TrackingTelemetryAnalyzer {
             .filter { it.isFinite() && it >= 0f }
         val temporalMismatch = renders.map { it.materialTemporalMismatchMs }
             .filter { it.isFinite() && it >= 0f }
+        val gyroscopeRenders = renders.filter { it.gyroscopeApplied }
+        val gyroscopeIntervals = gyroscopeRenders.map { it.gyroscopeIntervalMs }
+            .filter { it.isFinite() && it >= 0f }
+        val gyroscopeRotationsDegrees = gyroscopeRenders.map {
+            hypot(
+                hypot(it.gyroscopeRotationX, it.gyroscopeRotationY),
+                it.gyroscopeRotationZ,
+            ) * RADIANS_TO_DEGREES
+        }.filter { it.isFinite() }
+        val gyroscopeTranslations = gyroscopeRenders.map {
+            hypot(it.gyroscopeTranslationX, it.gyroscopeTranslationY)
+        }.filter { it.isFinite() }
+        val cameraMotionPredictionMs = renders.map {
+            it.cameraMotionPredictionSeconds * MILLISECONDS_PER_SECOND
+        }.filter { it.isFinite() && it >= 0f }
+        val globalPredictionCoverage = renders.map { it.globalPredictionCoverage }
+            .filter { it.isFinite() && it >= 0f }
         val renderedFraction = if (renders.isEmpty()) {
             Float.NaN
         } else {
@@ -253,6 +288,16 @@ object TrackingTelemetryAnalyzer {
             p05MaterialCameraCoherence = percentile(coherence, 0.05f),
             medianMaterialMotionSpeed = percentile(motionSpeeds, 0.5f),
             p95MaterialTemporalMismatchMs = percentile(temporalMismatch, 0.95f),
+            gyroscopeAppliedFrameFraction = if (renders.isEmpty()) {
+                Float.NaN
+            } else {
+                gyroscopeRenders.size.toFloat() / renders.size
+            },
+            p95GyroscopeIntervalMs = percentile(gyroscopeIntervals, 0.95f),
+            p95GyroscopeRotationDegrees = percentile(gyroscopeRotationsDegrees, 0.95f),
+            p95GyroscopeTranslation = percentile(gyroscopeTranslations, 0.95f),
+            medianCameraMotionPredictionMs = percentile(cameraMotionPredictionMs, 0.5f),
+            medianGlobalPredictionCoverage = percentile(globalPredictionCoverage, 0.5f),
             byFinish = renders
                 .filter { it.lipstickFinish.isNotBlank() && it.lipstickFinish != "UNKNOWN" }
                 .groupBy { it.lipstickFinish }
@@ -634,6 +679,8 @@ object TrackingTelemetryAnalyzer {
     private const val STATIONARY_WINDOW_MS = 2_000L
     private const val MINIMUM_STATIONARY_WINDOW_MS = 1_900L
     private const val NANOSECONDS_PER_MILLISECOND = 1_000_000f
+    private const val MILLISECONDS_PER_SECOND = 1_000f
+    private const val RADIANS_TO_DEGREES = 57.29578f
     private const val MINIMUM_POSE_SCALE = 1e-5f
     private const val SCALE_MOTION_WEIGHT = 0.5f
     private const val ROTATION_MOTION_WEIGHT = 0.2f

@@ -11,12 +11,14 @@ class LandmarkRenderFrame internal constructor(
     private val renderDeliveryTimestampMs: Long? = null,
     private val maxRenderExtrapolationMs: Long = DEFAULT_MAX_RENDER_EXTRAPOLATION_MS,
     private val renderCorrectionOffsets: FloatArray? = null,
+    private val globalPredictionCoverage: Float = 1f,
 ) {
     init {
         require(positions.isNotEmpty() && positions.size % COORDINATE_COUNT == 0)
         require(positions.size == velocities.size)
         require(renderCorrectionOffsets == null || renderCorrectionOffsets.size == positions.size)
         require(maxRenderExtrapolationMs >= 0L)
+        require(globalPredictionCoverage.isFinite() && globalPredictionCoverage in 0f..1f)
     }
 
     val size: Int = positions.size / COORDINATE_COUNT
@@ -42,6 +44,18 @@ class LandmarkRenderFrame internal constructor(
         }
         return predictionMs / MILLIS_PER_SECOND
     }
+
+    /**
+     * Portion of the global camera-relative motion that the predictor actually extrapolated.
+     *
+     * [predictionSeconds] is the geometric horizon, but global velocity is deliberately gated
+     * while motion is stationary, unconfirmed or low quality. Treating the full horizon as an
+     * already-predicted camera timestamp makes late-latched gyro correction skip real motion.
+     */
+    fun cameraMotionPredictionSeconds(renderTimestampMs: Long): Float =
+        predictionSeconds(renderTimestampMs) * globalPredictionCoverage
+
+    internal fun globalPredictionCoverage(): Float = globalPredictionCoverage
 
     fun x(index: Int, predictionSeconds: Float): Float =
         predictedCoordinate(index, X_OFFSET, predictionSeconds)
@@ -74,6 +88,7 @@ class LandmarkRenderFrame internal constructor(
             maxPredictionMs = maxPredictionMs,
             renderDeliveryTimestampMs = timestampMs.coerceAtLeast(measurementTimestampMs),
             maxRenderExtrapolationMs = maxRenderExtrapolationMs,
+            globalPredictionCoverage = globalPredictionCoverage,
         )
 
     /** Smooths only the visual correction between delivered results; tracker data stays intact. */
@@ -145,6 +160,7 @@ class LandmarkRenderFrame internal constructor(
             renderDeliveryTimestampMs = renderDeliveryTimestampMs,
             maxRenderExtrapolationMs = maxRenderExtrapolationMs,
             renderCorrectionOffsets = correctionOffsets,
+            globalPredictionCoverage = globalPredictionCoverage,
         )
     }
 

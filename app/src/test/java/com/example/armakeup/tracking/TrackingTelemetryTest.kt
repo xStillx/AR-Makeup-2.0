@@ -8,6 +8,7 @@ import kotlin.math.cos
 import kotlin.math.sin
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -49,6 +50,16 @@ class TrackingTelemetryTest {
             materialTemporalMismatchMs = 37f,
             frameSubmissionCpuMs = 4.5f,
             filamentFrameRendered = false,
+            gyroscopeApplied = true,
+            gyroscopeIntervalMs = 42f,
+            gyroscopeRotationX = 0.01f,
+            gyroscopeRotationY = -0.02f,
+            gyroscopeRotationZ = 0.03f,
+            gyroscopeTranslationX = 0.04f,
+            gyroscopeTranslationY = -0.05f,
+            gyroscopeRollRadians = -0.03f,
+            cameraMotionPredictionSeconds = 0.011f,
+            globalPredictionCoverage = 0.25f,
         )
         val bytes = ByteArrayOutputStream().also { output ->
             TrackingTelemetryCodec.writeHeader(
@@ -88,6 +99,21 @@ class TrackingTelemetryTest {
         )
         assertEquals(render.frameSubmissionCpuMs, decodedRender.frameSubmissionCpuMs, 0f)
         assertEquals(render.filamentFrameRendered, decodedRender.filamentFrameRendered)
+        assertEquals(render.gyroscopeApplied, decodedRender.gyroscopeApplied)
+        assertEquals(render.gyroscopeIntervalMs, decodedRender.gyroscopeIntervalMs, 0f)
+        assertEquals(render.gyroscopeRotationY, decodedRender.gyroscopeRotationY, 0f)
+        assertEquals(render.gyroscopeTranslationX, decodedRender.gyroscopeTranslationX, 0f)
+        assertEquals(render.gyroscopeRollRadians, decodedRender.gyroscopeRollRadians, 0f)
+        assertEquals(
+            render.cameraMotionPredictionSeconds,
+            decodedRender.cameraMotionPredictionSeconds,
+            0f,
+        )
+        assertEquals(
+            render.globalPredictionCoverage,
+            decodedRender.globalPredictionCoverage,
+            0f,
+        )
     }
 
     @Test
@@ -157,6 +183,73 @@ class TrackingTelemetryTest {
     }
 
     @Test
+    fun codecReadsLegacyV3RenderWithGyroscopeDisabled() {
+        val bytes = ByteArrayOutputStream().also { output ->
+            DataOutputStream(output).apply {
+                writeInt(0x41525636)
+                writeInt(3)
+                writeUTF("legacy_material")
+                writeLong(42L)
+                writeByte(2)
+                writeLong(1_100L)
+                writeLong(1_000L)
+                writeLong(999_000_000L)
+                writeFloat(0.04f)
+                writeInt(1080)
+                writeInt(2400)
+                writeBoolean(true)
+                repeat(2) { writeInt(0) }
+                writeUTF("SATIN")
+                repeat(4) { writeFloat(1f) }
+                writeBoolean(true)
+                writeByte(0x7f)
+                writeLong(0L)
+            }
+        }.toByteArray()
+
+        val render = TrackingTelemetryCodec.read(ByteArrayInputStream(bytes)).renders.single()
+
+        assertEquals("SATIN", render.lipstickFinish)
+        assertFalse(render.gyroscopeApplied)
+        assertTrue(render.gyroscopeIntervalMs.isNaN())
+        assertEquals(0f, render.gyroscopeTranslationX, 0f)
+    }
+
+    @Test
+    fun codecReadsLegacyV4RenderWithUnknownPredictionCoverage() {
+        val bytes = ByteArrayOutputStream().also { output ->
+            DataOutputStream(output).apply {
+                writeInt(0x41525636)
+                writeInt(4)
+                writeUTF("legacy_gyro")
+                writeLong(42L)
+                writeByte(2)
+                writeLong(1_100L)
+                writeLong(1_000L)
+                writeLong(999_000_000L)
+                writeFloat(0.04f)
+                writeInt(1080)
+                writeInt(2400)
+                writeBoolean(true)
+                repeat(2) { writeInt(0) }
+                writeUTF("TRACKING_TEST")
+                repeat(4) { writeFloat(1f) }
+                writeBoolean(true)
+                writeBoolean(true)
+                repeat(7) { writeFloat(0.01f) }
+                writeByte(0x7f)
+                writeLong(0L)
+            }
+        }.toByteArray()
+
+        val render = TrackingTelemetryCodec.read(ByteArrayInputStream(bytes)).renders.single()
+
+        assertTrue(render.gyroscopeApplied)
+        assertTrue(render.cameraMotionPredictionSeconds.isNaN())
+        assertTrue(render.globalPredictionCoverage.isNaN())
+    }
+
+    @Test
     fun analyzerReportsInputPoseAndThermalQuality() {
         val samples = (0..2).map { index ->
             poseOnlyMeasurement(1_000L + index * 33L, index * 0.01f, index * 0.01f).copy(
@@ -199,6 +292,8 @@ class TrackingTelemetryTest {
                 materialTemporalMismatchMs = 10f,
                 frameSubmissionCpuMs = 2f,
                 filamentFrameRendered = true,
+                cameraMotionPredictionSeconds = 0f,
+                globalPredictionCoverage = 0f,
             ),
             renderSample(1_116L, 0.01f).copy(
                 lipstickFinish = "SATIN",
@@ -207,6 +302,12 @@ class TrackingTelemetryTest {
                 materialTemporalMismatchMs = 40f,
                 frameSubmissionCpuMs = 6f,
                 filamentFrameRendered = false,
+                gyroscopeApplied = true,
+                gyroscopeIntervalMs = 40f,
+                gyroscopeRotationX = 0.01f,
+                gyroscopeTranslationX = 0.02f,
+                cameraMotionPredictionSeconds = 0.008f,
+                globalPredictionCoverage = 0.2f,
             ),
             renderSample(1_132L, 0.02f).copy(
                 lipstickFinish = "GLOSS",
@@ -215,6 +316,12 @@ class TrackingTelemetryTest {
                 materialTemporalMismatchMs = 50f,
                 frameSubmissionCpuMs = 4f,
                 filamentFrameRendered = true,
+                gyroscopeApplied = true,
+                gyroscopeIntervalMs = 50f,
+                gyroscopeRotationY = 0.02f,
+                gyroscopeTranslationY = 0.04f,
+                cameraMotionPredictionSeconds = 0.04f,
+                globalPredictionCoverage = 0.8f,
             ),
         )
 
@@ -231,6 +338,11 @@ class TrackingTelemetryTest {
         assertEquals(2f / 3f, metrics.filamentRenderedFrameFraction, EPSILON)
         assertEquals(0.4f, metrics.medianMaterialCameraCoherence, EPSILON)
         assertEquals(40f, metrics.p95MaterialTemporalMismatchMs, EPSILON)
+        assertEquals(2f / 3f, metrics.gyroscopeAppliedFrameFraction, EPSILON)
+        assertEquals(40f, metrics.p95GyroscopeIntervalMs, EPSILON)
+        assertEquals(0.02f, metrics.p95GyroscopeTranslation, EPSILON)
+        assertEquals(8f, metrics.medianCameraMotionPredictionMs, EPSILON)
+        assertEquals(0.2f, metrics.medianGlobalPredictionCoverage, EPSILON)
         assertEquals(2, metrics.byFinish.size)
         assertEquals("GLOSS", metrics.byFinish[0].finish)
         assertEquals(1, metrics.byFinish[0].renderCount)

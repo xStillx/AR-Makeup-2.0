@@ -26,6 +26,10 @@ import com.example.armakeup.makeup.LipstickPigmentPalette
 import com.example.armakeup.makeup.ReferenceMatteLipstickProfile
 import com.example.armakeup.makeup.ReferenceLipstickRenderProfiles
 import com.example.armakeup.tracking.FillCenterTransform
+import com.example.armakeup.tracking.AndroidGyroscopeSource
+import com.example.armakeup.tracking.CameraProjectionCalibration
+import com.example.armakeup.tracking.GyroscopeLipCompensator
+import com.example.armakeup.tracking.GyroscopeRotationHistory
 import com.example.armakeup.tracking.LandmarkRenderFrame
 import com.example.armakeup.tracking.NormalizedImageTransform
 import com.example.armakeup.tracking.TemporalLandmarkRefiner
@@ -108,6 +112,13 @@ internal class FilamentMakeupRenderer(
     private val lipTessellator = LipMeshTessellator()
     private val materialTemporalController = LipstickMaterialTemporalController()
     private val temporalLandmarkRefiner = TemporalLandmarkRefiner()
+    private val gyroscopeRotationHistory = GyroscopeRotationHistory()
+    private val gyroscopeLipCompensator = GyroscopeLipCompensator(gyroscopeRotationHistory)
+    private val gyroscopeSource = AndroidGyroscopeSource(
+        context = context.applicationContext,
+        history = gyroscopeRotationHistory,
+        handler = mainHandler,
+    )
     private val cameraMesh = createCameraMesh()
     private val lipMesh = createLipMesh()
     private val lipVertexUploader = DynamicVertexUploader(
@@ -126,6 +137,8 @@ internal class FilamentMakeupRenderer(
     private var activeSurfaceRequest: SurfaceRequest? = null
     private var latestLandmarks: LandmarkState? = null
     private var latestCameraTransform: VulkanCameraTransform? = null
+    private var cameraProjectionCalibration: CameraProjectionCalibration? = null
+    private var gyroscopeCorrectionEnabled = true
     private var lipEntityVisible = false
     private var resumed = false
     private var destroyRequested = false
@@ -138,8 +151,11 @@ internal class FilamentMakeupRenderer(
     private var displayedMeasurementTimestampMs = NO_TIMESTAMP
     private var displayedSensorTimestampNs = NO_TIMESTAMP
     private var displayedPredictionSeconds = 0f
+    private var displayedCameraMotionPredictionSeconds = 0f
+    private var displayedGlobalPredictionCoverage = 0f
     private var displayedMaterialTemporalState =
         LipstickMaterialTemporalController.State.STATIONARY
+    private var displayedGyroscopeCorrection = GyroscopeLipCompensator.Correction.NONE
 
     @get:StringRes
     internal val renderBackendLabelRes: Int
@@ -225,10 +241,36 @@ internal class FilamentMakeupRenderer(
         trackingTelemetrySink = sink
     }
 
+    fun setCameraProjectionCalibration(calibration: CameraProjectionCalibration?) {
+        ensureMainThread()
+        cameraProjectionCalibration = calibration
+        Log.i(
+            GYROSCOPE_LOG_TAG,
+            if (calibration == null) {
+                "cameraCalibration=unavailable correctionEnabled=false"
+            } else {
+                "cameraCalibration=${calibration.rawFocalXNormalized}," +
+                    "${calibration.rawFocalYNormalized} gyroAvailable=${gyroscopeSource.isAvailable}"
+            },
+        )
+    }
+
+    fun setGyroscopeCorrectionEnabled(enabled: Boolean) {
+        ensureMainThread()
+        if (gyroscopeCorrectionEnabled == enabled) return
+        gyroscopeCorrectionEnabled = enabled
+        gyroscopeRotationHistory.clear()
+        if (resumed) {
+            if (enabled) gyroscopeSource.start() else gyroscopeSource.stop()
+        }
+        Log.i(GYROSCOPE_LOG_TAG, "correctionEnabled=$enabled")
+    }
+
     fun clear() {
         ensureMainThread()
         latestLandmarks = null
         temporalLandmarkRefiner.clear()
+        gyroscopeRotationHistory.clear()
         hideLipEntity()
     }
 
@@ -244,6 +286,7 @@ internal class FilamentMakeupRenderer(
         ensureMainThread()
         if (destroyRequested || destroyed || resumed) return
         resumed = true
+        if (gyroscopeCorrectionEnabled) gyroscopeSource.start()
         nativeVulkanRuntime?.start()
         frameScheduler.post()
     }
@@ -253,6 +296,7 @@ internal class FilamentMakeupRenderer(
         if (!resumed) return
         resumed = false
         frameScheduler.remove()
+        gyroscopeSource.stop()
         nativeVulkanRuntime?.stop()
     }
 
@@ -471,6 +515,30 @@ internal class FilamentMakeupRenderer(
         } else {
             0f
         }
+        val cameraMotionPredictionSeconds = if (temporalCorrection == null) {
+            state.landmarks.cameraMotionPredictionSeconds(renderTimestampMs)
+        } else {
+            0f
+        }
+        val meshSensorTimestampNs = if (state.sensorTimestampNs == NO_TIMESTAMP) {
+            NO_TIMESTAMP
+        } else {
+            state.sensorTimestampNs +
+                (cameraMotionPredictionSeconds * NANOS_PER_SECOND).toLong()
+        }
+        val gyroscopeCorrection = if (!gyroscopeCorrectionEnabled || temporalCorrection != null) {
+            GyroscopeLipCompensator.Correction.NONE
+        } else {
+            gyroscopeLipCompensator.correctionFor(
+                meshSensorTimestampNs = meshSensorTimestampNs,
+                cameraSensorTimestampNs =
+                    cameraInput?.latestFrameSensorTimestampNs ?: NO_TIMESTAMP,
+                cameraRotationDegrees = state.rotationDegrees,
+                mirrorHorizontal = state.mirrorHorizontal,
+                displayRotation = surfaceView.display?.rotation ?: Surface.ROTATION_0,
+                calibration = cameraProjectionCalibration,
+            )
+        }
         val fillTransform = FillCenterTransform.calculate(
             viewWidth = viewportWidth,
             viewHeight = viewportHeight,
@@ -489,6 +557,7 @@ internal class FilamentMakeupRenderer(
             LipLandmarkTopology.outerContour,
             outerPoints,
             temporalCorrection,
+            gyroscopeCorrection,
         )
         writeContour(
             state,
@@ -498,6 +567,7 @@ internal class FilamentMakeupRenderer(
             LipLandmarkTopology.innerContour,
             innerPoints,
             temporalCorrection,
+            gyroscopeCorrection,
         )
         val tessellated = lipTessellator.tessellate(
             outerPoints,
@@ -516,7 +586,7 @@ internal class FilamentMakeupRenderer(
                 temporalMismatchMs = materialTemporalMismatchMs(
                     state = state,
                     renderTimestampMs = renderTimestampMs,
-                    predictionSeconds = predictionSeconds,
+                    cameraMotionPredictionSeconds = cameraMotionPredictionSeconds,
                 ),
             )
             applyCurrentCameraDetailCoherence()
@@ -526,6 +596,10 @@ internal class FilamentMakeupRenderer(
                 displayedMeasurementTimestampMs = state.landmarks.measurementTimestampMs
                 displayedSensorTimestampNs = state.sensorTimestampNs
                 displayedPredictionSeconds = predictionSeconds
+                displayedCameraMotionPredictionSeconds = cameraMotionPredictionSeconds
+                displayedGlobalPredictionCoverage =
+                    state.landmarks.globalPredictionCoverage()
+                displayedGyroscopeCorrection = gyroscopeCorrection
             }
             showLipEntity()
         }
@@ -534,19 +608,19 @@ internal class FilamentMakeupRenderer(
     private fun materialTemporalMismatchMs(
         state: LandmarkState,
         renderTimestampMs: Long,
-        predictionSeconds: Float,
+        cameraMotionPredictionSeconds: Float,
     ): Float {
         val cameraSensorTimestampNs = cameraInput?.latestFrameSensorTimestampNs ?: NO_TIMESTAMP
         if (cameraSensorTimestampNs != NO_TIMESTAMP && state.sensorTimestampNs != NO_TIMESTAMP) {
             val predictedMeshSensorTimestampNs = state.sensorTimestampNs +
-                (predictionSeconds * NANOS_PER_SECOND).toLong()
+                (cameraMotionPredictionSeconds * NANOS_PER_SECOND).toLong()
             return kotlin.math.abs(
                 cameraSensorTimestampNs - predictedMeshSensorTimestampNs,
             ) / NANOS_PER_MILLISECOND.toFloat()
         }
         return kotlin.math.abs(
             renderTimestampMs - state.landmarks.measurementTimestampMs -
-                predictionSeconds * MILLIS_PER_SECOND,
+                cameraMotionPredictionSeconds * MILLIS_PER_SECOND,
         )
     }
 
@@ -579,6 +653,16 @@ internal class FilamentMakeupRenderer(
                     displayedMaterialTemporalState.temporalMismatchMs,
                 frameSubmissionCpuMs = frameSubmissionCpuMs,
                 filamentFrameRendered = filamentFrameRendered,
+                gyroscopeApplied = displayedGyroscopeCorrection.applied,
+                gyroscopeIntervalMs = displayedGyroscopeCorrection.intervalMs,
+                gyroscopeRotationX = displayedGyroscopeCorrection.rotationX,
+                gyroscopeRotationY = displayedGyroscopeCorrection.rotationY,
+                gyroscopeRotationZ = displayedGyroscopeCorrection.rotationZ,
+                gyroscopeTranslationX = displayedGyroscopeCorrection.translationX,
+                gyroscopeTranslationY = displayedGyroscopeCorrection.translationY,
+                gyroscopeRollRadians = displayedGyroscopeCorrection.rollRadians,
+                cameraMotionPredictionSeconds = displayedCameraMotionPredictionSeconds,
+                globalPredictionCoverage = displayedGlobalPredictionCoverage,
             ),
         )
     }
@@ -607,6 +691,7 @@ internal class FilamentMakeupRenderer(
                     displayedMaterialTemporalState.temporalMismatchMs,
                 frameSubmissionCpuMs = frameSubmissionCpuMs,
                 filamentFrameRendered = filamentFrameRendered,
+                gyroscopeApplied = false,
             ),
         )
     }
@@ -619,6 +704,7 @@ internal class FilamentMakeupRenderer(
         topology: IntArray,
         output: FloatArray,
         temporalCorrection: TemporalLandmarkRefiner.SimilarityTransform?,
+        gyroscopeCorrection: GyroscopeLipCompensator.Correction,
     ) {
         topology.forEachIndexed { pointIndex, landmarkIndex ->
             val rawX = state.landmarks.x(landmarkIndex, predictionSeconds)
@@ -635,11 +721,19 @@ internal class FilamentMakeupRenderer(
                 correctedDisplayX = temporalCorrection.mapX(displayX, displayUvY)
                 correctedDisplayY = 1f - temporalCorrection.mapY(displayX, displayUvY)
             }
+            val gyroCorrectedDisplayX = gyroscopeCorrection.mapX(
+                correctedDisplayX,
+                correctedDisplayY,
+            )
+            val gyroCorrectedDisplayY = gyroscopeCorrection.mapY(
+                correctedDisplayX,
+                correctedDisplayY,
+            )
             val outputIndex = pointIndex * POINT_SIZE
             output[outputIndex] =
-                fillTransform.mapX(correctedDisplayX, state.sourceWidth) / viewportWidth
+                fillTransform.mapX(gyroCorrectedDisplayX, state.sourceWidth) / viewportWidth
             output[outputIndex + 1] =
-                fillTransform.mapY(correctedDisplayY, state.sourceHeight) / viewportHeight
+                fillTransform.mapY(gyroCorrectedDisplayY, state.sourceHeight) / viewportHeight
         }
     }
 
@@ -740,6 +834,9 @@ internal class FilamentMakeupRenderer(
         displayedMeasurementTimestampMs = NO_TIMESTAMP
         displayedSensorTimestampNs = NO_TIMESTAMP
         displayedPredictionSeconds = 0f
+        displayedCameraMotionPredictionSeconds = 0f
+        displayedGlobalPredictionCoverage = 0f
+        displayedGyroscopeCorrection = GyroscopeLipCompensator.Correction.NONE
     }
 
     private fun createCameraMesh(): MeshResources {
@@ -1241,6 +1338,7 @@ internal class FilamentMakeupRenderer(
         private const val DEFAULT_ILLUMINATION_STEP = 0.01f
         private const val RENDER_LOG_TAG = "ARMakeupRender"
         private const val NATIVE_VULKAN_LOG_TAG = "ARMakeupVulkan"
+        private const val GYROSCOPE_LOG_TAG = "ARMakeupGyroV6"
         private val IDENTITY_MATRIX = floatArrayOf(
             1f, 0f, 0f, 0f,
             0f, 1f, 0f, 0f,

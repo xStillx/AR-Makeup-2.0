@@ -3,6 +3,7 @@ package com.example.armakeup
 import android.Manifest
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
+import android.hardware.camera2.CameraCharacteristics
 import android.os.Bundle
 import android.util.Log
 import android.util.Range
@@ -22,6 +23,7 @@ import androidx.camera.core.ViewPort
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.camera2.interop.Camera2Interop
+import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
@@ -32,6 +34,7 @@ import com.example.armakeup.databinding.ActivityMainBinding
 import com.example.armakeup.makeup.LipstickFinish
 import com.example.armakeup.tracking.FaceLandmarkerTracker
 import com.example.armakeup.tracking.CameraCaptureMetadataStore
+import com.example.armakeup.tracking.CameraProjectionCalibration
 import com.example.armakeup.tracking.TrackingTelemetryRecorder
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -73,6 +76,9 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
         setContentView(binding.root)
         binding.root.keepScreenOn = true
         binding.makeupRenderer.setErrorListener(::showFatalRendererState)
+        binding.makeupRenderer.setGyroscopeCorrectionEnabled(
+            !intent.getBooleanExtra(EXTRA_DISABLE_GYROSCOPE_CORRECTION, false),
+        )
         val debuggable = applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
         binding.finishTrackingTest.visibility = if (debuggable) View.VISIBLE else View.GONE
         trackingTelemetryRecorder = TrackingTelemetryRecorder.createIfRequested(
@@ -223,12 +229,17 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
                     }
 
                 provider.unbindAll()
+                val frontCameraInfo = provider.getCameraInfo(
+                    CameraSelector.DEFAULT_FRONT_CAMERA,
+                )
+                binding.makeupRenderer.setCameraProjectionCalibration(
+                    readCameraProjectionCalibration(frontCameraInfo),
+                )
                 val baseSessionBuilder = SessionConfig.Builder(preview, analysis)
                 baseSessionBuilder.setViewPort(createCameraViewPort(targetRotation))
                 val baseSession = baseSessionBuilder.build()
                 val preferredFrameRate = selectPreferredFrameRate(
-                    provider.getCameraInfo(CameraSelector.DEFAULT_FRONT_CAMERA)
-                        .getSupportedFrameRateRanges(baseSession),
+                    frontCameraInfo.getSupportedFrameRateRanges(baseSession),
                 )
                 val session = if (preferredFrameRate != null) {
                     cameraFpsLabel = preferredFrameRate.toDisplayLabel()
@@ -260,6 +271,24 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
         return ViewPort.Builder(Rational(width, height), targetRotation)
             .setScaleType(ViewPort.FILL_CENTER)
             .build()
+    }
+
+    @androidx.annotation.OptIn(markerClass = [ExperimentalCamera2Interop::class])
+    private fun readCameraProjectionCalibration(
+        cameraInfo: androidx.camera.core.CameraInfo,
+    ): CameraProjectionCalibration? {
+        val camera2Info = Camera2CameraInfo.from(cameraInfo)
+        val focalLength = camera2Info.getCameraCharacteristic(
+            CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS,
+        )?.firstOrNull() ?: return null
+        val physicalSize = camera2Info.getCameraCharacteristic(
+            CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE,
+        ) ?: return null
+        return CameraProjectionCalibration.fromPhysicalSensor(
+            focalLengthMillimeters = focalLength,
+            sensorWidthMillimeters = physicalSize.width,
+            sensorHeightMillimeters = physicalSize.height,
+        )
     }
 
     override fun onTrackerReady(delegate: FaceLandmarkerTracker.InferenceDelegate) {
@@ -439,6 +468,8 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
     }
 
     companion object {
+        const val EXTRA_DISABLE_GYROSCOPE_CORRECTION =
+            "com.example.armakeup.extra.DISABLE_GYROSCOPE_CORRECTION"
         private const val MIN_CAMERA_FPS = 30
         private const val MAX_CAMERA_FPS = 60
         private const val PERFORMANCE_LOG_TAG = "ARMakeupPerf"

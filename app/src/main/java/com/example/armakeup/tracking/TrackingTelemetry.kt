@@ -101,6 +101,16 @@ data class TrackingRenderSample(
     val materialTemporalMismatchMs: Float = Float.NaN,
     val frameSubmissionCpuMs: Float = Float.NaN,
     val filamentFrameRendered: Boolean = true,
+    val gyroscopeApplied: Boolean = false,
+    val gyroscopeIntervalMs: Float = Float.NaN,
+    val gyroscopeRotationX: Float = 0f,
+    val gyroscopeRotationY: Float = 0f,
+    val gyroscopeRotationZ: Float = 0f,
+    val gyroscopeTranslationX: Float = 0f,
+    val gyroscopeTranslationY: Float = 0f,
+    val gyroscopeRollRadians: Float = 0f,
+    val cameraMotionPredictionSeconds: Float = Float.NaN,
+    val globalPredictionCoverage: Float = Float.NaN,
 ) : TrackingTelemetryEvent
 
 private const val UNKNOWN_LIPSTICK_FINISH = "UNKNOWN"

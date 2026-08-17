@@ -148,6 +148,16 @@ object TrackingTelemetryCodec {
         data.writeFloat(sample.materialTemporalMismatchMs)
         data.writeFloat(sample.frameSubmissionCpuMs)
         data.writeBoolean(sample.filamentFrameRendered)
+        data.writeBoolean(sample.gyroscopeApplied)
+        data.writeFloat(sample.gyroscopeIntervalMs)
+        data.writeFloat(sample.gyroscopeRotationX)
+        data.writeFloat(sample.gyroscopeRotationY)
+        data.writeFloat(sample.gyroscopeRotationZ)
+        data.writeFloat(sample.gyroscopeTranslationX)
+        data.writeFloat(sample.gyroscopeTranslationY)
+        data.writeFloat(sample.gyroscopeRollRadians)
+        data.writeFloat(sample.cameraMotionPredictionSeconds)
+        data.writeFloat(sample.globalPredictionCoverage)
     }
 
     private fun readRender(data: DataInputStream, version: Int): TrackingRenderSample {
@@ -162,7 +172,7 @@ object TrackingTelemetryCodec {
             outerLipPoints = data.readFloatArray(),
             innerLipPoints = data.readFloatArray(),
         )
-        return if (version >= VERSION_WITH_MATERIAL_TEMPORAL_STATE) {
+        val withMaterial = if (version >= VERSION_WITH_MATERIAL_TEMPORAL_STATE) {
             base.copy(
                 lipstickFinish = data.readUTF(),
                 materialCameraCoherence = data.readFloat(),
@@ -173,6 +183,28 @@ object TrackingTelemetryCodec {
             )
         } else {
             base
+        }
+        val withGyroscope = if (version >= VERSION_WITH_GYROSCOPE_CORRECTION) {
+            withMaterial.copy(
+                gyroscopeApplied = data.readBoolean(),
+                gyroscopeIntervalMs = data.readFloat(),
+                gyroscopeRotationX = data.readFloat(),
+                gyroscopeRotationY = data.readFloat(),
+                gyroscopeRotationZ = data.readFloat(),
+                gyroscopeTranslationX = data.readFloat(),
+                gyroscopeTranslationY = data.readFloat(),
+                gyroscopeRollRadians = data.readFloat(),
+            )
+        } else {
+            withMaterial
+        }
+        return if (version >= VERSION_WITH_PREDICTION_COVERAGE) {
+            withGyroscope.copy(
+                cameraMotionPredictionSeconds = data.readFloat(),
+                globalPredictionCoverage = data.readFloat(),
+            )
+        } else {
+            withGyroscope
         }
     }
 
@@ -259,10 +291,12 @@ object TrackingTelemetryCodec {
         this as? DataInputStream ?: DataInputStream(this)
 
     private const val MAGIC = 0x41525636 // "ARV6"
-    private const val VERSION = 3
+    private const val VERSION = 5
     private const val MINIMUM_SUPPORTED_VERSION = 1
     private const val VERSION_WITH_INPUT_QUALITY = 2
     private const val VERSION_WITH_MATERIAL_TEMPORAL_STATE = 3
+    private const val VERSION_WITH_GYROSCOPE_CORRECTION = 4
+    private const val VERSION_WITH_PREDICTION_COVERAGE = 5
     private const val EVENT_MEASUREMENT = 1
     private const val EVENT_RENDER = 2
     private const val EVENT_FOOTER = 0x7f

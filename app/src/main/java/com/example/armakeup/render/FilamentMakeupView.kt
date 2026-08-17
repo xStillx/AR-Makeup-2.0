@@ -6,6 +6,7 @@ import android.view.SurfaceView
 import androidx.camera.core.Preview
 import com.example.armakeup.makeup.LipstickFinish
 import com.example.armakeup.tracking.LandmarkRenderFrame
+import com.example.armakeup.tracking.CameraProjectionCalibration
 import com.example.armakeup.tracking.TrackingTelemetrySink
 import com.google.android.filament.Filament
 
@@ -58,6 +59,14 @@ class FilamentMakeupView @JvmOverloads constructor(
 
     fun setTrackingTelemetrySink(sink: TrackingTelemetrySink?) {
         compositor?.setTrackingTelemetrySink(sink)
+    }
+
+    fun setCameraProjectionCalibration(calibration: CameraProjectionCalibration?) {
+        compositor?.setCameraProjectionCalibration(calibration)
+    }
+
+    fun setGyroscopeCorrectionEnabled(enabled: Boolean) {
+        compositor?.setGyroscopeCorrectionEnabled(enabled)
     }
 
     fun setResult(
