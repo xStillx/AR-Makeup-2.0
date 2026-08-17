@@ -67,11 +67,13 @@ V6.3 candidate использует `TYPE_GYROSCOPE_UNCALIBRATED` с hardware-bi
 
 Coverage-fix установлен на SM-G990B и запущен с gyro enabled / `TRACKING_TEST`. Startup/runtime без ошибок. Первый v5 functional run `gyro_v63_coverage_same_scenario`: 585 ML / 1200 render, dropped 0, FPS 29.93, latency 107/127 ms, frame CPU 3.12/6.35 ms, rendered 1.0, thermal 0. Он почти не содержит сильного движения телефона: gyro rotation p95 0.15°, translation p95 0.00199, поэтому подтверждает runtime/codec, но не visual acceptance. Файл лежит в `app/build/tracking-telemetry`; после run батарея около 35.9 °C. Нужна отдельная запись с явно сильными phone-only рывками либо пользовательский визуальный ответ.
 
-1. На холодном устройстве записать матрицу: неподвижное лицо, медленное/быстрое движение, резкая остановка, разговор, улыбка, движение телефона, dropout, 15/20/30 ML FPS и thermal throttling.
-2. Проверить, что V6.2 metadata на устройстве не `unknown`, и сопоставить jitter с exposure/ISO/gradient/capture interval/pose quality/thermal.
-3. На одних `.arv6` replay сравнить V6.0 baseline, V6.1 и V6.2 robust candidate.
-4. Визуально проверить V6.3 на остывшем устройстве: при неподвижной голове резко качать телефон влево/вправо, вверх/вниз и слегка roll; подтвердить, что маска движется в правильную сторону, меньше отстаёт и не получает overshoot/jitter после остановки. При неверном знаке/масштабе корректировать только gyro display-axis mapping/calibration, не predictor.
-5. После visual sign acceptance записать более controlled enabled/disabled phone-motion A/B; Vulkan flow включать в видимый путь только после отдельного численного превосходства.
+FF0 завершён: V6.3 сохранён commit `dd095f7` и experimental-тегом `tracking-v6.3-gyro-experimental-2026-08-17` после полного unit/lint/assemble gate. Поверх checkpoint реализован первый FF1/FF2 shadow slice: `.arv6` v6 пишет tracker-side latency stages, RGBA/quality/result-processing durations и MediaPipe 4×4 facial transformation matrix. Matrix включена только при debug recording и не влияет на predictor или renderer. Codec читает v1–v6; v1/v5 compatibility и новые analyzer metrics покрыты tests. Локальный gate: 113 tests, 0 failures/errors, lint/APK/четыре ABI успешны. Device v6/3D axis/performance acceptance ещё не выполнен.
+
+1. На холодном SM-G990B собрать/установить FF1/FF2 shadow APK и записать `.arv6` v6 для stationary, head-motion, phone-motion, yaw/pitch/roll, stop и dropout.
+2. Проверить `dropped=0`, новые latency p50/p95, `transform3dCoverage`, matrix continuity, CPU/GPU и thermal overhead относительно `dd095f7`.
+3. Зафиксировать unit/replay tests для MediaPipe matrix layout, axes, handedness, rotation/crop/front-camera mirror и сравнить 3D pose с 22-anchor estimator/gyro.
+4. Добавить FF1 geometry-upload и camera-presentation/vsync timestamps. До этого capture-to-result не является полной display latency.
+5. V6.3 strong phone-motion visual acceptance выполнить отдельно; matrix не подключать в renderer до численного и visual acceptance.
 
 Acceptance V6: нет заметного jitter на неподвижном лице, отставания при движении и скачка после остановки; нет regressions orientation/mirror/lip alignment; pipeline остаётся latest-only и укладывается в GPU compositor budget 6–8 ms на целевом устройстве.
 
@@ -107,4 +109,4 @@ V5 реализует reconstructed lip normals, camera-conditioned lighting и 
 - `app/src/main/java/com/example/armakeup/render/FilamentMaterialFactory.kt` — lipstick shader, включая диагностические coverage/luminance uniforms.
 - `app/src/test/java/com/example/armakeup/tracking/` — tracking regression tests.
 
-Начни новый чат с изучения `AGENTS.md`, `PROJECT_CONTEXT.md`, `FULL_FACE_ROADMAP.md` и перечисленных tracking/render-файлов. Baseline `cc82370`, fast-motion `d4636ac` и material candidate `ab8796a` — отдельные точки отката. Поверх `ab8796a` реализован незакоммиченный V6.3 gyro candidate; первоначальный device runtime/performance gate пройден, затем по пользовательскому видео исправлен coverage-aware temporal contract и повторно пройден локальный gate. Следующий шаг по принятому roadmap — завершить `FF0`, затем совместить `FF1/FF2`: расширить latency telemetry и включить MediaPipe facial transformation matrix только в shadow path. Predictor geometry и видимую lip mesh на этом A/B не менять.
+Начни новый чат с изучения `AGENTS.md`, `PROJECT_CONTEXT.md`, `FULL_FACE_ROADMAP.md` и перечисленных tracking/render-файлов. Точки отката: baseline `cc82370`, fast-motion `d4636ac`, material candidate `ab8796a`, V6.3 experimental `dd095f7` / `tracking-v6.3-gyro-experimental-2026-08-17`. В отдельном commit поверх `dd095f7` сохранён FF1/FF2 shadow telemetry v6 + MediaPipe 4×4 transform; полный локальный gate прошёл, видимый renderer не менялся. Следующий шаг — device `.arv6` v6 benchmark и axis/layout tests; не подключать matrix к рендеру до acceptance.

@@ -2,6 +2,14 @@
 
 Статус: принят 2026-08-17.
 
+Текущий прогресс 2026-08-17:
+
+- FF0 выполнен: V6.3 сохранён commit `dd095f7` и тегом `tracking-v6.3-gyro-experimental-2026-08-17` после полного unit/lint/assemble gate. Это experimental, не stable.
+- Первый shadow slice FF1/FF2 реализован поверх checkpoint: `.arv6` v6 разделяет tracker latency на camera→analysis, analysis→submit, MediaPipe inference и callback queue, отдельно пишет RGBA/quality/result-processing CPU duration.
+- MediaPipe 4×4 facial transformation matrix включается только при debug telemetry, сохраняется с timestamp исходного camera frame и пока не передаётся в renderer.
+- Локальный gate shadow slice: `113` unit tests, `0` failures/errors, lint и debug APK/четыре ABI успешны.
+- До завершения FF1 ещё нужны camera presentation/vsync и geometry-upload timestamps; до завершения FF2 — device benchmark, оси/handedness/matrix-layout tests и сравнение с текущим 22-anchor estimator.
+
 Этот файл задаёт порядок дальнейшей разработки после V6.3. Полный исторический и технический контекст находится в `PROJECT_CONTEXT.md`; компактный перенос между чатами — в `CHAT_HANDOFF.md`.
 
 ## Целевое решение
@@ -197,7 +205,8 @@ Parsing выполняется ориентировочно 15–30 раз/с п
 
 ## Следующее действие
 
-1. Завершить FF0: сохранить V6.3 как experimental checkpoint, не смешивая его с 3D-изменениями.
-2. Начать FF1/FF2 одним shadow vertical slice: расширить latency telemetry и включить facial transformation matrix без изменения видимого рендера.
-3. На одинаковых записях сравнить matrix, текущий 22-anchor estimator и gyro signals.
-4. Только после анализа переходить к FF3 и видимому 3D path.
+1. Собрать/установить FF1/FF2 shadow APK и записать одинаковые stationary, head-motion и phone-motion `.arv6` v6 runs на холодном устройстве.
+2. Проверить p50/p95 новых стадий, `transform3dCoverage`, dropped events, CPU/GPU и thermal overhead относительно V6.3 checkpoint.
+3. Зафиксировать оси, handedness, matrix layout, rotation/crop/mirror и сравнить matrix с текущим 22-anchor estimator и gyro signals.
+4. Добавить недостающие geometry-upload/camera-presentation/vsync timestamps, не меняя видимый renderer.
+5. Только после анализа переходить к FF3 и видимому 3D path.

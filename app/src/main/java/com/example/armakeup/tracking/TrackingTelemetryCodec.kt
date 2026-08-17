@@ -98,6 +98,8 @@ object TrackingTelemetryCodec {
         data.writeFrameQuality(sample.frameQuality)
         data.writePoseFitQuality(sample.poseFitQuality)
         data.writeDeviceState(sample.deviceState)
+        data.writePipelineTiming(sample.pipelineTiming)
+        data.writeFloatArray(sample.facialTransformationMatrix)
     }
 
     private fun readMeasurement(
@@ -119,7 +121,7 @@ object TrackingTelemetryCodec {
             rawGeometry = data.readGeometry(),
             filteredGeometry = data.readGeometry(),
         )
-        return if (version >= VERSION_WITH_INPUT_QUALITY) {
+        val withInputQuality = if (version >= VERSION_WITH_INPUT_QUALITY) {
             base.copy(
                 captureIntervalMs = data.readLong(),
                 frameQuality = data.readFrameQuality(),
@@ -128,6 +130,14 @@ object TrackingTelemetryCodec {
             )
         } else {
             base
+        }
+        return if (version >= VERSION_WITH_PIPELINE_TIMING_AND_3D_TRANSFORM) {
+            withInputQuality.copy(
+                pipelineTiming = data.readPipelineTiming(),
+                facialTransformationMatrix = data.readFloatArray(),
+            )
+        } else {
+            withInputQuality
         }
     }
 
@@ -271,6 +281,27 @@ object TrackingTelemetryCodec {
         batteryTemperatureCelsius = readFloat(),
     )
 
+    private fun DataOutputStream.writePipelineTiming(timing: TrackingPipelineTiming) {
+        writeLong(timing.analysisStartTimestampMs)
+        writeLong(timing.submitTimestampMs)
+        writeLong(timing.callbackTimestampMs)
+        writeLong(timing.callbackHandlerStartTimestampMs)
+        writeFloat(timing.rgbaCopyDurationMs)
+        writeFloat(timing.qualityAnalysisDurationMs)
+        writeFloat(timing.resultProcessingDurationMs)
+    }
+
+    private fun DataInputStream.readPipelineTiming(): TrackingPipelineTiming =
+        TrackingPipelineTiming(
+            analysisStartTimestampMs = readLong(),
+            submitTimestampMs = readLong(),
+            callbackTimestampMs = readLong(),
+            callbackHandlerStartTimestampMs = readLong(),
+            rgbaCopyDurationMs = readFloat(),
+            qualityAnalysisDurationMs = readFloat(),
+            resultProcessingDurationMs = readFloat(),
+        )
+
     private fun DataOutputStream.writeFloatArray(values: FloatArray) {
         writeInt(values.size)
         values.forEach(::writeFloat)
@@ -291,12 +322,13 @@ object TrackingTelemetryCodec {
         this as? DataInputStream ?: DataInputStream(this)
 
     private const val MAGIC = 0x41525636 // "ARV6"
-    private const val VERSION = 5
+    private const val VERSION = 6
     private const val MINIMUM_SUPPORTED_VERSION = 1
     private const val VERSION_WITH_INPUT_QUALITY = 2
     private const val VERSION_WITH_MATERIAL_TEMPORAL_STATE = 3
     private const val VERSION_WITH_GYROSCOPE_CORRECTION = 4
     private const val VERSION_WITH_PREDICTION_COVERAGE = 5
+    private const val VERSION_WITH_PIPELINE_TIMING_AND_3D_TRANSFORM = 6
     private const val EVENT_MEASUREMENT = 1
     private const val EVENT_RENDER = 2
     private const val EVENT_FOOTER = 0x7f

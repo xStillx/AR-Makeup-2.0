@@ -33,7 +33,36 @@ data class TrackingMeasurementSample(
     val frameQuality: TrackingFrameQuality = TrackingFrameQuality.UNKNOWN,
     val poseFitQuality: TrackingPoseFitQuality = TrackingPoseFitQuality.UNKNOWN,
     val deviceState: TrackingDeviceState = TrackingDeviceState.UNKNOWN,
+    val pipelineTiming: TrackingPipelineTiming = TrackingPipelineTiming.UNKNOWN,
+    /** MediaPipe canonical-face 4x4 transform, recorded in shadow mode only. */
+    val facialTransformationMatrix: FloatArray = FloatArray(0),
 ) : TrackingTelemetryEvent
+
+/**
+ * Monotonic timestamps and CPU stage durations used to decompose capture-to-result latency.
+ * Unknown values keep legacy telemetry readable without inventing zero-duration stages.
+ */
+data class TrackingPipelineTiming(
+    val analysisStartTimestampMs: Long,
+    val submitTimestampMs: Long,
+    val callbackTimestampMs: Long,
+    val callbackHandlerStartTimestampMs: Long,
+    val rgbaCopyDurationMs: Float,
+    val qualityAnalysisDurationMs: Float,
+    val resultProcessingDurationMs: Float,
+) {
+    companion object {
+        val UNKNOWN = TrackingPipelineTiming(
+            analysisStartTimestampMs = -1L,
+            submitTimestampMs = -1L,
+            callbackTimestampMs = -1L,
+            callbackHandlerStartTimestampMs = -1L,
+            rgbaCopyDurationMs = Float.NaN,
+            qualityAnalysisDurationMs = Float.NaN,
+            resultProcessingDurationMs = Float.NaN,
+        )
+    }
+}
 
 data class TrackingFrameQuality(
     val meanLuma: Float,

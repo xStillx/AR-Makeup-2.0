@@ -33,6 +33,18 @@ class TrackingTelemetryTest {
             ),
             poseFitQuality = TrackingPoseFitQuality(0.02f, 0.9f, 0.8f),
             deviceState = TrackingDeviceState(thermalStatus = 1, 31.5f),
+            pipelineTiming = TrackingPipelineTiming(
+                analysisStartTimestampMs = 1_008L,
+                submitTimestampMs = 1_025L,
+                callbackTimestampMs = 1_092L,
+                callbackHandlerStartTimestampMs = 1_095L,
+                rgbaCopyDurationMs = 2.5f,
+                qualityAnalysisDurationMs = 0.75f,
+                resultProcessingDurationMs = 1.25f,
+            ),
+            facialTransformationMatrix = FloatArray(16) { index ->
+                if (index % 5 == 0) 1f else index * 0.01f
+            },
         )
         val render = TrackingRenderSample(
             renderTimestampMs = 1_110L,
@@ -87,6 +99,12 @@ class TrackingTelemetryTest {
         assertEquals(measurement.frameQuality, decodedMeasurement.frameQuality)
         assertEquals(measurement.poseFitQuality, decodedMeasurement.poseFitQuality)
         assertEquals(measurement.deviceState, decodedMeasurement.deviceState)
+        assertEquals(measurement.pipelineTiming, decodedMeasurement.pipelineTiming)
+        assertArrayEquals(
+            measurement.facialTransformationMatrix,
+            decodedMeasurement.facialTransformationMatrix,
+            0f,
+        )
         val decodedRender = decoded.events[1] as TrackingRenderSample
         assertArrayEquals(render.outerLipPoints, decodedRender.outerLipPoints, 0f)
         assertEquals(render.lipstickFinish, decodedRender.lipstickFinish)
@@ -150,6 +168,56 @@ class TrackingTelemetryTest {
         assertTrue(measurement.frameQuality.meanLuma.isNaN())
         assertTrue(measurement.poseFitQuality.quality.isNaN())
         assertEquals(-1, measurement.deviceState.thermalStatus)
+        assertEquals(-1L, measurement.pipelineTiming.analysisStartTimestampMs)
+        assertTrue(measurement.pipelineTiming.rgbaCopyDurationMs.isNaN())
+        assertEquals(0, measurement.facialTransformationMatrix.size)
+    }
+
+    @Test
+    fun codecReadsLegacyV5MeasurementWithUnknownPipelineAnd3dTransform() {
+        val bytes = ByteArrayOutputStream().also { output ->
+            DataOutputStream(output).apply {
+                writeInt(0x41525636)
+                writeInt(5)
+                writeUTF("legacy_v5")
+                writeLong(42L)
+                writeByte(1)
+                writeLong(1_000L)
+                writeLong(999_000_000L)
+                writeLong(1_100L)
+                writeLong(100L)
+                writeFloat(30f)
+                writeFloat(Float.NaN)
+                writeBoolean(true)
+                writeBoolean(false)
+                repeat(3) { writeInt(0) }
+                repeat(2) {
+                    repeat(4) { writeFloat(Float.NaN) }
+                    writeInt(0)
+                }
+                writeLong(33L)
+                repeat(3) { writeFloat(0.1f) }
+                writeLong(8_000_000L)
+                writeInt(200)
+                writeLong(33_333_333L)
+                writeLong(10_000_000L)
+                writeInt(2)
+                repeat(3) { writeFloat(0.8f) }
+                writeInt(1)
+                writeFloat(31f)
+                writeByte(0x7f)
+                writeLong(0L)
+            }
+        }.toByteArray()
+
+        val measurement = TrackingTelemetryCodec.read(ByteArrayInputStream(bytes))
+            .measurements.single()
+
+        assertEquals(33L, measurement.captureIntervalMs)
+        assertEquals(200, measurement.frameQuality.sensitivityIso)
+        assertEquals(1, measurement.deviceState.thermalStatus)
+        assertEquals(-1L, measurement.pipelineTiming.submitTimestampMs)
+        assertEquals(0, measurement.facialTransformationMatrix.size)
     }
 
     @Test
@@ -280,6 +348,43 @@ class TrackingTelemetryTest {
         assertEquals(0.8f, metrics.medianPoseFitQuality, EPSILON)
         assertEquals(2, metrics.maximumThermalStatus)
         assertEquals(31f, metrics.medianBatteryTemperatureCelsius, EPSILON)
+    }
+
+    @Test
+    fun analyzerDecomposesPipelineLatencyAndReportsShadow3dCoverage() {
+        val sample = poseOnlyMeasurement(1_000L, 0f, 0f).copy(
+            deliveryTimestampMs = 1_100L,
+            pipelineTiming = TrackingPipelineTiming(
+                analysisStartTimestampMs = 1_010L,
+                submitTimestampMs = 1_025L,
+                callbackTimestampMs = 1_080L,
+                callbackHandlerStartTimestampMs = 1_095L,
+                rgbaCopyDurationMs = 2.5f,
+                qualityAnalysisDurationMs = 0.75f,
+                resultProcessingDurationMs = 1.25f,
+            ),
+            facialTransformationMatrix = FloatArray(16) { index ->
+                if (index % 5 == 0) 1f else 0f
+            },
+        )
+
+        val metrics = TrackingTelemetryAnalyzer.analyze(
+            TrackingTelemetrySession(
+                TrackingTelemetryHeader("pipeline_3d", 0L),
+                listOf(sample),
+                droppedEventCount = 0L,
+            ),
+        )
+
+        assertEquals(10f, metrics.pipelineLatency.medianCameraToAnalysisMs, EPSILON)
+        assertEquals(15f, metrics.pipelineLatency.medianAnalysisToSubmitMs, EPSILON)
+        assertEquals(55f, metrics.pipelineLatency.medianInferenceMs, EPSILON)
+        assertEquals(15f, metrics.pipelineLatency.medianCallbackQueueMs, EPSILON)
+        assertEquals(2.5f, metrics.pipelineLatency.medianRgbaCopyMs, EPSILON)
+        assertEquals(0.75f, metrics.pipelineLatency.medianQualityAnalysisMs, EPSILON)
+        assertEquals(1.25f, metrics.pipelineLatency.medianResultProcessingMs, EPSILON)
+        assertEquals(1, metrics.shadow3d.validTransformationMatrixCount)
+        assertEquals(1f, metrics.shadow3d.facialTransformationMatrixCoverage, EPSILON)
     }
 
     @Test

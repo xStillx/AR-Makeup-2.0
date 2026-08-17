@@ -80,11 +80,15 @@ class FaceLandmarkerTracker(
             .setMinFacePresenceConfidence(MIN_CONFIDENCE)
             .setMinTrackingConfidence(MIN_CONFIDENCE)
             // The 478 landmarks already contain the geometry required by the current effects.
-            // Optional blendshape and matrix outputs are enabled only by effects that consume them.
+            // The canonical-face matrix is enabled only for an explicit debug telemetry session.
+            // It remains a shadow output and never drives the visible renderer at this stage.
             .setOutputFaceBlendshapes(false)
-            .setOutputFacialTransformationMatrixes(false)
+            .setOutputFacialTransformationMatrixes(telemetrySink != null)
             .setResultListener { result, inputImage ->
-                executeCallback(inputImage) { handleResult(result, inputImage) }
+                val callbackTimestampMs = SystemClock.uptimeMillis()
+                executeCallback(inputImage) {
+                    handleResult(result, inputImage, callbackTimestampMs)
+                }
             }
             .setErrorListener { error ->
                 executeCallback { handleInferenceError(error) }
@@ -105,6 +109,7 @@ class FaceLandmarkerTracker(
             return
         }
 
+        val analysisStartTimestampMs = SystemClock.uptimeMillis()
         val sourceWidth = imageProxy.width
         val sourceHeight = imageProxy.height
         val rotationDegrees = imageProxy.imageInfo.rotationDegrees
@@ -123,6 +128,7 @@ class FaceLandmarkerTracker(
         val frameBuffer = reusablePending?.frameBuffer
             ?: obtainFrameBuffer(sourceWidth, sourceHeight)
 
+        val rgbaCopyStartedAtNs = SystemClock.elapsedRealtimeNanos()
         try {
             imageProxy.use { proxy ->
                 copyRgbaPixels(proxy, frameBuffer.buffer)
@@ -132,14 +138,20 @@ class FaceLandmarkerTracker(
             listener.onTrackerError(error.message ?: "Frame copy failed")
             return
         }
-        val imageSignalQuality = if (telemetrySink == null) {
-            ImageSignalQuality.UNKNOWN
+        val rgbaCopyDurationMs = elapsedMillisecondsSince(rgbaCopyStartedAtNs)
+        val imageSignalQuality: ImageSignalQuality
+        val qualityAnalysisDurationMs: Float
+        if (telemetrySink == null) {
+            imageSignalQuality = ImageSignalQuality.UNKNOWN
+            qualityAnalysisDurationMs = Float.NaN
         } else {
-            frameQualityAnalyzer.analyze(
+            val qualityAnalysisStartedAtNs = SystemClock.elapsedRealtimeNanos()
+            imageSignalQuality = frameQualityAnalyzer.analyze(
                 frameBuffer.buffer,
                 sourceWidth,
                 sourceHeight,
             )
+            qualityAnalysisDurationMs = elapsedMillisecondsSince(qualityAnalysisStartedAtNs)
         }
 
         val frame = PreparedFrame(
@@ -148,6 +160,9 @@ class FaceLandmarkerTracker(
             sensorTimestampNs = sensorTimestampNs,
             rotationDegrees = rotationDegrees,
             imageSignalQuality = imageSignalQuality,
+            analysisStartTimestampMs = analysisStartTimestampMs,
+            rgbaCopyDurationMs = rgbaCopyDurationMs,
+            qualityAnalysisDurationMs = qualityAnalysisDurationMs,
         )
 
         if (inFlightFrame == null) {
@@ -178,6 +193,7 @@ class FaceLandmarkerTracker(
             .build()
         inFlightFrame = frame
         inFlightImage = mpImage
+        frame.submitTimestampMs = SystemClock.uptimeMillis()
 
         try {
             landmarker.detectAsync(mpImage, processingOptions, frame.timestampMs)
@@ -191,7 +207,12 @@ class FaceLandmarkerTracker(
         }
     }
 
-    private fun handleResult(result: FaceLandmarkerResult, inputImage: MPImage) {
+    private fun handleResult(
+        result: FaceLandmarkerResult,
+        inputImage: MPImage,
+        callbackTimestampMs: Long,
+    ) {
+        val callbackHandlerStartTimestampMs = SystemClock.uptimeMillis()
         val frame = inFlightFrame
         closeInputImages(inputImage)
         inFlightFrame = null
@@ -209,6 +230,7 @@ class FaceLandmarkerTracker(
         submitLatestPendingFrame()
 
         val resultTimestampMs = SystemClock.uptimeMillis()
+        val resultProcessingStartedAtNs = SystemClock.elapsedRealtimeNanos()
         val measuredLandmarks = result.faceLandmarks().firstOrNull()
         val rawCoordinates = if (measuredLandmarks != null) {
             FloatArray(
@@ -235,6 +257,15 @@ class FaceLandmarkerTracker(
         lastDeliveredLandmarks = renderLandmarks
 
         val filteredCoordinates = trackedLandmarks?.copyBasePositions() ?: FloatArray(0)
+        val facialTransformationMatrix = result.facialTransformationMatrixes()
+            .orElse(emptyList())
+            .firstOrNull()
+            ?.takeIf { matrix ->
+                matrix.size == FACIAL_TRANSFORMATION_MATRIX_SIZE && matrix.all(Float::isFinite)
+            }
+            ?.copyOf()
+            ?: FloatArray(0)
+        val resultProcessingDurationMs = elapsedMillisecondsSince(resultProcessingStartedAtNs)
         val latencyMs = (resultTimestampMs - frame.timestampMs).coerceAtLeast(0L)
         telemetrySink?.let { sink ->
             val cameraMetadata = cameraCaptureMetadataStore.consume(frame.sensorTimestampNs)
@@ -277,6 +308,16 @@ class FaceLandmarkerTracker(
                         landmarkPredictor.latestPoseFitQuality
                     },
                     deviceState = deviceStateMonitor.snapshot(resultTimestampMs),
+                    pipelineTiming = TrackingPipelineTiming(
+                        analysisStartTimestampMs = frame.analysisStartTimestampMs,
+                        submitTimestampMs = frame.submitTimestampMs,
+                        callbackTimestampMs = callbackTimestampMs,
+                        callbackHandlerStartTimestampMs = callbackHandlerStartTimestampMs,
+                        rgbaCopyDurationMs = frame.rgbaCopyDurationMs,
+                        qualityAnalysisDurationMs = frame.qualityAnalysisDurationMs,
+                        resultProcessingDurationMs = resultProcessingDurationMs,
+                    ),
+                    facialTransformationMatrix = facialTransformationMatrix,
                 ),
             )
         }
@@ -391,6 +432,10 @@ class FaceLandmarkerTracker(
         target.flip()
     }
 
+    private fun elapsedMillisecondsSince(startTimestampNs: Long): Float =
+        (SystemClock.elapsedRealtimeNanos() - startTimestampNs)
+            .coerceAtLeast(0L) / NANOSECONDS_PER_MILLISECOND
+
     private fun executeCallback(inputImage: MPImage? = null, block: () -> Unit) {
         try {
             callbackExecutor.execute(block)
@@ -428,6 +473,10 @@ class FaceLandmarkerTracker(
         val sensorTimestampNs: Long,
         val rotationDegrees: Int,
         val imageSignalQuality: ImageSignalQuality,
+        val analysisStartTimestampMs: Long,
+        val rgbaCopyDurationMs: Float,
+        val qualityAnalysisDurationMs: Float,
+        var submitTimestampMs: Long = NO_TIMESTAMP,
     )
 
     data class TrackingResult(
@@ -459,6 +508,8 @@ class FaceLandmarkerTracker(
         private const val RGBA_BYTES_PER_PIXEL = 4
         private const val MILLIS_PER_SECOND = 1_000f
         private const val ML_FPS_SMOOTHING = 0.2f
+        private const val NANOSECONDS_PER_MILLISECOND = 1_000_000f
+        private const val FACIAL_TRANSFORMATION_MATRIX_SIZE = 16
         private const val NO_TIMESTAMP = Long.MIN_VALUE
     }
 }

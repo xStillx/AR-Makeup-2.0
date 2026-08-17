@@ -30,6 +30,28 @@ data class TrackingInputQualityMetrics(
     val medianBatteryTemperatureCelsius: Float,
 )
 
+data class TrackingPipelineLatencyMetrics(
+    val medianCameraToAnalysisMs: Float,
+    val p95CameraToAnalysisMs: Float,
+    val medianAnalysisToSubmitMs: Float,
+    val p95AnalysisToSubmitMs: Float,
+    val medianInferenceMs: Float,
+    val p95InferenceMs: Float,
+    val medianCallbackQueueMs: Float,
+    val p95CallbackQueueMs: Float,
+    val medianRgbaCopyMs: Float,
+    val p95RgbaCopyMs: Float,
+    val medianQualityAnalysisMs: Float,
+    val p95QualityAnalysisMs: Float,
+    val medianResultProcessingMs: Float,
+    val p95ResultProcessingMs: Float,
+)
+
+data class TrackingShadow3dMetrics(
+    val validTransformationMatrixCount: Int,
+    val facialTransformationMatrixCoverage: Float,
+)
+
 data class TrackingRenderPerformanceMetrics(
     val lipstickFinishes: List<String>,
     val medianFrameSubmissionCpuMs: Float,
@@ -67,6 +89,8 @@ data class TrackingTelemetryMetrics(
     val medianMlFps: Float,
     val medianLatencyMs: Float,
     val p95LatencyMs: Float,
+    val pipelineLatency: TrackingPipelineLatencyMetrics,
+    val shadow3d: TrackingShadow3dMetrics,
     val inputQuality: TrackingInputQualityMetrics,
     val renderPerformance: TrackingRenderPerformanceMetrics,
     val rawLipJitter: TrackingJitterMetric,
@@ -90,6 +114,35 @@ data class TrackingTelemetryMetrics(
         append(" mlFpsMedian=").append(medianMlFps.formatMetric())
         append(" latencyMedianMs=").append(medianLatencyMs.formatMetric())
         append(" latencyP95Ms=").append(p95LatencyMs.formatMetric())
+        append(" cameraToAnalysisMedianMs=")
+            .append(pipelineLatency.medianCameraToAnalysisMs.formatMetric())
+        append(" cameraToAnalysisP95Ms=")
+            .append(pipelineLatency.p95CameraToAnalysisMs.formatMetric())
+        append(" analysisToSubmitMedianMs=")
+            .append(pipelineLatency.medianAnalysisToSubmitMs.formatMetric())
+        append(" analysisToSubmitP95Ms=")
+            .append(pipelineLatency.p95AnalysisToSubmitMs.formatMetric())
+        append(" inferenceMedianMs=")
+            .append(pipelineLatency.medianInferenceMs.formatMetric())
+        append(" inferenceP95Ms=").append(pipelineLatency.p95InferenceMs.formatMetric())
+        append(" callbackQueueMedianMs=")
+            .append(pipelineLatency.medianCallbackQueueMs.formatMetric())
+        append(" callbackQueueP95Ms=")
+            .append(pipelineLatency.p95CallbackQueueMs.formatMetric())
+        append(" rgbaCopyMedianMs=")
+            .append(pipelineLatency.medianRgbaCopyMs.formatMetric())
+        append(" rgbaCopyP95Ms=").append(pipelineLatency.p95RgbaCopyMs.formatMetric())
+        append(" qualityAnalysisMedianMs=")
+            .append(pipelineLatency.medianQualityAnalysisMs.formatMetric())
+        append(" qualityAnalysisP95Ms=")
+            .append(pipelineLatency.p95QualityAnalysisMs.formatMetric())
+        append(" resultProcessingMedianMs=")
+            .append(pipelineLatency.medianResultProcessingMs.formatMetric())
+        append(" resultProcessingP95Ms=")
+            .append(pipelineLatency.p95ResultProcessingMs.formatMetric())
+        append(" transform3dValid=").append(shadow3d.validTransformationMatrixCount)
+        append(" transform3dCoverage=")
+            .append(shadow3d.facialTransformationMatrixCoverage.formatMetric())
         append(" captureIntervalMedianMs=")
             .append(inputQuality.medianCaptureIntervalMs.formatMetric())
         append(" captureIntervalP95Ms=")
@@ -211,6 +264,8 @@ object TrackingTelemetryAnalyzer {
             medianMlFps = percentile(mlFpsValues, 0.5f),
             medianLatencyMs = percentile(latencyValues, 0.5f),
             p95LatencyMs = percentile(latencyValues, 0.95f),
+            pipelineLatency = analyzePipelineLatency(measurements),
+            shadow3d = analyzeShadow3d(measurements),
             inputQuality = analyzeInputQuality(measurements),
             renderPerformance = analyzeRenderPerformance(renders),
             rawLipJitter = pointCloudJitter(
@@ -242,6 +297,83 @@ object TrackingTelemetryAnalyzer {
             reacquisitionJump = estimateReacquisitionJump(measurements),
         )
     }
+
+    private fun analyzePipelineLatency(
+        measurements: List<TrackingMeasurementSample>,
+    ): TrackingPipelineLatencyMetrics {
+        val cameraToAnalysis = measurements.mapNotNull { sample ->
+            orderedDurationMs(
+                startTimestampMs = sample.captureTimestampMs,
+                endTimestampMs = sample.pipelineTiming.analysisStartTimestampMs,
+            )
+        }
+        val analysisToSubmit = measurements.mapNotNull { sample ->
+            orderedDurationMs(
+                startTimestampMs = sample.pipelineTiming.analysisStartTimestampMs,
+                endTimestampMs = sample.pipelineTiming.submitTimestampMs,
+            )
+        }
+        val inference = measurements.mapNotNull { sample ->
+            orderedDurationMs(
+                startTimestampMs = sample.pipelineTiming.submitTimestampMs,
+                endTimestampMs = sample.pipelineTiming.callbackTimestampMs,
+            )
+        }
+        val callbackQueue = measurements.mapNotNull { sample ->
+            orderedDurationMs(
+                startTimestampMs = sample.pipelineTiming.callbackTimestampMs,
+                endTimestampMs = sample.pipelineTiming.callbackHandlerStartTimestampMs,
+            )
+        }
+        val rgbaCopy = measurements.map { it.pipelineTiming.rgbaCopyDurationMs }
+            .filter { it.isFinite() && it >= 0f }
+        val qualityAnalysis = measurements.map {
+            it.pipelineTiming.qualityAnalysisDurationMs
+        }.filter { it.isFinite() && it >= 0f }
+        val resultProcessing = measurements.map {
+            it.pipelineTiming.resultProcessingDurationMs
+        }.filter { it.isFinite() && it >= 0f }
+        return TrackingPipelineLatencyMetrics(
+            medianCameraToAnalysisMs = percentile(cameraToAnalysis, 0.5f),
+            p95CameraToAnalysisMs = percentile(cameraToAnalysis, 0.95f),
+            medianAnalysisToSubmitMs = percentile(analysisToSubmit, 0.5f),
+            p95AnalysisToSubmitMs = percentile(analysisToSubmit, 0.95f),
+            medianInferenceMs = percentile(inference, 0.5f),
+            p95InferenceMs = percentile(inference, 0.95f),
+            medianCallbackQueueMs = percentile(callbackQueue, 0.5f),
+            p95CallbackQueueMs = percentile(callbackQueue, 0.95f),
+            medianRgbaCopyMs = percentile(rgbaCopy, 0.5f),
+            p95RgbaCopyMs = percentile(rgbaCopy, 0.95f),
+            medianQualityAnalysisMs = percentile(qualityAnalysis, 0.5f),
+            p95QualityAnalysisMs = percentile(qualityAnalysis, 0.95f),
+            medianResultProcessingMs = percentile(resultProcessing, 0.5f),
+            p95ResultProcessingMs = percentile(resultProcessing, 0.95f),
+        )
+    }
+
+    private fun analyzeShadow3d(
+        measurements: List<TrackingMeasurementSample>,
+    ): TrackingShadow3dMetrics {
+        val validCount = measurements.count { sample ->
+            sample.facialTransformationMatrix.size == FACIAL_TRANSFORMATION_MATRIX_SIZE &&
+                sample.facialTransformationMatrix.all { it.isFinite() }
+        }
+        return TrackingShadow3dMetrics(
+            validTransformationMatrixCount = validCount,
+            facialTransformationMatrixCoverage = if (measurements.isEmpty()) {
+                Float.NaN
+            } else {
+                validCount.toFloat() / measurements.size
+            },
+        )
+    }
+
+    private fun orderedDurationMs(startTimestampMs: Long, endTimestampMs: Long): Float? =
+        if (startTimestampMs >= 0L && endTimestampMs >= startTimestampMs) {
+            (endTimestampMs - startTimestampMs).toFloat()
+        } else {
+            null
+        }
 
     private fun analyzeRenderPerformance(
         renders: List<TrackingRenderSample>,
@@ -679,6 +811,7 @@ object TrackingTelemetryAnalyzer {
     private const val STATIONARY_WINDOW_MS = 2_000L
     private const val MINIMUM_STATIONARY_WINDOW_MS = 1_900L
     private const val NANOSECONDS_PER_MILLISECOND = 1_000_000f
+    private const val FACIAL_TRANSFORMATION_MATRIX_SIZE = 16
     private const val MILLISECONDS_PER_SECOND = 1_000f
     private const val RADIANS_TO_DEGREES = 57.29578f
     private const val MINIMUM_POSE_SCALE = 1e-5f
