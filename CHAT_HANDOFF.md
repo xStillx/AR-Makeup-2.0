@@ -98,6 +98,7 @@ V5 реализует reconstructed lip normals, camera-conditioned lighting и 
 ## Ключевые файлы
 
 - `PROJECT_CONTEXT.md` — полный контекст и решения.
+- `LICENSE_COMPLIANCE.md` — актуальный реестр коммерческих лицензий, model/data/asset gates и release checklist; обновлять до добавления новых компонентов.
 - `app/src/main/java/com/example/armakeup/tracking/LandmarkMotionPredictor.kt` — текущий baseline predictor.
 - `app/src/main/java/com/example/armakeup/tracking/LandmarkRenderFrame.kt` — render-time prediction и continuity correction.
 - `app/src/main/java/com/example/armakeup/tracking/TemporalLandmarkRefiner.kt` — V4 flow gate, сейчас shadow-only.
