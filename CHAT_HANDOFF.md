@@ -9,10 +9,10 @@ Native Android-приложение виртуальной примерки ма
 ## Репозиторий и состояние
 
 - Путь: `C:\Users\User\AndroidStudioProjects\ARMakeup`.
-- Ветка: `master`; в начале текущей работы `HEAD` и `origin/master` были синхронизированы на `cd1a560` (`[UpdateContext]`). Текущий незакоммиченный diff содержит временный debug-only tracking-оттенок, V6.1 stateful predictor и первый V6.2 robust/quality-aware/telemetry slice.
-- Основные коммиты: `cd1a560 [UpdateContext]`, `8d48b46 [V6]`, `4f8039b [V5]`, `3d3572e [V4]`, `395d3f3 [V3]`.
+- Ветка: `master`; стабильный V6.2 baseline зафиксирован commit `cc82370` и annotated tag `tracking-v6.2-stable-2026-08-17`. Улучшенный fast-motion вариант принят пользователем как новый rollback-checkpoint и фиксируется отдельным commit/tag `tracking-v6.2-fast-motion-2026-08-17`; старый baseline остаётся доступен для отката.
+- Основные коммиты: `cc82370 [V6.2]`, `cd1a560 [UpdateContext]`, `8d48b46 [V6]`, `4f8039b [V5]`, `3d3572e [V4]`, `395d3f3 [V3]`.
 - Kotlin, XML/View UI, один модуль `:app`; `minSdk 24`, `targetSdk/compileSdk 37`.
-- Последняя полная проверка: 90 unit-тестов, 0 failures/errors, lint и debug APK успешно; native код собирается для `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`.
+- Последняя полная проверка: 92 unit-теста, 0 failures/errors, lint и debug APK успешно; native код собирается для `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`.
 
 ## Текущий pipeline
 
@@ -24,7 +24,7 @@ Native Android-приложение виртуальной примерки ма
 
 ## Состояние трекера
 
-- Текущий `LandmarkMotionPredictor` — V6.2 candidate, не production-ready. V6.1 states `STATIONARY/CANDIDATE/MOVING`, smooth confidence, stop/reversal и dropout reset сохранены, но global motion теперь оценивается 22-anchor Huber-robust similarity fit вместо равновесных восьми anchors. Fit quality непрерывно ограничивает response и prediction. Пользователь подтвердил устранение forward overshoot и принял текущую стабильность без заметного jitter; остаточный дефект — lag при резких движениях.
+- Текущий `LandmarkMotionPredictor` — принятый fast-motion вариант поверх V6.2 baseline. Все stable states/robust fit/quality response сохранены. Только при быстром согласованном high-quality motion alignment horizon плавно растёт `45→85 ms`; первый impulse, stop/reversal и poor/unknown fit остаются на `45 ms`. Пользователь подтвердил улучшение без возврата прежних улётов, но небольшой sharp-motion lag ещё виден. Точки отката: `tracking-v6.2-fast-motion-2026-08-17` и более консервативный `cc82370` / `tracking-v6.2-stable-2026-08-17`.
 - V4 optical flow раньше применялся к видимой mesh и создавал сильное дрожание: accepted/rejected fits чередовались почти покадрово, переключая координаты между flow и predictor.
 - Это исправлено: `TemporalLandmarkRefiner.visibleApplicationEnabled` по умолчанию `false`, в логах должно быть `temporalFlowVisible=false`. Flow не имеет права двигать видимую mesh, а его luma/flow/fit compute выполняется только во время диагностической записи.
 - Тег `tracking-stable-2026-08-11` — историческая точка сравнения, а не доказательство текущей production-стабильности.
@@ -47,8 +47,11 @@ V6.0 measurement foundation, V6.1 predictor и первый V6.2 robust/quality-
 - `.arv6` codec version 2 обратно читает version 1 и добавляет capture interval, sparse luma/contrast/gradient, Camera2 exposure/ISO/frame duration/rolling-shutter/AE, pose-fit quality, thermal status и battery temperature. Analyzer публикует median/p95. Capture callback и sparse analysis работают только при debug recording.
 - Первый V6.2 локальный gate: 90 тестов, lint, APK и все четыре ABI успешны. APK установлен на SM-G990B. Functional run `phone_motion_v62_robust`: 556 ML / 1215 render, `dropped=0`, ML FPS `28.96`, latency median/p95 `106/131 ms`, capture interval `33/66 ms`, exposure `8.31 ms`, ISO `359`, rolling shutter `32.44 ms`, pose quality/residual/inliers `0.766/0.0217/0.909`, thermal max `0`, battery `35.7 °C`, stop overshoot `0.013325`. `.arv6` v2 автоматически декодирован; это proof формата/runtime, а не controlled A/B или visual acceptance.
 - Пользовательская проверка после этого прогона: «сейчас всё хорошо», jitter не отмечен; исключение — tracker отстаёт при резких движениях. Текущее состояние нужно сохранить commit/tag до fast-motion коррекции. Ускорять разрешено только высококачественное согласованное движение, не ослабляя stationary/stop/dropout/outlier safeguards.
+- Baseline сохранён commit `cc82370` и тегом `tracking-v6.2-stable-2026-08-17`. Regression до исправления измерил synthetic lag `0.0526 normalized` при motion `0.8/s` и latency `100 ms`: жёсткий prediction cap `45 ms` не компенсировал device latency `106/131 ms`.
+- Fast-motion candidate плавно расширяет cap максимум до `85 ms` только по speed + prediction confidence + pose quality; poor fit и stop остаются на `45 ms`. Новый test ограничивает residual lag `<=0.030`, horizon step `<=15 ms` и запрещает long horizon при corrupted anchors. Все 92 теста и полный gate проходят.
+- Candidate установлен на SM-G990B. Run `sharp_motion_v62_latency85`: 570 ML / 1210 render, `dropped=0`, ML FPS `29.62`, latency `103/128 ms`, pose quality `0.912`, thermal `0`, analyzer lag `0 ms`, stop overshoot `0.006537`, displayed stationary-window jitter `7.85 px RMS`. Это functional signal, не controlled A/B; нужен пользовательский визуальный ответ.
 
-Дальше нужно уменьшить sharp-motion lag относительно сохранённого V6.2 baseline и повторить visual/device acceptance, затем перейти к одинаковой light/thermal scenario matrix.
+Fast-motion вариант визуально принят как улучшение и должен быть сохранён отдельным commit/tag. Следующий обнаруженный дефект состоит из остаточного общего geometric lag и более сильного воспринимаемого lag продуктовых finish. Все finish используют одну mesh/predictor и один compiled shader, но `MATTE`/`SATIN`/`GLOSS` семплируют camera luminance, микротекстуру и блики из актуального camera frame внутри mesh более старого ML timestamp; плоский `TRACKING_TEST` это скрывает. Следующий slice должен добавить finish/GPU timing telemetry и motion-aware temporal coherence camera-conditioned material, не меняя принятую predictor geometry.
 
 1. На холодном устройстве записать матрицу: неподвижное лицо, медленное/быстрое движение, резкая остановка, разговор, улыбка, движение телефона, dropout, 15/20/30 ML FPS и thermal throttling.
 2. Проверить, что V6.2 metadata на устройстве не `unknown`, и сопоставить jitter с exposure/ISO/gradient/capture interval/pose quality/thermal.
@@ -87,4 +90,4 @@ V5 реализует reconstructed lip normals, camera-conditioned lighting и 
 - `app/src/main/java/com/example/armakeup/render/FilamentMaterialFactory.kt` — lipstick shader, включая диагностические coverage/luminance uniforms.
 - `app/src/test/java/com/example/armakeup/tracking/` — tracking regression tests.
 
-Начни новый чат с изучения `AGENTS.md`, `PROJECT_CONTEXT.md` и перечисленных tracking-файлов. Первый V6.2 slice стабилен и должен иметь отдельный rollback commit/tag. Первая задача после checkpoint — уменьшить lag при резком согласованном движении, сохранив текущий jitter/overshoot/outlier уровень, затем повторить device visual acceptance и controlled replay. Не настраивать коэффициенты по краткому live-наблюдению.
+Начни новый чат с изучения `AGENTS.md`, `PROJECT_CONTEXT.md` и перечисленных tracking/render-файлов. Baseline `cc82370` / `tracking-v6.2-stable-2026-08-17` визуально стабилен; fast-motion `45→85 ms` принят как улучшенный checkpoint `tracking-v6.2-fast-motion-2026-08-17`, хотя небольшой общий lag сохраняется. Следующая задача — измерить finish/GPU timing и устранить temporal mismatch camera-conditioned материала без изменения принятой predictor geometry. Не подбирать коэффициенты по краткому live-наблюдению без regression/replay.

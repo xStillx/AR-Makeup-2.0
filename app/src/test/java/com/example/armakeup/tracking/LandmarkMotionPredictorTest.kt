@@ -178,6 +178,79 @@ class LandmarkMotionPredictorTest {
     }
 
     @Test
+    fun sustainedHighQualityFastMotionCompensatesMostCaptureLatency() {
+        val predictor = predictor(renderLeadMs = 0L)
+        val base = trackedFace()
+        val frameIntervalMs = 33L
+        val captureToDeliveryMs = 100L
+        val velocityPerSecond = 0.8f
+        var latestFrame = predictor.update(base, timestampMs = 1_000L)
+        var latestTimestampMs = 1_000L
+        var latestTranslation = 0f
+        val alignmentHorizons = ArrayList<Float>()
+        repeat(6) { frameIndex ->
+            latestTimestampMs += frameIntervalMs
+            latestTranslation = (frameIndex + 1) * velocityPerSecond * frameIntervalMs / 1_000f
+            latestFrame = predictor.update(
+                similarityTransform(base, rotationRadians = 0f, translationX = latestTranslation),
+                timestampMs = latestTimestampMs,
+            )
+            val deliveryTimestampMs = latestTimestampMs + captureToDeliveryMs
+            alignmentHorizons += latestFrame.deliveredAt(deliveryTimestampMs)
+                .predictionSeconds(deliveryTimestampMs)
+        }
+
+        val deliveryTimestampMs = latestTimestampMs + captureToDeliveryMs
+        val delivered = latestFrame.deliveredAt(deliveryTimestampMs)
+        val displayedX = delivered.x(61, delivered.predictionSeconds(deliveryTimestampMs))
+        val expectedCurrentX = base[61 * 3] + latestTranslation +
+            velocityPerSecond * captureToDeliveryMs / 1_000f
+        val lag = expectedCurrentX - displayedX
+
+        alignmentHorizons.zipWithNext().forEach { (previous, current) ->
+            assertTrue("prediction horizon jumped from $previous to $current", current - previous <= 0.015f)
+        }
+        assertTrue("fast-motion horizon was not extended: $alignmentHorizons", alignmentHorizons.last() >= 0.080f)
+        assertTrue("fast coherent motion still lags by $lag", lag in -0.005f..0.030f)
+    }
+
+    @Test
+    fun poorPoseFitCannotUnlockLongLatencyCompensation() {
+        val predictor = predictor(renderLeadMs = 0L)
+        val base = trackedFace()
+        predictor.update(base, timestampMs = 1_000L)
+        predictor.update(
+            similarityTransform(base, rotationRadians = 0f, translationX = 0.03f),
+            timestampMs = 1_033L,
+        )
+        predictor.update(
+            similarityTransform(base, rotationRadians = 0f, translationX = 0.06f),
+            timestampMs = 1_066L,
+        )
+        predictor.update(
+            similarityTransform(base, rotationRadians = 0f, translationX = 0.09f),
+            timestampMs = 1_099L,
+        )
+        val corrupted = similarityTransform(
+            base,
+            rotationRadians = 0f,
+            translationX = 0.12f,
+        ).also { coordinates ->
+            RobustSimilarityEstimator.DEFAULT_ANCHOR_INDICES.forEachIndexed { offset, index ->
+                coordinates[index * 3] += if (offset % 2 == 0) 0.055f else -0.045f
+                coordinates[index * 3 + 1] += if (offset % 3 == 0) -0.050f else 0.040f
+            }
+        }
+        val unreliable = predictor.update(corrupted, timestampMs = 1_132L)
+        val delivered = unreliable.deliveredAt(1_232L)
+        val predictionHorizon = delivered.predictionSeconds(1_232L)
+        val quality = predictor.latestPoseFitQuality.quality
+
+        assertTrue("corrupted pose was considered reliable: $quality", !quality.isFinite() || quality < 0.55f)
+        assertEquals(0.045f, predictionHorizon, EPSILON)
+    }
+
+    @Test
     fun coherentMotionPredictionGainDoesNotJumpAtConfirmationBoundary() {
         val predictor = predictor(renderLeadMs = 0L, maxPredictionMs = 50L)
         predictor.update(face(translationX = 0f), timestampMs = 1_000L)

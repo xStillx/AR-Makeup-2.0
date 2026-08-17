@@ -2,6 +2,8 @@ package com.example.armakeup.tracking
 
 import kotlin.math.abs
 import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.roundToLong
 import kotlin.math.sqrt
 
 /**
@@ -31,6 +33,8 @@ class LandmarkMotionPredictor(
     private val localPredictionGain: Float = DEFAULT_LOCAL_PREDICTION_GAIN,
     private val renderLeadMs: Long = DEFAULT_RENDER_LEAD_MS,
     private val maxPredictionMs: Long = DEFAULT_MAX_PREDICTION_MS,
+    private val maxCoherentMotionPredictionMs: Long =
+        DEFAULT_MAX_COHERENT_MOTION_PREDICTION_MS,
     private val holdAfterLossMs: Long = DEFAULT_HOLD_AFTER_LOSS_MS,
     private val resetGapMs: Long = DEFAULT_RESET_GAP_MS,
     private val maxCentroidJump: Float = DEFAULT_MAX_CENTROID_JUMP,
@@ -46,6 +50,7 @@ class LandmarkMotionPredictor(
     private var filteredGlobalSpeed = 0f
     private var previousGlobalSpeed = 0f
     private var globalPredictionGain = 0f
+    private var currentPredictionHorizonMs = maxPredictionMs
     private var filteredPoseFitQuality = 1f
     private var motionState = MotionState.STATIONARY
     private var coherentMotionFrames = 0
@@ -72,6 +77,7 @@ class LandmarkMotionPredictor(
         require(localPredictionGain in 0f..1f)
         require(renderLeadMs >= 0L)
         require(maxPredictionMs >= 0L)
+        require(maxCoherentMotionPredictionMs >= maxPredictionMs)
         require(holdAfterLossMs >= maxPredictionMs)
         require(resetGapMs > 0L)
         require(maxCentroidJump > 0f)
@@ -111,6 +117,7 @@ class LandmarkMotionPredictor(
         )
         val stateTransition = updateMotionState(measuredGlobalSpeed, directionCosine)
         updateGlobalPredictionGain(elapsedSeconds, stateTransition)
+        updatePredictionHorizon(measuredGlobalSpeed)
         val positionMotionGain = if (motionState == MotionState.STATIONARY) {
             0f
         } else {
@@ -206,6 +213,7 @@ class LandmarkMotionPredictor(
         filteredGlobalSpeed = 0f
         previousGlobalSpeed = 0f
         globalPredictionGain = 0f
+        currentPredictionHorizonMs = maxPredictionMs
         filteredPoseFitQuality = 1f
         motionState = MotionState.STATIONARY
         coherentMotionFrames = 0
@@ -225,6 +233,7 @@ class LandmarkMotionPredictor(
         filteredGlobalSpeed = 0f
         previousGlobalSpeed = 0f
         globalPredictionGain = 0f
+        currentPredictionHorizonMs = maxPredictionMs
         filteredPoseFitQuality = 1f
         motionState = MotionState.STATIONARY
         coherentMotionFrames = 0
@@ -366,6 +375,44 @@ class LandmarkMotionPredictor(
         }
     }
 
+    private fun updatePredictionHorizon(measuredGlobalSpeed: Float) {
+        if (motionState == MotionState.STATIONARY) {
+            currentPredictionHorizonMs = maxPredictionMs
+            return
+        }
+        val instantQuality = latestPoseFitQuality.quality
+        if (!instantQuality.isFinite()) {
+            currentPredictionHorizonMs = maxPredictionMs
+            return
+        }
+        val quality = min(filteredPoseFitQuality, instantQuality)
+        val qualityFactor = normalizedRange(
+            quality,
+            MIN_FAST_MOTION_POSE_QUALITY,
+            FULL_FAST_MOTION_POSE_QUALITY,
+        )
+        val speedFactor = normalizedRange(
+            measuredGlobalSpeed,
+            FAST_MOTION_START_SPEED,
+            FAST_MOTION_FULL_SPEED,
+        )
+        val confidenceFactor = normalizedRange(
+            globalPredictionGain,
+            candidatePredictionGain,
+            1f,
+        )
+        val additionalHorizonMs = (
+            (maxCoherentMotionPredictionMs - maxPredictionMs) *
+                qualityFactor * speedFactor * confidenceFactor
+        ).roundToLong()
+        currentPredictionHorizonMs = maxPredictionMs + additionalHorizonMs
+    }
+
+    private fun normalizedRange(value: Float, start: Float, end: Float): Float {
+        if (end <= start) return if (value >= end) 1f else 0f
+        return ((value - start) / (end - start)).coerceIn(0f, 1f)
+    }
+
     private fun globalMotionSpeed(globalVelocities: FloatArray): Float {
         var squaredSpeed = 0f
         var count = 0
@@ -429,7 +476,7 @@ class LandmarkMotionPredictor(
             measurementTimestampMs = lastMeasurementTimestampMs,
             predictedOnly = predictedOnly,
             renderLeadMs = renderLeadMs,
-            maxPredictionMs = maxPredictionMs,
+            maxPredictionMs = currentPredictionHorizonMs,
         )
 
     private fun hasImplausibleCentroidJump(
@@ -492,6 +539,7 @@ class LandmarkMotionPredictor(
         private const val DEFAULT_LOCAL_PREDICTION_GAIN = 0.35f
         private const val DEFAULT_RENDER_LEAD_MS = 4L
         private const val DEFAULT_MAX_PREDICTION_MS = 45L
+        private const val DEFAULT_MAX_COHERENT_MOTION_PREDICTION_MS = 85L
         private const val DEFAULT_HOLD_AFTER_LOSS_MS = 120L
         private const val DEFAULT_RESET_GAP_MS = 200L
         private const val DEFAULT_MAX_CENTROID_JUMP = 0.12f
@@ -501,6 +549,10 @@ class LandmarkMotionPredictor(
         private const val PREDICTION_GAIN_ATTACK_PER_SECOND = 8f
         private const val PREDICTION_GAIN_RELEASE_PER_SECOND = 4f
         private const val MINIMUM_QUALITY_RESPONSE = 0.35f
+        private const val MIN_FAST_MOTION_POSE_QUALITY = 0.55f
+        private const val FULL_FAST_MOTION_POSE_QUALITY = 0.75f
+        private const val FAST_MOTION_START_SPEED = 0.25f
+        private const val FAST_MOTION_FULL_SPEED = 0.65f
         private const val QUALITY_FALL_PER_SECOND = 8f
         private const val QUALITY_RISE_PER_SECOND = 3f
         private const val MIN_DIRECTION_NORM = 1e-8f
