@@ -158,8 +158,12 @@
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
                     android:minHeight="40dp"
+                    android:minWidth="0dp"
+                    android:paddingStart="4dp"
+                    android:paddingEnd="4dp"
                     android:text="@string/finish_matte"
                     android:textColor="@color/finish_button_text"
+                    android:textSize="12sp"
                     android:textAllCaps="false" />
 
                 <com.google.android.material.button.MaterialButton
@@ -169,8 +173,12 @@
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
                     android:minHeight="40dp"
+                    android:minWidth="0dp"
+                    android:paddingStart="4dp"
+                    android:paddingEnd="4dp"
                     android:text="@string/finish_satin"
                     android:textColor="@color/finish_button_text"
+                    android:textSize="12sp"
                     android:textAllCaps="false" />
 
                 <com.google.android.material.button.MaterialButton
@@ -180,9 +188,29 @@
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
                     android:minHeight="40dp"
+                    android:minWidth="0dp"
+                    android:paddingStart="4dp"
+                    android:paddingEnd="4dp"
                     android:text="@string/finish_gloss"
                     android:textColor="@color/finish_button_text"
+                    android:textSize="12sp"
                     android:textAllCaps="false" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/finish_tracking_test"
+                    style="@style/Widget.Material3.Button.OutlinedButton"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:minHeight="40dp"
+                    android:minWidth="0dp"
+                    android:paddingStart="4dp"
+                    android:paddingEnd="4dp"
+                    android:text="@string/finish_tracking_test"
+                    android:textColor="@color/finish_button_text"
+                    android:textSize="12sp"
+                    android:textAllCaps="false"
+                    android:visibility="gone" />
             </com.google.android.material.button.MaterialButtonToggleGroup>
         </LinearLayout>
     </com.google.android.material.card.MaterialCardView>

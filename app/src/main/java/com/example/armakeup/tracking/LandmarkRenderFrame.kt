@@ -175,7 +175,9 @@ class LandmarkRenderFrame internal constructor(
         private const val Y_OFFSET = 1
         private const val Z_OFFSET = 2
         private const val DISPLAY_MARGIN = 0.25f
-        private const val DEFAULT_MAX_RENDER_EXTRAPOLATION_MS = 42L
+        // One display frame is enough to bridge a 30 FPS ML result without carrying stale
+        // velocity through most of the next camera interval.
+        private const val DEFAULT_MAX_RENDER_EXTRAPOLATION_MS = 20L
         private const val RENDER_CORRECTION_DURATION_MS = 16f
         private const val MAX_RENDER_CORRECTION = 0.12f
         private const val MAX_TRANSITION_CENTROID_DISTANCE = 0.15f

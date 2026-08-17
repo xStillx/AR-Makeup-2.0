@@ -51,7 +51,9 @@ object TrackingTelemetryCodec {
         val data = input.asDataInput()
         require(data.readInt() == MAGIC) { "Not an AR Makeup V6 tracking telemetry file" }
         val version = data.readInt()
-        require(version == VERSION) { "Unsupported tracking telemetry version $version" }
+        require(version in MINIMUM_SUPPORTED_VERSION..VERSION) {
+            "Unsupported tracking telemetry version $version"
+        }
         val header = TrackingTelemetryHeader(
             scenario = data.readUTF(),
             startedAtEpochMs = data.readLong(),
@@ -65,7 +67,7 @@ object TrackingTelemetryCodec {
                 break
             }
             when (eventType) {
-                EVENT_MEASUREMENT -> events += readMeasurement(data)
+                EVENT_MEASUREMENT -> events += readMeasurement(data, version)
                 EVENT_RENDER -> events += readRender(data)
                 EVENT_FOOTER -> {
                     droppedEventCount = data.readLong()
@@ -92,10 +94,17 @@ object TrackingTelemetryCodec {
         data.writeFloatArray(sample.velocities)
         data.writeGeometry(sample.rawGeometry)
         data.writeGeometry(sample.filteredGeometry)
+        data.writeLong(sample.captureIntervalMs)
+        data.writeFrameQuality(sample.frameQuality)
+        data.writePoseFitQuality(sample.poseFitQuality)
+        data.writeDeviceState(sample.deviceState)
     }
 
-    private fun readMeasurement(data: DataInputStream): TrackingMeasurementSample =
-        TrackingMeasurementSample(
+    private fun readMeasurement(
+        data: DataInputStream,
+        version: Int,
+    ): TrackingMeasurementSample {
+        val base = TrackingMeasurementSample(
             captureTimestampMs = data.readLong(),
             sensorTimestampNs = data.readLong(),
             deliveryTimestampMs = data.readLong(),
@@ -110,6 +119,17 @@ object TrackingTelemetryCodec {
             rawGeometry = data.readGeometry(),
             filteredGeometry = data.readGeometry(),
         )
+        return if (version >= VERSION_WITH_INPUT_QUALITY) {
+            base.copy(
+                captureIntervalMs = data.readLong(),
+                frameQuality = data.readFrameQuality(),
+                poseFitQuality = data.readPoseFitQuality(),
+                deviceState = data.readDeviceState(),
+            )
+        } else {
+            base
+        }
+    }
 
     private fun writeRender(data: DataOutputStream, sample: TrackingRenderSample) {
         data.writeByte(EVENT_RENDER)
@@ -154,6 +174,51 @@ object TrackingTelemetryCodec {
         localLipCoordinates = readFloatArray(),
     )
 
+    private fun DataOutputStream.writeFrameQuality(quality: TrackingFrameQuality) {
+        writeFloat(quality.meanLuma)
+        writeFloat(quality.lumaStandardDeviation)
+        writeFloat(quality.meanGradient)
+        writeLong(quality.exposureTimeNs)
+        writeInt(quality.sensitivityIso)
+        writeLong(quality.frameDurationNs)
+        writeLong(quality.rollingShutterSkewNs)
+        writeInt(quality.aeState)
+    }
+
+    private fun DataInputStream.readFrameQuality(): TrackingFrameQuality = TrackingFrameQuality(
+        meanLuma = readFloat(),
+        lumaStandardDeviation = readFloat(),
+        meanGradient = readFloat(),
+        exposureTimeNs = readLong(),
+        sensitivityIso = readInt(),
+        frameDurationNs = readLong(),
+        rollingShutterSkewNs = readLong(),
+        aeState = readInt(),
+    )
+
+    private fun DataOutputStream.writePoseFitQuality(quality: TrackingPoseFitQuality) {
+        writeFloat(quality.normalizedRmsResidual)
+        writeFloat(quality.inlierFraction)
+        writeFloat(quality.quality)
+    }
+
+    private fun DataInputStream.readPoseFitQuality(): TrackingPoseFitQuality =
+        TrackingPoseFitQuality(
+            normalizedRmsResidual = readFloat(),
+            inlierFraction = readFloat(),
+            quality = readFloat(),
+        )
+
+    private fun DataOutputStream.writeDeviceState(state: TrackingDeviceState) {
+        writeInt(state.thermalStatus)
+        writeFloat(state.batteryTemperatureCelsius)
+    }
+
+    private fun DataInputStream.readDeviceState(): TrackingDeviceState = TrackingDeviceState(
+        thermalStatus = readInt(),
+        batteryTemperatureCelsius = readFloat(),
+    )
+
     private fun DataOutputStream.writeFloatArray(values: FloatArray) {
         writeInt(values.size)
         values.forEach(::writeFloat)
@@ -174,7 +239,9 @@ object TrackingTelemetryCodec {
         this as? DataInputStream ?: DataInputStream(this)
 
     private const val MAGIC = 0x41525636 // "ARV6"
-    private const val VERSION = 1
+    private const val VERSION = 2
+    private const val MINIMUM_SUPPORTED_VERSION = 1
+    private const val VERSION_WITH_INPUT_QUALITY = 2
     private const val EVENT_MEASUREMENT = 1
     private const val EVENT_RENDER = 2
     private const val EVENT_FOOTER = 0x7f

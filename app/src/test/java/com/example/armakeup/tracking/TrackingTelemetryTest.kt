@@ -3,6 +3,7 @@ package com.example.armakeup.tracking
 import com.example.armakeup.makeup.LipLandmarkTopology
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.io.DataOutputStream
 import kotlin.math.cos
 import kotlin.math.sin
 import org.junit.Assert.assertArrayEquals
@@ -17,6 +18,20 @@ class TrackingTelemetryTest {
             timestampMs = 1_000L,
             raw = faceCoordinates(translationX = 0.01f),
             filtered = faceCoordinates(translationX = 0.005f),
+        ).copy(
+            captureIntervalMs = 34L,
+            frameQuality = TrackingFrameQuality(
+                meanLuma = 0.4f,
+                lumaStandardDeviation = 0.2f,
+                meanGradient = 0.1f,
+                exposureTimeNs = 8_000_000L,
+                sensitivityIso = 320,
+                frameDurationNs = 33_333_333L,
+                rollingShutterSkewNs = 12_000_000L,
+                aeState = 2,
+            ),
+            poseFitQuality = TrackingPoseFitQuality(0.02f, 0.9f, 0.8f),
+            deviceState = TrackingDeviceState(thermalStatus = 1, 31.5f),
         )
         val render = TrackingRenderSample(
             renderTimestampMs = 1_110L,
@@ -51,8 +66,81 @@ class TrackingTelemetryTest {
             decodedMeasurement.filteredGeometry.localLipCoordinates,
             0f,
         )
+        assertEquals(measurement.captureIntervalMs, decodedMeasurement.captureIntervalMs)
+        assertEquals(measurement.frameQuality, decodedMeasurement.frameQuality)
+        assertEquals(measurement.poseFitQuality, decodedMeasurement.poseFitQuality)
+        assertEquals(measurement.deviceState, decodedMeasurement.deviceState)
         val decodedRender = decoded.events[1] as TrackingRenderSample
         assertArrayEquals(render.outerLipPoints, decodedRender.outerLipPoints, 0f)
+    }
+
+    @Test
+    fun codecReadsLegacyV1MeasurementWithUnknownInputQuality() {
+        val bytes = ByteArrayOutputStream().also { output ->
+            DataOutputStream(output).apply {
+                writeInt(0x41525636)
+                writeInt(1)
+                writeUTF("legacy")
+                writeLong(42L)
+                writeByte(1)
+                writeLong(1_000L)
+                writeLong(999_000_000L)
+                writeLong(1_100L)
+                writeLong(100L)
+                writeFloat(30f)
+                writeFloat(Float.NaN)
+                writeBoolean(true)
+                writeBoolean(false)
+                repeat(3) { writeInt(0) }
+                repeat(2) {
+                    repeat(4) { writeFloat(Float.NaN) }
+                    writeInt(0)
+                }
+                writeByte(0x7f)
+                writeLong(0L)
+            }
+        }.toByteArray()
+
+        val decoded = TrackingTelemetryCodec.read(ByteArrayInputStream(bytes))
+        val measurement = decoded.measurements.single()
+
+        assertEquals(-1L, measurement.captureIntervalMs)
+        assertTrue(measurement.frameQuality.meanLuma.isNaN())
+        assertTrue(measurement.poseFitQuality.quality.isNaN())
+        assertEquals(-1, measurement.deviceState.thermalStatus)
+    }
+
+    @Test
+    fun analyzerReportsInputPoseAndThermalQuality() {
+        val samples = (0..2).map { index ->
+            poseOnlyMeasurement(1_000L + index * 33L, index * 0.01f, index * 0.01f).copy(
+                captureIntervalMs = 32L + index,
+                frameQuality = TrackingFrameQuality(
+                    meanLuma = 0.3f + index * 0.1f,
+                    lumaStandardDeviation = 0.1f,
+                    meanGradient = 0.05f,
+                    exposureTimeNs = (7L + index) * 1_000_000L,
+                    sensitivityIso = 100 + index * 100,
+                    frameDurationNs = 33_000_000L,
+                    rollingShutterSkewNs = 10_000_000L,
+                    aeState = 2,
+                ),
+                poseFitQuality = TrackingPoseFitQuality(0.01f, 0.9f, 0.8f),
+                deviceState = TrackingDeviceState(index, 30f + index),
+            )
+        }
+
+        val metrics = TrackingTelemetryAnalyzer.analyze(
+            TrackingTelemetrySession(TrackingTelemetryHeader("quality", 0L), samples, 0L),
+        ).inputQuality
+
+        assertEquals(33f, metrics.medianCaptureIntervalMs, EPSILON)
+        assertEquals(0.4f, metrics.medianMeanLuma, EPSILON)
+        assertEquals(8f, metrics.medianExposureMs, EPSILON)
+        assertEquals(200f, metrics.medianSensitivityIso, EPSILON)
+        assertEquals(0.8f, metrics.medianPoseFitQuality, EPSILON)
+        assertEquals(2, metrics.maximumThermalStatus)
+        assertEquals(31f, metrics.medianBatteryTemperatureCelsius, EPSILON)
     }
 
     @Test

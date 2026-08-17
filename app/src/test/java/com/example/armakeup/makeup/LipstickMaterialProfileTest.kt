@@ -79,6 +79,40 @@ class LipstickMaterialProfileTest {
         assertTrue(matte.wetInnerEdgeStrength < gloss.wetInnerEdgeStrength)
     }
 
+    @Test
+    fun productFinishesKeepTheReferencePigmentMix() {
+        listOf(
+            ReferenceLipstickRenderProfiles.matte,
+            ReferenceLipstickRenderProfiles.satin,
+            ReferenceLipstickRenderProfiles.gloss,
+        ).forEach { profile ->
+            assertEquals(LipstickPigmentPalette.PRODUCT_ROSE, profile.pigmentPalette)
+            assertEquals(1f, profile.coverageMultiplier, 0f)
+            assertEquals(1f, profile.luminancePreservation, 0f)
+        }
+    }
+
+    @Test
+    fun trackingTestProfileIsBrightAndOpaqueWithoutChangingLipBoundaries() {
+        val profile = ReferenceLipstickRenderProfiles.trackingTest
+
+        assertEquals(LipstickPigmentPalette.TRACKING_MAGENTA, profile.pigmentPalette)
+        assertTrue(
+            ReferenceMatteLipstickProfile.upper.effectiveCoreCoverage *
+                profile.coverageMultiplier >= 1f,
+        )
+        assertTrue(
+            ReferenceMatteLipstickProfile.lower.effectiveCoreCoverage *
+                profile.coverageMultiplier >= 1f,
+        )
+        assertEquals(0f, profile.luminancePreservation, 0f)
+        assertEquals(1f, profile.optics.roughness, 0f)
+        assertEquals(0f, profile.optics.specularStrength, 0f)
+        assertEquals(0f, profile.optics.highlightRetention, 0f)
+        assertEquals(0f, profile.optics.microTextureRetention, 0f)
+        assertEquals(0f, profile.optics.wetInnerEdgeStrength, 0f)
+    }
+
     @Test(expected = IllegalArgumentException::class)
     fun physicallyInvalidRoughnessIsRejected() {
         LipstickOpticalProfile(

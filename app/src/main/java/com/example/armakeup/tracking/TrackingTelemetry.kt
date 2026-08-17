@@ -29,7 +29,61 @@ data class TrackingMeasurementSample(
     val velocities: FloatArray,
     val rawGeometry: TrackingGeometry,
     val filteredGeometry: TrackingGeometry,
+    val captureIntervalMs: Long = -1L,
+    val frameQuality: TrackingFrameQuality = TrackingFrameQuality.UNKNOWN,
+    val poseFitQuality: TrackingPoseFitQuality = TrackingPoseFitQuality.UNKNOWN,
+    val deviceState: TrackingDeviceState = TrackingDeviceState.UNKNOWN,
 ) : TrackingTelemetryEvent
+
+data class TrackingFrameQuality(
+    val meanLuma: Float,
+    val lumaStandardDeviation: Float,
+    val meanGradient: Float,
+    val exposureTimeNs: Long,
+    val sensitivityIso: Int,
+    val frameDurationNs: Long,
+    val rollingShutterSkewNs: Long,
+    val aeState: Int,
+) {
+    companion object {
+        val UNKNOWN = TrackingFrameQuality(
+            meanLuma = Float.NaN,
+            lumaStandardDeviation = Float.NaN,
+            meanGradient = Float.NaN,
+            exposureTimeNs = -1L,
+            sensitivityIso = -1,
+            frameDurationNs = -1L,
+            rollingShutterSkewNs = -1L,
+            aeState = -1,
+        )
+    }
+}
+
+data class TrackingPoseFitQuality(
+    val normalizedRmsResidual: Float,
+    val inlierFraction: Float,
+    val quality: Float,
+) {
+    val isValid: Boolean
+        get() = normalizedRmsResidual.isFinite() && inlierFraction.isFinite() &&
+            quality.isFinite()
+
+    companion object {
+        val UNKNOWN = TrackingPoseFitQuality(Float.NaN, Float.NaN, Float.NaN)
+    }
+}
+
+data class TrackingDeviceState(
+    val thermalStatus: Int,
+    val batteryTemperatureCelsius: Float,
+) {
+    companion object {
+        val UNKNOWN = TrackingDeviceState(
+            thermalStatus = -1,
+            batteryTemperatureCelsius = Float.NaN,
+        )
+    }
+}
 
 data class TrackingRenderSample(
     val renderTimestampMs: Long,
@@ -72,11 +126,11 @@ data class TrackingPose(
  * Extracts a compact global-pose/local-deformation decomposition for diagnostics.
  *
  * The pose deliberately uses rigid eye/nose/cheek anchors rather than the centroid of all 478
- * landmarks, which moves when the mouth or brows deform. This is telemetry groundwork for the V6
- * production predictor; it does not yet modify visible geometry.
+ * landmarks, which moves when the mouth or brows deform. The same pose definition is now shared
+ * by V6 telemetry and the visible stateful predictor.
  */
 object TrackingGeometryExtractor {
-    private val stableAnchorIndices = intArrayOf(
+    internal val stableAnchorIndices = intArrayOf(
         33, 133, // left eye corners
         362, 263, // right eye corners
         168, 1, // nose bridge and tip
@@ -89,6 +143,7 @@ object TrackingGeometryExtractor {
         stableAnchorIndices.maxOrNull() ?: 0,
         lipIndices.maxOrNull() ?: 0,
     )
+    private val maximumStableAnchorIndex = stableAnchorIndices.maxOrNull() ?: 0
 
     fun extract(coordinates: FloatArray): TrackingGeometry {
         if (
@@ -98,23 +153,10 @@ object TrackingGeometryExtractor {
             return TrackingGeometry.INVALID
         }
 
-        val center = meanPoint(coordinates, stableAnchorIndices)
-        val leftEye = meanPoint(coordinates, leftEyeIndices)
-        val rightEye = meanPoint(coordinates, rightEyeIndices)
-        val eyeVectorX = rightEye.first - leftEye.first
-        val eyeVectorY = rightEye.second - leftEye.second
-        val scale = hypot(eyeVectorX, eyeVectorY)
-        if (!scale.isFinite() || scale <= MINIMUM_POSE_SCALE) return TrackingGeometry.INVALID
-
-        val rotation = atan2(eyeVectorY, eyeVectorX)
-        val pose = TrackingPose(
-            centerX = center.first,
-            centerY = center.second,
-            scale = scale,
-            rotationRadians = rotation,
-        )
-        val cosRotation = cos(rotation)
-        val sinRotation = sin(rotation)
+        val pose = extractPose(coordinates)
+        if (!pose.isValid) return TrackingGeometry.INVALID
+        val cosRotation = cos(pose.rotationRadians)
+        val sinRotation = sin(pose.rotationRadians)
         val localLipCoordinates = FloatArray(lipIndices.size * POINT_COMPONENT_COUNT)
         lipIndices.forEachIndexed { pointIndex, landmarkIndex ->
             val coordinateIndex = landmarkIndex * LandmarkRenderFrame.COORDINATE_COUNT
@@ -122,24 +164,55 @@ object TrackingGeometryExtractor {
             val deltaY = coordinates[coordinateIndex + 1] - pose.centerY
             val outputIndex = pointIndex * POINT_COMPONENT_COUNT
             localLipCoordinates[outputIndex] =
-                (cosRotation * deltaX + sinRotation * deltaY) / scale
+                (cosRotation * deltaX + sinRotation * deltaY) / pose.scale
             localLipCoordinates[outputIndex + 1] =
-                (-sinRotation * deltaX + cosRotation * deltaY) / scale
+                (-sinRotation * deltaX + cosRotation * deltaY) / pose.scale
         }
         return TrackingGeometry(pose, localLipCoordinates)
     }
 
-    private fun meanPoint(coordinates: FloatArray, indices: IntArray): Pair<Float, Float> {
-        var x = 0f
-        var y = 0f
+    /** Allocation-free pose-only path shared by telemetry and the temporal predictor. */
+    fun extractPose(coordinates: FloatArray): TrackingPose {
+        if (
+            coordinates.size % LandmarkRenderFrame.COORDINATE_COUNT != 0 ||
+            coordinates.size / LandmarkRenderFrame.COORDINATE_COUNT <= maximumStableAnchorIndex
+        ) {
+            return TrackingPose.INVALID
+        }
+        val centerX = meanCoordinate(coordinates, stableAnchorIndices, X_OFFSET)
+        val centerY = meanCoordinate(coordinates, stableAnchorIndices, Y_OFFSET)
+        val leftEyeX = meanCoordinate(coordinates, leftEyeIndices, X_OFFSET)
+        val leftEyeY = meanCoordinate(coordinates, leftEyeIndices, Y_OFFSET)
+        val rightEyeX = meanCoordinate(coordinates, rightEyeIndices, X_OFFSET)
+        val rightEyeY = meanCoordinate(coordinates, rightEyeIndices, Y_OFFSET)
+        val eyeVectorX = rightEyeX - leftEyeX
+        val eyeVectorY = rightEyeY - leftEyeY
+        val scale = hypot(eyeVectorX, eyeVectorY)
+        if (!scale.isFinite() || scale <= MINIMUM_POSE_SCALE) return TrackingPose.INVALID
+
+        return TrackingPose(
+            centerX = centerX,
+            centerY = centerY,
+            scale = scale,
+            rotationRadians = atan2(eyeVectorY, eyeVectorX),
+        )
+    }
+
+    private fun meanCoordinate(
+        coordinates: FloatArray,
+        indices: IntArray,
+        coordinateOffset: Int,
+    ): Float {
+        var value = 0f
         indices.forEach { landmarkIndex ->
             val coordinateIndex = landmarkIndex * LandmarkRenderFrame.COORDINATE_COUNT
-            x += coordinates[coordinateIndex]
-            y += coordinates[coordinateIndex + 1]
+            value += coordinates[coordinateIndex + coordinateOffset]
         }
-        return x / indices.size to y / indices.size
+        return value / indices.size
     }
 
     private const val POINT_COMPONENT_COUNT = 2
+    private const val X_OFFSET = 0
+    private const val Y_OFFSET = 1
     private const val MINIMUM_POSE_SCALE = 1e-5f
 }

@@ -52,11 +52,12 @@ internal object ReferenceMatteLipstickProfile {
     const val CORE_INSET_FRACTION = 0.16f
 }
 
-/** User-visible optical finish. Pigment coverage remains identical between finishes. */
+/** Three product finishes plus a temporary, debug-only tracking aid. */
 internal enum class LipstickFinish {
     MATTE,
     SATIN,
     GLOSS,
+    TRACKING_TEST,
 }
 
 /**
@@ -109,10 +110,67 @@ internal object ReferenceLipstickOptics {
         microTextureRetention = 0.72f,
         wetInnerEdgeStrength = 0.32f,
     )
+}
 
-    fun forFinish(finish: LipstickFinish): LipstickOpticalProfile = when (finish) {
+internal enum class LipstickPigmentPalette {
+    PRODUCT_ROSE,
+    TRACKING_MAGENTA,
+}
+
+/**
+ * Parameters that alter pigment rendering without changing lip geometry or tracking coordinates.
+ * Product finishes intentionally share identical coverage and luminance-preserving color mixing.
+ */
+internal data class LipstickRenderProfile(
+    val optics: LipstickOpticalProfile,
+    val pigmentPalette: LipstickPigmentPalette,
+    val coverageMultiplier: Float,
+    val luminancePreservation: Float,
+) {
+    init {
+        require(coverageMultiplier in 0f..MAX_COVERAGE_MULTIPLIER)
+        require(luminancePreservation in 0f..1f)
+    }
+
+    private companion object {
+        private const val MAX_COVERAGE_MULTIPLIER = 8f
+    }
+}
+
+internal object ReferenceLipstickRenderProfiles {
+    private const val PRODUCT_COVERAGE_MULTIPLIER = 1f
+    private const val PRODUCT_LUMINANCE_PRESERVATION = 1f
+
+    val matte = productProfile(ReferenceLipstickOptics.matte)
+    val satin = productProfile(ReferenceLipstickOptics.satin)
+    val gloss = productProfile(ReferenceLipstickOptics.gloss)
+    private val trackingTestOptics = LipstickOpticalProfile(
+        roughness = 1f,
+        specularStrength = 0f,
+        highlightRetention = 0f,
+        microTextureRetention = 0f,
+        wetInnerEdgeStrength = 0f,
+    )
+
+    /** Flat neon pigment used only to expose small contour motion during V6 tracking tests. */
+    val trackingTest = LipstickRenderProfile(
+        optics = trackingTestOptics,
+        pigmentPalette = LipstickPigmentPalette.TRACKING_MAGENTA,
+        coverageMultiplier = 4f,
+        luminancePreservation = 0f,
+    )
+
+    fun forFinish(finish: LipstickFinish): LipstickRenderProfile = when (finish) {
         LipstickFinish.MATTE -> matte
         LipstickFinish.SATIN -> satin
         LipstickFinish.GLOSS -> gloss
+        LipstickFinish.TRACKING_TEST -> trackingTest
     }
+
+    private fun productProfile(optics: LipstickOpticalProfile) = LipstickRenderProfile(
+        optics = optics,
+        pigmentPalette = LipstickPigmentPalette.PRODUCT_ROSE,
+        coverageMultiplier = PRODUCT_COVERAGE_MULTIPLIER,
+        luminancePreservation = PRODUCT_LUMINANCE_PRESERVATION,
+    )
 }

@@ -22,8 +22,9 @@ import com.example.armakeup.makeup.LipLandmarkTopology
 import com.example.armakeup.makeup.LipMeshTessellator
 import com.example.armakeup.makeup.LipstickFinish
 import com.example.armakeup.makeup.LipstickOpticalProfile
+import com.example.armakeup.makeup.LipstickPigmentPalette
 import com.example.armakeup.makeup.ReferenceMatteLipstickProfile
-import com.example.armakeup.makeup.ReferenceLipstickOptics
+import com.example.armakeup.makeup.ReferenceLipstickRenderProfiles
 import com.example.armakeup.tracking.FillCenterTransform
 import com.example.armakeup.tracking.LandmarkRenderFrame
 import com.example.armakeup.tracking.NormalizedImageTransform
@@ -88,6 +89,12 @@ internal class FilamentMakeupRenderer(
     private val cameraMaterialInstance = materials.camera.createInstance()
     private val upperLipMaterialInstance = materials.lipstick.createInstance()
     private val lowerLipMaterialInstance = materials.lipstick.createInstance()
+    private val productUpperPigment =
+        ContextCompat.getColor(context, R.color.lipstick_matte_upper)
+    private val productLowerPigment =
+        ContextCompat.getColor(context, R.color.lipstick_matte_lower)
+    private val trackingTestPigment =
+        ContextCompat.getColor(context, R.color.lipstick_tracking_test)
     private val cameraTexture = Texture.Builder()
         .sampler(Texture.Sampler.SAMPLER_EXTERNAL)
         .format(Texture.InternalFormat.RGB8)
@@ -151,7 +158,7 @@ internal class FilamentMakeupRenderer(
             "temporalFlowVisible=${temporalLandmarkRefiner.visibleApplicationEnabled}",
         )
         Log.i(NATIVE_VULKAN_LOG_TAG, nativeVulkanProbe.diagnostic)
-        configureMaterialInstances(context)
+        configureMaterialInstances()
         configureScene()
         uiHelper.renderCallback = SurfaceCallback()
         uiHelper.attachTo(surfaceView)
@@ -226,7 +233,7 @@ internal class FilamentMakeupRenderer(
         ensureMainThread()
         if (lipstickFinish == finish) return
         lipstickFinish = finish
-        applyLipstickOptics(ReferenceLipstickOptics.forFinish(finish))
+        applyLipstickRenderProfile(finish)
         Log.i(RENDER_LOG_TAG, "lipstickFinish=${finish.name}")
     }
 
@@ -260,7 +267,7 @@ internal class FilamentMakeupRenderer(
         }
     }
 
-    private fun configureMaterialInstances(context: Context) {
+    private fun configureMaterialInstances() {
         listOf(
             cameraMaterialInstance,
             upperLipMaterialInstance,
@@ -269,16 +276,31 @@ internal class FilamentMakeupRenderer(
             instance.setParameter("cameraTexture", cameraTexture, textureSampler)
             setCameraTextureTransform(instance, IDENTITY_MATRIX)
         }
-        setPigmentColor(
-            upperLipMaterialInstance,
-            ContextCompat.getColor(context, R.color.lipstick_matte_upper),
-        )
-        setPigmentColor(
-            lowerLipMaterialInstance,
-            ContextCompat.getColor(context, R.color.lipstick_matte_lower),
-        )
         setIlluminationSampleStep(DEFAULT_ILLUMINATION_STEP, DEFAULT_ILLUMINATION_STEP)
-        applyLipstickOptics(ReferenceLipstickOptics.forFinish(lipstickFinish))
+        applyLipstickRenderProfile(lipstickFinish)
+    }
+
+    private fun applyLipstickRenderProfile(finish: LipstickFinish) {
+        val profile = ReferenceLipstickRenderProfiles.forFinish(finish)
+        val upperPigment: Int
+        val lowerPigment: Int
+        when (profile.pigmentPalette) {
+            LipstickPigmentPalette.PRODUCT_ROSE -> {
+                upperPigment = productUpperPigment
+                lowerPigment = productLowerPigment
+            }
+            LipstickPigmentPalette.TRACKING_MAGENTA -> {
+                upperPigment = trackingTestPigment
+                lowerPigment = trackingTestPigment
+            }
+        }
+        setPigmentColor(upperLipMaterialInstance, upperPigment)
+        setPigmentColor(lowerLipMaterialInstance, lowerPigment)
+        listOf(upperLipMaterialInstance, lowerLipMaterialInstance).forEach { material ->
+            material.setParameter("coverageMultiplier", profile.coverageMultiplier)
+            material.setParameter("luminancePreservation", profile.luminancePreservation)
+        }
+        applyLipstickOptics(profile.optics)
     }
 
     private fun applyLipstickOptics(profile: LipstickOpticalProfile) {
@@ -544,6 +566,12 @@ internal class FilamentMakeupRenderer(
     }
 
     private fun temporalTrackingRoi(): VulkanTemporalTrackingRoi {
+        if (
+            trackingTelemetrySink == null &&
+            !temporalLandmarkRefiner.visibleApplicationEnabled
+        ) {
+            return VulkanTemporalTrackingRoi.INVALID
+        }
         val state = latestLandmarks ?: return VulkanTemporalTrackingRoi.INVALID
         if (state.landmarks.size <= MAX_REQUIRED_LANDMARK_INDEX) {
             return VulkanTemporalTrackingRoi.INVALID

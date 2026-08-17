@@ -5,12 +5,14 @@ import kotlin.math.max
 import kotlin.math.sqrt
 
 /**
- * An adaptive low-pass filter with a short, bounded motion prediction.
+ * Stateful global-pose/local-deformation filter with bounded render prediction.
  *
- * Small landmark changes are smoothed strongly to suppress camera and ML noise. Coherent motion
- * of the whole face gets a fast translation path, while local landmark deformation remains more
- * filtered. Prediction uses filtered derivatives and dead zones so stationary landmarks cannot
- * drift on their own.
+ * Global motion is estimated by a robust similarity fit over rigid eye/nose/forehead/cheek
+ * anchors. This prevents one unstable landmark, device rotation or scale changes from becoming
+ * unrelated per-landmark velocity.
+ * Full extrapolation is enabled only after coherent motion persists across several ML results;
+ * a stop or real reversal clears predictive velocity, while one noisy direction sample only
+ * reduces confidence smoothly.
  */
 class LandmarkMotionPredictor(
     private val minCutoffHz: Float = DEFAULT_MIN_CUTOFF_HZ,
@@ -22,22 +24,36 @@ class LandmarkMotionPredictor(
     private val globalVelocityDeadZone: Float = DEFAULT_GLOBAL_VELOCITY_DEAD_ZONE,
     private val velocityDeadZone: Float = DEFAULT_VELOCITY_DEAD_ZONE,
     private val maxVelocityPerSecond: Float = DEFAULT_MAX_VELOCITY_PER_SECOND,
+    private val motionStartSpeed: Float = DEFAULT_MOTION_START_SPEED,
+    private val motionStopSpeed: Float = DEFAULT_MOTION_STOP_SPEED,
+    private val motionConfirmationFrames: Int = DEFAULT_MOTION_CONFIRMATION_FRAMES,
+    private val candidatePredictionGain: Float = DEFAULT_CANDIDATE_PREDICTION_GAIN,
+    private val localPredictionGain: Float = DEFAULT_LOCAL_PREDICTION_GAIN,
     private val renderLeadMs: Long = DEFAULT_RENDER_LEAD_MS,
     private val maxPredictionMs: Long = DEFAULT_MAX_PREDICTION_MS,
     private val holdAfterLossMs: Long = DEFAULT_HOLD_AFTER_LOSS_MS,
     private val resetGapMs: Long = DEFAULT_RESET_GAP_MS,
     private val maxCentroidJump: Float = DEFAULT_MAX_CENTROID_JUMP,
 ) {
+    private val similarityEstimator = RobustSimilarityEstimator()
     private var positions = FloatArray(0)
     private var lastMeasurements = FloatArray(0)
-    private var derivativeEstimates = FloatArray(0)
+    private var localDerivativeEstimates = FloatArray(0)
+    private var measuredGlobalVelocities = FloatArray(0)
+    private var previousMeasuredGlobalVelocities = FloatArray(0)
+    private var filteredGlobalVelocities = FloatArray(0)
     private var velocities = FloatArray(0)
-    private var filteredCentroidSpeed = 0f
-    private var filteredCentroidVelocityX = 0f
-    private var filteredCentroidVelocityY = 0f
-    private var measuredCentroidVelocityX = 0f
-    private var measuredCentroidVelocityY = 0f
+    private var filteredGlobalSpeed = 0f
+    private var previousGlobalSpeed = 0f
+    private var globalPredictionGain = 0f
+    private var filteredPoseFitQuality = 1f
+    private var motionState = MotionState.STATIONARY
+    private var coherentMotionFrames = 0
+    private var measurementMissingSinceLastUpdate = false
     private var lastMeasurementTimestampMs = NO_TIMESTAMP
+
+    var latestPoseFitQuality: TrackingPoseFitQuality = TrackingPoseFitQuality.UNKNOWN
+        private set
 
     init {
         require(minCutoffHz > 0f)
@@ -49,6 +65,11 @@ class LandmarkMotionPredictor(
         require(globalVelocityDeadZone >= 0f)
         require(velocityDeadZone >= 0f)
         require(maxVelocityPerSecond > 0f)
+        require(motionStartSpeed > motionStopSpeed)
+        require(motionStopSpeed >= 0f)
+        require(motionConfirmationFrames >= 2)
+        require(candidatePredictionGain in 0f..1f)
+        require(localPredictionGain in 0f..1f)
         require(renderLeadMs >= 0L)
         require(maxPredictionMs >= 0L)
         require(holdAfterLossMs >= maxPredictionMs)
@@ -67,6 +88,7 @@ class LandmarkMotionPredictor(
         if (
             positions.size != measurements.size ||
             lastMeasurementTimestampMs == NO_TIMESTAMP ||
+            measurementMissingSinceLastUpdate ||
             elapsedMs <= 0L ||
             elapsedMs > resetGapMs ||
             hasImplausibleCentroidJump(measurements, elapsedMs)
@@ -78,78 +100,87 @@ class LandmarkMotionPredictor(
         val elapsedSeconds = elapsedMs / MILLIS_PER_SECOND
         val derivativeAlpha = smoothingAlpha(derivativeCutoffHz, elapsedSeconds)
         val stopAlpha = smoothingAlpha(STOP_RESPONSE_CUTOFF_HZ, elapsedSeconds)
-        calculateMeasuredCentroidVelocity(measurements, elapsedSeconds)
-        val measuredCentroidSpeed = sqrt(
-            measuredCentroidVelocityX * measuredCentroidVelocityX +
-                measuredCentroidVelocityY * measuredCentroidVelocityY,
+        calculateMeasuredGlobalVelocities(measurements, elapsedSeconds)
+        updateFilteredPoseFitQuality(elapsedSeconds)
+        val qualityResponse = MINIMUM_QUALITY_RESPONSE +
+            (1f - MINIMUM_QUALITY_RESPONSE) * filteredPoseFitQuality
+        val measuredGlobalSpeed = globalMotionSpeed(measuredGlobalVelocities)
+        val directionCosine = globalDirectionCosine(
+            measuredGlobalVelocities,
+            previousMeasuredGlobalVelocities,
         )
-        val effectiveCentroidSpeed = (
-            measuredCentroidSpeed - globalVelocityDeadZone
-        ).coerceAtLeast(0f)
-        filteredCentroidSpeed = if (effectiveCentroidSpeed > filteredCentroidSpeed) {
-            effectiveCentroidSpeed
+        val stateTransition = updateMotionState(measuredGlobalSpeed, directionCosine)
+        updateGlobalPredictionGain(elapsedSeconds, stateTransition)
+        val positionMotionGain = if (motionState == MotionState.STATIONARY) {
+            0f
         } else {
-            filteredCentroidSpeed + derivativeAlpha * (
-                effectiveCentroidSpeed - filteredCentroidSpeed
+            CANDIDATE_POSITION_RESPONSE_GAIN +
+                (1f - CANDIDATE_POSITION_RESPONSE_GAIN) * globalPredictionGain
+        }
+        val effectiveGlobalSpeed = (
+            measuredGlobalSpeed - globalVelocityDeadZone
+        ).coerceAtLeast(0f) * positionMotionGain * qualityResponse
+        filteredGlobalSpeed = when {
+            motionState == MotionState.STATIONARY -> 0f
+            effectiveGlobalSpeed > filteredGlobalSpeed -> effectiveGlobalSpeed
+            else -> filteredGlobalSpeed + derivativeAlpha * (
+                effectiveGlobalSpeed - filteredGlobalSpeed
             )
         }
         val faceCutoffHz = (
-            minCutoffHz + faceSpeedCoefficient * filteredCentroidSpeed
+            minCutoffHz + faceSpeedCoefficient * filteredGlobalSpeed
         ).coerceAtMost(maxCutoffHz)
-        val centroidVelocityScale = if (measuredCentroidSpeed > 0f) {
-            effectiveCentroidSpeed / measuredCentroidSpeed
-        } else {
-            0f
-        }
-        val targetCentroidVelocityX = measuredCentroidVelocityX * centroidVelocityScale
-        val targetCentroidVelocityY = measuredCentroidVelocityY * centroidVelocityScale
-        val globalVelocityAlpha = smoothingAlpha(globalVelocityCutoffHz, elapsedSeconds)
-        filteredCentroidVelocityX += globalVelocityAlpha * (
-            targetCentroidVelocityX - filteredCentroidVelocityX
-        )
-        filteredCentroidVelocityY += globalVelocityAlpha * (
-            targetCentroidVelocityY - filteredCentroidVelocityY
-        )
+        val qualityLimitedMaxCutoffHz = minCutoffHz +
+            (maxCutoffHz - minCutoffHz) * qualityResponse
+        val globalVelocityAlpha = smoothingAlpha(
+            globalVelocityCutoffHz,
+            elapsedSeconds,
+        ) * qualityResponse
 
         for (index in measurements.indices) {
             val rawDerivative = (measurements[index] - lastMeasurements[index]) / elapsedSeconds
-            val centroidDerivative = when (index % LandmarkRenderFrame.COORDINATE_COUNT) {
-                X_OFFSET -> measuredCentroidVelocityX
-                Y_OFFSET -> measuredCentroidVelocityY
-                else -> 0f
-            }
-            val rawLocalDerivative = rawDerivative - centroidDerivative
+            val rawLocalDerivative = rawDerivative - measuredGlobalVelocities[index]
             val localDerivativeAlpha = if (
-                rawLocalDerivative * derivativeEstimates[index] <= 0f
+                rawLocalDerivative * localDerivativeEstimates[index] <= 0f
             ) {
                 stopAlpha
             } else {
                 derivativeAlpha
             }
-            derivativeEstimates[index] += localDerivativeAlpha * (
-                rawLocalDerivative - derivativeEstimates[index]
+            localDerivativeEstimates[index] += localDerivativeAlpha * (
+                rawLocalDerivative - localDerivativeEstimates[index]
             )
             val localCutoffHz = (
-                minCutoffHz + localSpeedCoefficient * abs(derivativeEstimates[index])
+                minCutoffHz + localSpeedCoefficient * abs(localDerivativeEstimates[index])
             ).coerceAtMost(maxCutoffHz)
             val positionAlpha = smoothingAlpha(
-                cutoffHz = max(faceCutoffHz, localCutoffHz),
+                cutoffHz = max(faceCutoffHz, localCutoffHz)
+                    .coerceAtMost(qualityLimitedMaxCutoffHz),
                 elapsedSeconds = elapsedSeconds,
             )
             positions[index] += positionAlpha * (measurements[index] - positions[index])
-            val filteredCentroidVelocity = when (
-                index % LandmarkRenderFrame.COORDINATE_COUNT
-            ) {
-                X_OFFSET -> filteredCentroidVelocityX
-                Y_OFFSET -> filteredCentroidVelocityY
-                else -> 0f
+
+            filteredGlobalVelocities[index] = when {
+                motionState == MotionState.STATIONARY -> 0f
+                stateTransition.resetsVelocity -> measuredGlobalVelocities[index]
+                else -> filteredGlobalVelocities[index] + globalVelocityAlpha * (
+                    measuredGlobalVelocities[index] - filteredGlobalVelocities[index]
+                )
+            }
+            val predictiveLocalVelocity = if (motionState == MotionState.MOVING) {
+                applyDeadZone(localDerivativeEstimates[index]) *
+                    localPredictionGain * qualityResponse
+            } else {
+                0f
             }
             velocities[index] = (
-                filteredCentroidVelocity + applyDeadZone(derivativeEstimates[index])
-            )
-                .coerceIn(-maxVelocityPerSecond, maxVelocityPerSecond)
+                filteredGlobalVelocities[index] * globalPredictionGain * qualityResponse +
+                    predictiveLocalVelocity
+            ).coerceIn(-maxVelocityPerSecond, maxVelocityPerSecond)
             lastMeasurements[index] = measurements[index]
         }
+        measuredGlobalVelocities.copyInto(previousMeasuredGlobalVelocities)
+        previousGlobalSpeed = measuredGlobalSpeed
         lastMeasurementTimestampMs = timestampMs
         return snapshot(predictedOnly = false)
     }
@@ -160,51 +191,225 @@ class LandmarkMotionPredictor(
             reset()
             return null
         }
+        measurementMissingSinceLastUpdate = true
         return snapshot(predictedOnly = true)
     }
 
     fun reset() {
         positions = FloatArray(0)
         lastMeasurements = FloatArray(0)
-        derivativeEstimates = FloatArray(0)
+        localDerivativeEstimates = FloatArray(0)
+        measuredGlobalVelocities = FloatArray(0)
+        previousMeasuredGlobalVelocities = FloatArray(0)
+        filteredGlobalVelocities = FloatArray(0)
         velocities = FloatArray(0)
-        filteredCentroidSpeed = 0f
-        filteredCentroidVelocityX = 0f
-        filteredCentroidVelocityY = 0f
-        measuredCentroidVelocityX = 0f
-        measuredCentroidVelocityY = 0f
+        filteredGlobalSpeed = 0f
+        previousGlobalSpeed = 0f
+        globalPredictionGain = 0f
+        filteredPoseFitQuality = 1f
+        motionState = MotionState.STATIONARY
+        coherentMotionFrames = 0
+        measurementMissingSinceLastUpdate = false
         lastMeasurementTimestampMs = NO_TIMESTAMP
+        latestPoseFitQuality = TrackingPoseFitQuality.UNKNOWN
     }
 
     private fun initialize(measurements: FloatArray, timestampMs: Long) {
         positions = measurements.copyOf()
         lastMeasurements = measurements.copyOf()
-        derivativeEstimates = FloatArray(measurements.size)
+        localDerivativeEstimates = FloatArray(measurements.size)
+        measuredGlobalVelocities = FloatArray(measurements.size)
+        previousMeasuredGlobalVelocities = FloatArray(measurements.size)
+        filteredGlobalVelocities = FloatArray(measurements.size)
         velocities = FloatArray(measurements.size)
-        filteredCentroidSpeed = 0f
-        filteredCentroidVelocityX = 0f
-        filteredCentroidVelocityY = 0f
-        measuredCentroidVelocityX = 0f
-        measuredCentroidVelocityY = 0f
+        filteredGlobalSpeed = 0f
+        previousGlobalSpeed = 0f
+        globalPredictionGain = 0f
+        filteredPoseFitQuality = 1f
+        motionState = MotionState.STATIONARY
+        coherentMotionFrames = 0
+        measurementMissingSinceLastUpdate = false
         lastMeasurementTimestampMs = timestampMs
+        latestPoseFitQuality = TrackingPoseFitQuality.UNKNOWN
     }
 
-    private fun calculateMeasuredCentroidVelocity(
+    private fun calculateMeasuredGlobalVelocities(
         measurements: FloatArray,
         elapsedSeconds: Float,
     ) {
-        var deltaX = 0f
-        var deltaY = 0f
-        var landmarkCount = 0
+        val estimate = similarityEstimator.estimate(lastMeasurements, measurements)
+        if (estimate.isValid) {
+            latestPoseFitQuality = TrackingPoseFitQuality(
+                normalizedRmsResidual = estimate.normalizedRmsResidual,
+                inlierFraction = estimate.inlierFraction,
+                quality = estimate.quality,
+            )
+            var index = 0
+            while (index < measurements.size) {
+                val mappedX = estimate.mapX(lastMeasurements[index], lastMeasurements[index + 1])
+                val mappedY = estimate.mapY(lastMeasurements[index], lastMeasurements[index + 1])
+                measuredGlobalVelocities[index] =
+                    (mappedX - lastMeasurements[index]) / elapsedSeconds
+                measuredGlobalVelocities[index + 1] =
+                    (mappedY - lastMeasurements[index + 1]) / elapsedSeconds
+                measuredGlobalVelocities[index + 2] = 0f
+                index += LandmarkRenderFrame.COORDINATE_COUNT
+            }
+            return
+        }
+
+        latestPoseFitQuality = TrackingPoseFitQuality.UNKNOWN
+
+        var velocityX = 0f
+        var velocityY = 0f
+        val landmarkCount = measurements.size / LandmarkRenderFrame.COORDINATE_COUNT
         var index = 0
         while (index < measurements.size) {
-            deltaX += measurements[index] - lastMeasurements[index]
-            deltaY += measurements[index + 1] - lastMeasurements[index + 1]
-            landmarkCount++
+            velocityX += measurements[index] - lastMeasurements[index]
+            velocityY += measurements[index + 1] - lastMeasurements[index + 1]
             index += LandmarkRenderFrame.COORDINATE_COUNT
         }
-        measuredCentroidVelocityX = deltaX / landmarkCount / elapsedSeconds
-        measuredCentroidVelocityY = deltaY / landmarkCount / elapsedSeconds
+        velocityX /= landmarkCount * elapsedSeconds
+        velocityY /= landmarkCount * elapsedSeconds
+        index = 0
+        while (index < measurements.size) {
+            measuredGlobalVelocities[index] = velocityX
+            measuredGlobalVelocities[index + 1] = velocityY
+            measuredGlobalVelocities[index + 2] = 0f
+            index += LandmarkRenderFrame.COORDINATE_COUNT
+        }
+    }
+
+    private fun updateFilteredPoseFitQuality(elapsedSeconds: Float) {
+        val target = latestPoseFitQuality.quality.takeIf { it.isFinite() } ?: 1f
+        val ratePerSecond = if (target < filteredPoseFitQuality) {
+            QUALITY_FALL_PER_SECOND
+        } else {
+            QUALITY_RISE_PER_SECOND
+        }
+        val maximumDelta = ratePerSecond * elapsedSeconds
+        filteredPoseFitQuality += (target - filteredPoseFitQuality).coerceIn(
+            -maximumDelta,
+            maximumDelta,
+        )
+        filteredPoseFitQuality = filteredPoseFitQuality.coerceIn(0f, 1f)
+    }
+
+    private fun updateMotionState(speed: Float, directionCosine: Float): StateTransition {
+        val previousState = motionState
+        val comparableMotion = previousGlobalSpeed >= motionStartSpeed &&
+            speed >= motionStartSpeed
+        val directionCoherent = !comparableMotion ||
+            directionCosine >= MIN_COHERENT_DIRECTION_COSINE
+        val hardDirectionReversal = comparableMotion &&
+            directionCosine <= HARD_DIRECTION_REVERSAL_COSINE
+
+        when (motionState) {
+            MotionState.STATIONARY -> if (speed >= motionStartSpeed) {
+                motionState = MotionState.CANDIDATE
+                coherentMotionFrames = 1
+            }
+            MotionState.CANDIDATE -> when {
+                speed <= motionStopSpeed -> {
+                    motionState = MotionState.STATIONARY
+                    coherentMotionFrames = 0
+                }
+                hardDirectionReversal -> coherentMotionFrames = 1
+                speed >= motionStartSpeed && directionCoherent -> {
+                    coherentMotionFrames++
+                    if (coherentMotionFrames >= motionConfirmationFrames) {
+                        motionState = MotionState.MOVING
+                    }
+                }
+                speed >= motionStartSpeed -> {
+                    coherentMotionFrames = (coherentMotionFrames - 1).coerceAtLeast(1)
+                }
+            }
+            MotionState.MOVING -> when {
+                speed <= motionStopSpeed -> {
+                    motionState = MotionState.STATIONARY
+                    coherentMotionFrames = 0
+                }
+                hardDirectionReversal -> {
+                    motionState = MotionState.CANDIDATE
+                    coherentMotionFrames = 1
+                }
+            }
+        }
+        val startedMotion = previousState == MotionState.STATIONARY &&
+            motionState == MotionState.CANDIDATE
+        return StateTransition(
+            resetsVelocity = motionState == MotionState.STATIONARY ||
+                hardDirectionReversal ||
+                startedMotion,
+            startedMotion = startedMotion,
+            hardDirectionReversal = hardDirectionReversal,
+            directionCoherent = directionCoherent,
+        )
+    }
+
+    private fun updateGlobalPredictionGain(
+        elapsedSeconds: Float,
+        transition: StateTransition,
+    ) {
+        globalPredictionGain = when {
+            motionState == MotionState.STATIONARY -> 0f
+            transition.startedMotion || transition.hardDirectionReversal -> {
+                candidatePredictionGain
+            }
+            transition.directionCoherent -> (
+                globalPredictionGain + PREDICTION_GAIN_ATTACK_PER_SECOND * elapsedSeconds
+            ).coerceIn(candidatePredictionGain, 1f)
+            else -> (
+                globalPredictionGain - PREDICTION_GAIN_RELEASE_PER_SECOND * elapsedSeconds
+            ).coerceIn(candidatePredictionGain, 1f)
+        }
+    }
+
+    private fun globalMotionSpeed(globalVelocities: FloatArray): Float {
+        var squaredSpeed = 0f
+        var count = 0
+        forEachMotionAnchor(globalVelocities) { coordinateIndex ->
+            val x = globalVelocities[coordinateIndex]
+            val y = globalVelocities[coordinateIndex + 1]
+            squaredSpeed += x * x + y * y
+            count++
+        }
+        return if (count == 0) 0f else sqrt(squaredSpeed / count)
+    }
+
+    private fun globalDirectionCosine(current: FloatArray, previous: FloatArray): Float {
+        var dot = 0f
+        var currentSquared = 0f
+        var previousSquared = 0f
+        forEachMotionAnchor(current) { coordinateIndex ->
+            val currentX = current[coordinateIndex]
+            val currentY = current[coordinateIndex + 1]
+            val previousX = previous[coordinateIndex]
+            val previousY = previous[coordinateIndex + 1]
+            dot += currentX * previousX + currentY * previousY
+            currentSquared += currentX * currentX + currentY * currentY
+            previousSquared += previousX * previousX + previousY * previousY
+        }
+        val denominator = sqrt(currentSquared * previousSquared)
+        return if (denominator <= MIN_DIRECTION_NORM) 1f else dot / denominator
+    }
+
+    private inline fun forEachMotionAnchor(
+        coordinates: FloatArray,
+        action: (coordinateIndex: Int) -> Unit,
+    ) {
+        val landmarkCount = coordinates.size / LandmarkRenderFrame.COORDINATE_COUNT
+        val stableAnchors = TrackingGeometryExtractor.stableAnchorIndices
+        if (landmarkCount > (stableAnchors.maxOrNull() ?: Int.MAX_VALUE)) {
+            stableAnchors.forEach { action(it * LandmarkRenderFrame.COORDINATE_COUNT) }
+        } else {
+            var coordinateIndex = 0
+            while (coordinateIndex < coordinates.size) {
+                action(coordinateIndex)
+                coordinateIndex += LandmarkRenderFrame.COORDINATE_COUNT
+            }
+        }
     }
 
     private fun smoothingAlpha(cutoffHz: Float, elapsedSeconds: Float): Float {
@@ -238,24 +443,37 @@ class LandmarkMotionPredictor(
         var measuredY = 0f
         var predictedX = 0f
         var predictedY = 0f
-        var landmarkCount = 0
-        var index = 0
-        while (index < measurements.size) {
-            measuredX += measurements[index]
-            measuredY += measurements[index + 1]
-            predictedX += positions[index] + velocities[index] * elapsedSeconds
-            predictedY += positions[index + 1] + velocities[index + 1] * elapsedSeconds
-            landmarkCount++
-            index += LandmarkRenderFrame.COORDINATE_COUNT
+        var count = 0
+        forEachMotionAnchor(measurements) { coordinateIndex ->
+            measuredX += measurements[coordinateIndex]
+            measuredY += measurements[coordinateIndex + 1]
+            predictedX += positions[coordinateIndex] + velocities[coordinateIndex] * elapsedSeconds
+            predictedY += positions[coordinateIndex + 1] +
+                velocities[coordinateIndex + 1] * elapsedSeconds
+            count++
         }
-        measuredX /= landmarkCount
-        measuredY /= landmarkCount
-        predictedX /= landmarkCount
-        predictedY /= landmarkCount
+        if (count == 0) return false
+        measuredX /= count
+        measuredY /= count
+        predictedX /= count
+        predictedY /= count
         val deltaX = measuredX - predictedX
         val deltaY = measuredY - predictedY
         return deltaX * deltaX + deltaY * deltaY > maxCentroidJump * maxCentroidJump
     }
+
+    private enum class MotionState {
+        STATIONARY,
+        CANDIDATE,
+        MOVING,
+    }
+
+    private data class StateTransition(
+        val resetsVelocity: Boolean,
+        val startedMotion: Boolean,
+        val hardDirectionReversal: Boolean,
+        val directionCoherent: Boolean,
+    )
 
     companion object {
         private const val DEFAULT_MIN_CUTOFF_HZ = 3f
@@ -267,14 +485,26 @@ class LandmarkMotionPredictor(
         private const val DEFAULT_GLOBAL_VELOCITY_DEAD_ZONE = 0.01f
         private const val DEFAULT_VELOCITY_DEAD_ZONE = 0.015f
         private const val DEFAULT_MAX_VELOCITY_PER_SECOND = 2f
+        private const val DEFAULT_MOTION_START_SPEED = 0.08f
+        private const val DEFAULT_MOTION_STOP_SPEED = 0.035f
+        private const val DEFAULT_MOTION_CONFIRMATION_FRAMES = 3
+        private const val DEFAULT_CANDIDATE_PREDICTION_GAIN = 0.2f
+        private const val DEFAULT_LOCAL_PREDICTION_GAIN = 0.35f
         private const val DEFAULT_RENDER_LEAD_MS = 4L
         private const val DEFAULT_MAX_PREDICTION_MS = 45L
         private const val DEFAULT_HOLD_AFTER_LOSS_MS = 120L
         private const val DEFAULT_RESET_GAP_MS = 200L
-        private const val DEFAULT_MAX_CENTROID_JUMP = 0.25f
+        private const val DEFAULT_MAX_CENTROID_JUMP = 0.12f
+        private const val CANDIDATE_POSITION_RESPONSE_GAIN = 0.4f
+        private const val MIN_COHERENT_DIRECTION_COSINE = 0.25f
+        private const val HARD_DIRECTION_REVERSAL_COSINE = -0.25f
+        private const val PREDICTION_GAIN_ATTACK_PER_SECOND = 8f
+        private const val PREDICTION_GAIN_RELEASE_PER_SECOND = 4f
+        private const val MINIMUM_QUALITY_RESPONSE = 0.35f
+        private const val QUALITY_FALL_PER_SECOND = 8f
+        private const val QUALITY_RISE_PER_SECOND = 3f
+        private const val MIN_DIRECTION_NORM = 1e-8f
         private const val STOP_RESPONSE_CUTOFF_HZ = 12f
-        private const val X_OFFSET = 0
-        private const val Y_OFFSET = 1
         private const val TWO_PI = 6.2831855f
         private const val MILLIS_PER_SECOND = 1_000f
         private const val NO_TIMESTAMP = Long.MIN_VALUE

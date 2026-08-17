@@ -23,12 +23,15 @@ class FaceLandmarkerTracker(
     private val callbackExecutor: Executor,
     private val listener: Listener,
     private val telemetrySink: TrackingTelemetrySink? = null,
+    private val cameraCaptureMetadataStore: CameraCaptureMetadataStore,
 ) : AutoCloseable {
 
     private val applicationContext = context.applicationContext
     private val frameBufferPool = ArrayDeque<RgbaFrameBuffer>(FRAME_BUFFER_POOL_CAPACITY)
     private val landmarkPredictor = LandmarkMotionPredictor()
     private val frameTimestampResolver = CameraFrameTimestampResolver()
+    private val frameQualityAnalyzer = SparseFrameQualityAnalyzer()
+    private val deviceStateMonitor = DeviceStateMonitor(context)
     private var faceLandmarker: FaceLandmarker? = null
     private var activeDelegate = InferenceDelegate.GPU
     private var inFlightFrame: PreparedFrame? = null
@@ -36,6 +39,7 @@ class FaceLandmarkerTracker(
     private var pendingFrame: PreparedFrame? = null
     private var lastDeliveredLandmarks: LandmarkRenderFrame? = null
     private var lastResultDeliveryTimestampMs = 0L
+    private var lastMeasurementCaptureTimestampMs = NO_TIMESTAMP
     private var smoothedMlFps = 0f
     private var closed = false
 
@@ -128,12 +132,22 @@ class FaceLandmarkerTracker(
             listener.onTrackerError(error.message ?: "Frame copy failed")
             return
         }
+        val imageSignalQuality = if (telemetrySink == null) {
+            ImageSignalQuality.UNKNOWN
+        } else {
+            frameQualityAnalyzer.analyze(
+                frameBuffer.buffer,
+                sourceWidth,
+                sourceHeight,
+            )
+        }
 
         val frame = PreparedFrame(
             frameBuffer = frameBuffer,
             timestampMs = frameTimestampMs,
             sensorTimestampNs = sensorTimestampNs,
             rotationDegrees = rotationDegrees,
+            imageSignalQuality = imageSignalQuality,
         )
 
         if (inFlightFrame == null) {
@@ -222,24 +236,50 @@ class FaceLandmarkerTracker(
 
         val filteredCoordinates = trackedLandmarks?.copyBasePositions() ?: FloatArray(0)
         val latencyMs = (resultTimestampMs - frame.timestampMs).coerceAtLeast(0L)
-        telemetrySink?.recordMeasurement(
-            TrackingMeasurementSample(
-                captureTimestampMs = frame.timestampMs,
-                sensorTimestampNs = frame.sensorTimestampNs,
-                deliveryTimestampMs = resultTimestampMs,
-                latencyMs = latencyMs,
-                mlFps = updateMlFps(resultTimestampMs),
-                // FaceLandmarkerResult 1.0.0 does not expose one calibrated face confidence.
-                confidence = Float.NaN,
-                facePresent = measuredLandmarks != null,
-                predictedOnly = trackedLandmarks?.predictedOnly == true,
-                rawLandmarks = rawCoordinates,
-                filteredLandmarks = filteredCoordinates,
-                velocities = trackedLandmarks?.copyVelocities() ?: FloatArray(0),
-                rawGeometry = TrackingGeometryExtractor.extract(rawCoordinates),
-                filteredGeometry = TrackingGeometryExtractor.extract(filteredCoordinates),
-            ),
-        )
+        telemetrySink?.let { sink ->
+            val cameraMetadata = cameraCaptureMetadataStore.consume(frame.sensorTimestampNs)
+            val captureIntervalMs = if (lastMeasurementCaptureTimestampMs == NO_TIMESTAMP) {
+                -1L
+            } else {
+                (frame.timestampMs - lastMeasurementCaptureTimestampMs).takeIf { it > 0L } ?: -1L
+            }
+            lastMeasurementCaptureTimestampMs = frame.timestampMs
+            sink.recordMeasurement(
+                TrackingMeasurementSample(
+                    captureTimestampMs = frame.timestampMs,
+                    sensorTimestampNs = frame.sensorTimestampNs,
+                    deliveryTimestampMs = resultTimestampMs,
+                    latencyMs = latencyMs,
+                    mlFps = updateMlFps(resultTimestampMs),
+                    // FaceLandmarkerResult 1.0.0 does not expose one calibrated face confidence.
+                    confidence = Float.NaN,
+                    facePresent = measuredLandmarks != null,
+                    predictedOnly = trackedLandmarks?.predictedOnly == true,
+                    rawLandmarks = rawCoordinates,
+                    filteredLandmarks = filteredCoordinates,
+                    velocities = trackedLandmarks?.copyVelocities() ?: FloatArray(0),
+                    rawGeometry = TrackingGeometryExtractor.extract(rawCoordinates),
+                    filteredGeometry = TrackingGeometryExtractor.extract(filteredCoordinates),
+                    captureIntervalMs = captureIntervalMs,
+                    frameQuality = TrackingFrameQuality(
+                        meanLuma = frame.imageSignalQuality.meanLuma,
+                        lumaStandardDeviation = frame.imageSignalQuality.lumaStandardDeviation,
+                        meanGradient = frame.imageSignalQuality.meanGradient,
+                        exposureTimeNs = cameraMetadata.exposureTimeNs,
+                        sensitivityIso = cameraMetadata.sensitivityIso,
+                        frameDurationNs = cameraMetadata.frameDurationNs,
+                        rollingShutterSkewNs = cameraMetadata.rollingShutterSkewNs,
+                        aeState = cameraMetadata.aeState,
+                    ),
+                    poseFitQuality = if (rawCoordinates.isEmpty()) {
+                        TrackingPoseFitQuality.UNKNOWN
+                    } else {
+                        landmarkPredictor.latestPoseFitQuality
+                    },
+                    deviceState = deviceStateMonitor.snapshot(resultTimestampMs),
+                ),
+            )
+        }
 
         listener.onTrackingResult(
             TrackingResult(
@@ -372,6 +412,7 @@ class FaceLandmarkerTracker(
         landmarkPredictor.reset()
         lastDeliveredLandmarks = null
         lastResultDeliveryTimestampMs = 0L
+        lastMeasurementCaptureTimestampMs = NO_TIMESTAMP
         smoothedMlFps = 0f
     }
 
@@ -386,6 +427,7 @@ class FaceLandmarkerTracker(
         val timestampMs: Long,
         val sensorTimestampNs: Long,
         val rotationDegrees: Int,
+        val imageSignalQuality: ImageSignalQuality,
     )
 
     data class TrackingResult(
@@ -417,5 +459,6 @@ class FaceLandmarkerTracker(
         private const val RGBA_BYTES_PER_PIXEL = 4
         private const val MILLIS_PER_SECOND = 1_000f
         private const val ML_FPS_SMOOTHING = 0.2f
+        private const val NO_TIMESTAMP = Long.MIN_VALUE
     }
 }

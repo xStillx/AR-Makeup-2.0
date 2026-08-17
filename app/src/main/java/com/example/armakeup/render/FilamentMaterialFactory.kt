@@ -44,6 +44,8 @@ internal object FilamentMaterialFactory {
             .require(MaterialBuilder.VertexAttribute.UV1)
             .require(MaterialBuilder.VertexAttribute.COLOR)
             .uniformParameter(MaterialBuilder.UniformType.FLOAT3, "pigmentColor")
+            .uniformParameter(MaterialBuilder.UniformType.FLOAT, "coverageMultiplier")
+            .uniformParameter(MaterialBuilder.UniformType.FLOAT, "luminancePreservation")
             .uniformParameter(MaterialBuilder.UniformType.FLOAT2, "illuminationSampleStep")
             .uniformParameter(MaterialBuilder.UniformType.FLOAT, "roughness")
             .uniformParameter(MaterialBuilder.UniformType.FLOAT, "specularStrength")
@@ -120,7 +122,11 @@ internal object FilamentMaterialFactory {
             prepareMaterial(material);
             vec2 displayUv = getUV0();
             vec3 cameraLinear = cameraLinearAt(displayUv);
-            float coverage = clamp(getColor().a, 0.0, 1.0);
+            float coverage = clamp(
+                getColor().a * materialParams.coverageMultiplier,
+                0.0,
+                1.0
+            );
             vec3 lipNormal = normalize(getColor().rgb * 2.0 - 1.0);
             vec2 lipUv = getUV1();
             const vec3 luminanceWeights = vec3(0.2126, 0.7152, 0.0722);
@@ -167,7 +173,12 @@ internal object FilamentMaterialFactory {
             float pigmentLuminance = max(dot(materialParams.pigmentColor, luminanceWeights), 0.0001);
             vec3 luminancePreservingPigment = materialParams.pigmentColor *
                 (materialLuminance / pigmentLuminance);
-            vec3 pigmented = mix(cameraLinear, luminancePreservingPigment, coverage);
+            vec3 renderedPigment = mix(
+                materialParams.pigmentColor,
+                luminancePreservingPigment,
+                materialParams.luminancePreservation
+            );
+            vec3 pigmented = mix(cameraLinear, renderedPigment, coverage);
 
             float roughness = clamp(materialParams.roughness, 0.08, 1.0);
             float specularPower = mix(112.0, 9.0, roughness * roughness);

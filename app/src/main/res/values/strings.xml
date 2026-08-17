@@ -26,4 +26,5 @@
     <string name="finish_matte">Матовая</string>
     <string name="finish_satin">Сатин</string>
     <string name="finish_gloss">Глянец</string>
+    <string name="finish_tracking_test">Трек</string>
 </resources>

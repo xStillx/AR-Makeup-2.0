@@ -12,6 +12,24 @@ data class TrackingJitterMetric(
     val sampleCount: Int,
 )
 
+data class TrackingInputQualityMetrics(
+    val medianCaptureIntervalMs: Float,
+    val p95CaptureIntervalMs: Float,
+    val medianMeanLuma: Float,
+    val medianLumaStandardDeviation: Float,
+    val medianMeanGradient: Float,
+    val medianExposureMs: Float,
+    val p95ExposureMs: Float,
+    val medianSensitivityIso: Float,
+    val medianFrameDurationMs: Float,
+    val medianRollingShutterSkewMs: Float,
+    val medianPoseFitQuality: Float,
+    val medianPoseFitResidual: Float,
+    val medianPoseFitInlierFraction: Float,
+    val maximumThermalStatus: Int,
+    val medianBatteryTemperatureCelsius: Float,
+)
+
 data class TrackingTelemetryMetrics(
     val scenario: String,
     val durationMs: Long,
@@ -23,6 +41,7 @@ data class TrackingTelemetryMetrics(
     val medianMlFps: Float,
     val medianLatencyMs: Float,
     val p95LatencyMs: Float,
+    val inputQuality: TrackingInputQualityMetrics,
     val rawLipJitter: TrackingJitterMetric,
     val filteredLipJitter: TrackingJitterMetric,
     val rawLocalLipJitter: TrackingJitterMetric,
@@ -44,6 +63,30 @@ data class TrackingTelemetryMetrics(
         append(" mlFpsMedian=").append(medianMlFps.formatMetric())
         append(" latencyMedianMs=").append(medianLatencyMs.formatMetric())
         append(" latencyP95Ms=").append(p95LatencyMs.formatMetric())
+        append(" captureIntervalMedianMs=")
+            .append(inputQuality.medianCaptureIntervalMs.formatMetric())
+        append(" captureIntervalP95Ms=")
+            .append(inputQuality.p95CaptureIntervalMs.formatMetric())
+        append(" lumaMedian=").append(inputQuality.medianMeanLuma.formatMetric())
+        append(" lumaStdMedian=")
+            .append(inputQuality.medianLumaStandardDeviation.formatMetric())
+        append(" gradientMedian=").append(inputQuality.medianMeanGradient.formatMetric())
+        append(" exposureMedianMs=").append(inputQuality.medianExposureMs.formatMetric())
+        append(" exposureP95Ms=").append(inputQuality.p95ExposureMs.formatMetric())
+        append(" isoMedian=").append(inputQuality.medianSensitivityIso.formatMetric())
+        append(" frameDurationMedianMs=")
+            .append(inputQuality.medianFrameDurationMs.formatMetric())
+        append(" rollingShutterMedianMs=")
+            .append(inputQuality.medianRollingShutterSkewMs.formatMetric())
+        append(" poseQualityMedian=")
+            .append(inputQuality.medianPoseFitQuality.formatMetric())
+        append(" poseResidualMedian=")
+            .append(inputQuality.medianPoseFitResidual.formatMetric())
+        append(" poseInliersMedian=")
+            .append(inputQuality.medianPoseFitInlierFraction.formatMetric())
+        append(" thermalMax=").append(inputQuality.maximumThermalStatus)
+        append(" batteryTempMedianC=")
+            .append(inputQuality.medianBatteryTemperatureCelsius.formatMetric())
         append(" rawJitterRms=").append(rawLipJitter.rms.formatMetric())
         append(" filteredJitterRms=").append(filteredLipJitter.rms.formatMetric())
         append(" rawLocalJitterRms=").append(rawLocalLipJitter.rms.formatMetric())
@@ -104,6 +147,7 @@ object TrackingTelemetryAnalyzer {
             medianMlFps = percentile(mlFpsValues, 0.5f),
             medianLatencyMs = percentile(latencyValues, 0.5f),
             p95LatencyMs = percentile(latencyValues, 0.95f),
+            inputQuality = analyzeInputQuality(measurements),
             rawLipJitter = pointCloudJitter(
                 stationaryMeasurements.mapNotNull {
                     extractLipPoints(it.rawLandmarks)
@@ -133,6 +177,59 @@ object TrackingTelemetryAnalyzer {
             reacquisitionJump = estimateReacquisitionJump(measurements),
         )
     }
+
+    private fun analyzeInputQuality(
+        measurements: List<TrackingMeasurementSample>,
+    ): TrackingInputQualityMetrics {
+        val captureIntervals = measurements.map { it.captureIntervalMs.toFloat() }
+            .filter { it > 0f }
+        val luma = measurements.map { it.frameQuality.meanLuma }.finiteValues()
+        val lumaStandardDeviation = measurements
+            .map { it.frameQuality.lumaStandardDeviation }.finiteValues()
+        val gradients = measurements.map { it.frameQuality.meanGradient }.finiteValues()
+        val exposureMs = measurements.map { it.frameQuality.exposureTimeNs }
+            .filter { it >= 0L }
+            .map { it / NANOSECONDS_PER_MILLISECOND }
+        val sensitivityIso = measurements.map { it.frameQuality.sensitivityIso.toFloat() }
+            .filter { it >= 0f }
+        val frameDurationMs = measurements.map { it.frameQuality.frameDurationNs }
+            .filter { it >= 0L }
+            .map { it / NANOSECONDS_PER_MILLISECOND }
+        val rollingShutterMs = measurements.map { it.frameQuality.rollingShutterSkewNs }
+            .filter { it >= 0L }
+            .map { it / NANOSECONDS_PER_MILLISECOND }
+        val poseQualities = measurements.map { it.poseFitQuality.quality }.finiteValues()
+        val poseResiduals = measurements.map {
+            it.poseFitQuality.normalizedRmsResidual
+        }.finiteValues()
+        val poseInlierFractions = measurements.map {
+            it.poseFitQuality.inlierFraction
+        }.finiteValues()
+        val thermalStatuses = measurements.map { it.deviceState.thermalStatus }
+            .filter { it >= 0 }
+        val batteryTemperatures = measurements.map {
+            it.deviceState.batteryTemperatureCelsius
+        }.finiteValues()
+        return TrackingInputQualityMetrics(
+            medianCaptureIntervalMs = percentile(captureIntervals, 0.5f),
+            p95CaptureIntervalMs = percentile(captureIntervals, 0.95f),
+            medianMeanLuma = percentile(luma, 0.5f),
+            medianLumaStandardDeviation = percentile(lumaStandardDeviation, 0.5f),
+            medianMeanGradient = percentile(gradients, 0.5f),
+            medianExposureMs = percentile(exposureMs, 0.5f),
+            p95ExposureMs = percentile(exposureMs, 0.95f),
+            medianSensitivityIso = percentile(sensitivityIso, 0.5f),
+            medianFrameDurationMs = percentile(frameDurationMs, 0.5f),
+            medianRollingShutterSkewMs = percentile(rollingShutterMs, 0.5f),
+            medianPoseFitQuality = percentile(poseQualities, 0.5f),
+            medianPoseFitResidual = percentile(poseResiduals, 0.5f),
+            medianPoseFitInlierFraction = percentile(poseInlierFractions, 0.5f),
+            maximumThermalStatus = thermalStatuses.maxOrNull() ?: -1,
+            medianBatteryTemperatureCelsius = percentile(batteryTemperatures, 0.5f),
+        )
+    }
+
+    private fun List<Float>.finiteValues(): List<Float> = filter { it.isFinite() }
 
     private fun selectStationaryWindow(
         samples: List<TrackingMeasurementSample>,
@@ -442,6 +539,7 @@ object TrackingTelemetryAnalyzer {
     private const val STOP_TARGET_SAMPLE_COUNT = 3
     private const val STATIONARY_WINDOW_MS = 2_000L
     private const val MINIMUM_STATIONARY_WINDOW_MS = 1_900L
+    private const val NANOSECONDS_PER_MILLISECOND = 1_000_000f
     private const val MINIMUM_POSE_SCALE = 1e-5f
     private const val SCALE_MOTION_WEIGHT = 0.5f
     private const val ROTATION_MOTION_WEIGHT = 0.2f

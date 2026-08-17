@@ -8,16 +8,16 @@ import org.junit.Test
 class LandmarkRenderFrameTest {
 
     @Test
-    fun oldMeasurementKeepsAnimatingAfterResultDelivery() {
+    fun oldMeasurementBridgesOneVsyncAfterResultDelivery() {
         val delivered = movingFrame(measurementTimestampMs = 1_000L)
             .deliveredAt(timestampMs = 1_100L)
 
         val atDelivery = delivered.x(0, delivered.predictionSeconds(1_100L))
-        val duringNextVsync = delivered.x(0, delivered.predictionSeconds(1_120L))
+        val duringNextVsync = delivered.x(0, delivered.predictionSeconds(1_116L))
 
         assertEquals(0.245f, atDelivery, EPSILON)
-        assertEquals(0.265f, duringNextVsync, EPSILON)
-        assertTrue(delivered.shouldAnimate(1_120L))
+        assertEquals(0.261f, duringNextVsync, EPSILON)
+        assertTrue(delivered.shouldAnimate(1_116L))
     }
 
     @Test
@@ -25,11 +25,11 @@ class LandmarkRenderFrameTest {
         val delivered = movingFrame(measurementTimestampMs = 1_000L)
             .deliveredAt(timestampMs = 1_100L)
 
-        val atWindowEnd = delivered.x(0, delivered.predictionSeconds(1_142L))
+        val atWindowEnd = delivered.x(0, delivered.predictionSeconds(1_120L))
         val longAfterWindow = delivered.x(0, delivered.predictionSeconds(2_000L))
 
         assertEquals(atWindowEnd, longAfterWindow, EPSILON)
-        assertFalse(delivered.shouldAnimate(1_142L))
+        assertFalse(delivered.shouldAnimate(1_120L))
     }
 
     @Test

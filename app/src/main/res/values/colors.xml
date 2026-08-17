@@ -8,6 +8,7 @@
     <color name="lipstick_matte_upper">#FFB64B49</color>
     <color name="lipstick_matte_lower">#FFC15C57</color>
     <color name="lipstick_matte_shadow">#FF6E3A39</color>
+    <color name="lipstick_tracking_test">#FFFF00D4</color>
     <color name="text_primary_on_dark">#FFFDF7F9</color>
     <color name="text_secondary_on_dark">#BFEEDFE3</color>
 </resources>

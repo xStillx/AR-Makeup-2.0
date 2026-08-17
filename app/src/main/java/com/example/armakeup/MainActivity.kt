@@ -21,6 +21,8 @@ import androidx.camera.core.SessionConfig
 import androidx.camera.core.ViewPort
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
+import androidx.camera.camera2.interop.Camera2Interop
+import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
@@ -29,6 +31,7 @@ import androidx.core.view.WindowInsetsCompat
 import com.example.armakeup.databinding.ActivityMainBinding
 import com.example.armakeup.makeup.LipstickFinish
 import com.example.armakeup.tracking.FaceLandmarkerTracker
+import com.example.armakeup.tracking.CameraCaptureMetadataStore
 import com.example.armakeup.tracking.TrackingTelemetryRecorder
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -45,6 +48,7 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
     private var cameraBindingStarted = false
     private var cameraFpsLabel = "auto"
     private var trackingTelemetryRecorder: TrackingTelemetryRecorder? = null
+    private val cameraCaptureMetadataStore = CameraCaptureMetadataStore()
     private val fpsMeter = FpsMeter()
     private val stopTrackingTelemetry = Runnable { stopTrackingTelemetryRecording() }
 
@@ -69,10 +73,12 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
         setContentView(binding.root)
         binding.root.keepScreenOn = true
         binding.makeupRenderer.setErrorListener(::showFatalRendererState)
+        val debuggable = applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
+        binding.finishTrackingTest.visibility = if (debuggable) View.VISIBLE else View.GONE
         trackingTelemetryRecorder = TrackingTelemetryRecorder.createIfRequested(
             context = applicationContext,
             intent = intent,
-            debuggable = applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0,
+            debuggable = debuggable,
         )
         trackingTelemetryRecorder?.let { recorder ->
             binding.makeupRenderer.setTrackingTelemetrySink(recorder)
@@ -86,6 +92,7 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
             val finish = when (checkedId) {
                 R.id.finish_matte -> LipstickFinish.MATTE
                 R.id.finish_gloss -> LipstickFinish.GLOSS
+                R.id.finish_tracking_test -> LipstickFinish.TRACKING_TEST
                 else -> LipstickFinish.SATIN
             }
             binding.makeupRenderer.setLipstickFinish(finish)
@@ -156,6 +163,7 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
                     callbackExecutor = cameraExecutor,
                     listener = this,
                     telemetrySink = trackingTelemetryRecorder,
+                    cameraCaptureMetadataStore = cameraCaptureMetadataStore,
                 ).also { it.initialize() }
             }
         }
@@ -166,6 +174,7 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
         }
     }
 
+    @androidx.annotation.OptIn(markerClass = [ExperimentalCamera2Interop::class])
     private fun bindCameraUseCases() {
         val providerFuture = ProcessCameraProvider.getInstance(this)
         providerFuture.addListener({
@@ -188,7 +197,7 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
                             binding.makeupRenderer.surfaceProvider,
                         )
                     }
-                val analysis = ImageAnalysis.Builder()
+                val analysisBuilder = ImageAnalysis.Builder()
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
                     .setTargetRotation(targetRotation)
@@ -202,7 +211,11 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
                             )
                             .build(),
                     )
-                    .build()
+                if (trackingTelemetryRecorder != null) {
+                    Camera2Interop.Extender(analysisBuilder)
+                        .setSessionCaptureCallback(cameraCaptureMetadataStore)
+                }
+                val analysis = analysisBuilder.build()
                     .also { useCase ->
                         useCase.setAnalyzer(cameraExecutor) { imageProxy ->
                             faceTracker?.detect(imageProxy) ?: imageProxy.close()
@@ -383,6 +396,7 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
         }
         trackingTelemetryRecorder?.close()
         trackingTelemetryRecorder = null
+        cameraCaptureMetadataStore.clear()
         cameraProvider?.unbindAll()
         if (::cameraExecutor.isInitialized) {
             cameraExecutor.execute { faceTracker?.close() }

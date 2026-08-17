@@ -2773,7 +2773,8 @@ private:
 
     bool recordTemporalCommands(VkCommandBuffer commandBuffer) {
         if (!temporalReady_ ||
-            pendingCameraFrame_.temporalDescriptorSet == VK_NULL_HANDLE) {
+            pendingCameraFrame_.temporalDescriptorSet == VK_NULL_HANDLE ||
+            !temporalRoiValid()) {
             return true;
         }
         const std::uint32_t writeIndex = pendingCameraFrame_.temporalWriteIndex;
@@ -3013,7 +3014,8 @@ private:
         }
         closeFileDescriptor(pendingCameraFrame_.releaseFenceFd);
         pendingCameraFrame_.releaseFenceFd = -1;
-        if (pendingCameraFrame_.temporalDescriptorSet != VK_NULL_HANDLE && temporalReady_) {
+        if (pendingCameraFrame_.temporalDescriptorSet != VK_NULL_HANDLE && temporalReady_ &&
+            temporalRoiValid()) {
             if (pendingCameraFrame_.temporalComputed && temporalFitMapped_ != nullptr) {
                 const auto* result = static_cast<const float*>(temporalFitMapped_);
                 std::copy_n(
