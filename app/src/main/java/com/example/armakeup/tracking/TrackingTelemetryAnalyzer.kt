@@ -30,6 +30,26 @@ data class TrackingInputQualityMetrics(
     val medianBatteryTemperatureCelsius: Float,
 )
 
+data class TrackingRenderPerformanceMetrics(
+    val lipstickFinishes: List<String>,
+    val medianFrameSubmissionCpuMs: Float,
+    val p95FrameSubmissionCpuMs: Float,
+    val filamentRenderedFrameFraction: Float,
+    val medianMaterialCameraCoherence: Float,
+    val p05MaterialCameraCoherence: Float,
+    val medianMaterialMotionSpeed: Float,
+    val p95MaterialTemporalMismatchMs: Float,
+    val byFinish: List<TrackingFinishRenderPerformanceMetrics>,
+)
+
+data class TrackingFinishRenderPerformanceMetrics(
+    val finish: String,
+    val renderCount: Int,
+    val medianFrameSubmissionCpuMs: Float,
+    val p95FrameSubmissionCpuMs: Float,
+    val filamentRenderedFrameFraction: Float,
+)
+
 data class TrackingTelemetryMetrics(
     val scenario: String,
     val durationMs: Long,
@@ -42,6 +62,7 @@ data class TrackingTelemetryMetrics(
     val medianLatencyMs: Float,
     val p95LatencyMs: Float,
     val inputQuality: TrackingInputQualityMetrics,
+    val renderPerformance: TrackingRenderPerformanceMetrics,
     val rawLipJitter: TrackingJitterMetric,
     val filteredLipJitter: TrackingJitterMetric,
     val rawLocalLipJitter: TrackingJitterMetric,
@@ -87,6 +108,31 @@ data class TrackingTelemetryMetrics(
         append(" thermalMax=").append(inputQuality.maximumThermalStatus)
         append(" batteryTempMedianC=")
             .append(inputQuality.medianBatteryTemperatureCelsius.formatMetric())
+        append(" finishes=").append(
+            renderPerformance.lipstickFinishes.ifEmpty { listOf("UNKNOWN") }.joinToString("|")
+        )
+        append(" frameCpuMedianMs=")
+            .append(renderPerformance.medianFrameSubmissionCpuMs.formatMetric())
+        append(" frameCpuP95Ms=")
+            .append(renderPerformance.p95FrameSubmissionCpuMs.formatMetric())
+        append(" filamentRenderedFraction=")
+            .append(renderPerformance.filamentRenderedFrameFraction.formatMetric())
+        append(" materialCoherenceMedian=")
+            .append(renderPerformance.medianMaterialCameraCoherence.formatMetric())
+        append(" materialCoherenceP05=")
+            .append(renderPerformance.p05MaterialCameraCoherence.formatMetric())
+        append(" materialMotionMedian=")
+            .append(renderPerformance.medianMaterialMotionSpeed.formatMetric())
+        append(" materialMismatchP95Ms=")
+            .append(renderPerformance.p95MaterialTemporalMismatchMs.formatMetric())
+        append(" finishFrameCpu=").append(
+            renderPerformance.byFinish.joinToString("|") { finish ->
+                "${finish.finish}:${finish.renderCount}:" +
+                    "${finish.medianFrameSubmissionCpuMs.formatMetric()}:" +
+                    "${finish.p95FrameSubmissionCpuMs.formatMetric()}:" +
+                    finish.filamentRenderedFrameFraction.formatMetric()
+            }.ifEmpty { "n/a" }
+        )
         append(" rawJitterRms=").append(rawLipJitter.rms.formatMetric())
         append(" filteredJitterRms=").append(filteredLipJitter.rms.formatMetric())
         append(" rawLocalJitterRms=").append(rawLocalLipJitter.rms.formatMetric())
@@ -148,6 +194,7 @@ object TrackingTelemetryAnalyzer {
             medianLatencyMs = percentile(latencyValues, 0.5f),
             p95LatencyMs = percentile(latencyValues, 0.95f),
             inputQuality = analyzeInputQuality(measurements),
+            renderPerformance = analyzeRenderPerformance(renders),
             rawLipJitter = pointCloudJitter(
                 stationaryMeasurements.mapNotNull {
                     extractLipPoints(it.rawLandmarks)
@@ -175,6 +222,53 @@ object TrackingTelemetryAnalyzer {
                 estimateStopOvershoot(validPoseSamples)
             },
             reacquisitionJump = estimateReacquisitionJump(measurements),
+        )
+    }
+
+    private fun analyzeRenderPerformance(
+        renders: List<TrackingRenderSample>,
+    ): TrackingRenderPerformanceMetrics {
+        val cpuTimes = renders.map { it.frameSubmissionCpuMs }
+            .filter { it.isFinite() && it >= 0f }
+        val coherence = renders.map { it.materialCameraCoherence }
+            .filter { it.isFinite() }
+        val motionSpeeds = renders.map { it.materialMotionSpeed }
+            .filter { it.isFinite() && it >= 0f }
+        val temporalMismatch = renders.map { it.materialTemporalMismatchMs }
+            .filter { it.isFinite() && it >= 0f }
+        val renderedFraction = if (renders.isEmpty()) {
+            Float.NaN
+        } else {
+            renders.count { it.filamentFrameRendered }.toFloat() / renders.size
+        }
+        return TrackingRenderPerformanceMetrics(
+            lipstickFinishes = renders.map { it.lipstickFinish }
+                .filter { it.isNotBlank() && it != "UNKNOWN" }
+                .distinct()
+                .sorted(),
+            medianFrameSubmissionCpuMs = percentile(cpuTimes, 0.5f),
+            p95FrameSubmissionCpuMs = percentile(cpuTimes, 0.95f),
+            filamentRenderedFrameFraction = renderedFraction,
+            medianMaterialCameraCoherence = percentile(coherence, 0.5f),
+            p05MaterialCameraCoherence = percentile(coherence, 0.05f),
+            medianMaterialMotionSpeed = percentile(motionSpeeds, 0.5f),
+            p95MaterialTemporalMismatchMs = percentile(temporalMismatch, 0.95f),
+            byFinish = renders
+                .filter { it.lipstickFinish.isNotBlank() && it.lipstickFinish != "UNKNOWN" }
+                .groupBy { it.lipstickFinish }
+                .toSortedMap()
+                .map { (finish, finishRenders) ->
+                    val finishCpuTimes = finishRenders.map { it.frameSubmissionCpuMs }
+                        .filter { it.isFinite() && it >= 0f }
+                    TrackingFinishRenderPerformanceMetrics(
+                        finish = finish,
+                        renderCount = finishRenders.size,
+                        medianFrameSubmissionCpuMs = percentile(finishCpuTimes, 0.5f),
+                        p95FrameSubmissionCpuMs = percentile(finishCpuTimes, 0.95f),
+                        filamentRenderedFrameFraction = finishRenders
+                            .count { it.filamentFrameRendered }.toFloat() / finishRenders.size,
+                    )
+                },
         )
     }
 

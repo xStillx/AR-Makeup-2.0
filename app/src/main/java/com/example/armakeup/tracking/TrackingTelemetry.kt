@@ -95,7 +95,15 @@ data class TrackingRenderSample(
     val lipVisible: Boolean,
     val outerLipPoints: FloatArray,
     val innerLipPoints: FloatArray,
+    val lipstickFinish: String = UNKNOWN_LIPSTICK_FINISH,
+    val materialCameraCoherence: Float = Float.NaN,
+    val materialMotionSpeed: Float = Float.NaN,
+    val materialTemporalMismatchMs: Float = Float.NaN,
+    val frameSubmissionCpuMs: Float = Float.NaN,
+    val filamentFrameRendered: Boolean = true,
 ) : TrackingTelemetryEvent
+
+private const val UNKNOWN_LIPSTICK_FINISH = "UNKNOWN"
 
 data class TrackingGeometry(
     val pose: TrackingPose,

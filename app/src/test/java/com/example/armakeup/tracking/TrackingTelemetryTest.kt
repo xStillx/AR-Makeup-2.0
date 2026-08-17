@@ -43,6 +43,12 @@ class TrackingTelemetryTest {
             lipVisible = true,
             outerLipPoints = floatArrayOf(0.4f, 0.5f, 0.6f, 0.5f),
             innerLipPoints = floatArrayOf(0.45f, 0.5f, 0.55f, 0.5f),
+            lipstickFinish = "GLOSS",
+            materialCameraCoherence = 0.42f,
+            materialMotionSpeed = 0.8f,
+            materialTemporalMismatchMs = 37f,
+            frameSubmissionCpuMs = 4.5f,
+            filamentFrameRendered = false,
         )
         val bytes = ByteArrayOutputStream().also { output ->
             TrackingTelemetryCodec.writeHeader(
@@ -72,6 +78,16 @@ class TrackingTelemetryTest {
         assertEquals(measurement.deviceState, decodedMeasurement.deviceState)
         val decodedRender = decoded.events[1] as TrackingRenderSample
         assertArrayEquals(render.outerLipPoints, decodedRender.outerLipPoints, 0f)
+        assertEquals(render.lipstickFinish, decodedRender.lipstickFinish)
+        assertEquals(render.materialCameraCoherence, decodedRender.materialCameraCoherence, 0f)
+        assertEquals(render.materialMotionSpeed, decodedRender.materialMotionSpeed, 0f)
+        assertEquals(
+            render.materialTemporalMismatchMs,
+            decodedRender.materialTemporalMismatchMs,
+            0f,
+        )
+        assertEquals(render.frameSubmissionCpuMs, decodedRender.frameSubmissionCpuMs, 0f)
+        assertEquals(render.filamentFrameRendered, decodedRender.filamentFrameRendered)
     }
 
     @Test
@@ -111,6 +127,36 @@ class TrackingTelemetryTest {
     }
 
     @Test
+    fun codecReadsLegacyV2RenderWithUnknownMaterialState() {
+        val bytes = ByteArrayOutputStream().also { output ->
+            DataOutputStream(output).apply {
+                writeInt(0x41525636)
+                writeInt(2)
+                writeUTF("legacy_render")
+                writeLong(42L)
+                writeByte(2)
+                writeLong(1_100L)
+                writeLong(1_000L)
+                writeLong(999_000_000L)
+                writeFloat(0.04f)
+                writeInt(1080)
+                writeInt(2400)
+                writeBoolean(true)
+                repeat(2) { writeInt(0) }
+                writeByte(0x7f)
+                writeLong(0L)
+            }
+        }.toByteArray()
+
+        val render = TrackingTelemetryCodec.read(ByteArrayInputStream(bytes)).renders.single()
+
+        assertEquals("UNKNOWN", render.lipstickFinish)
+        assertTrue(render.materialCameraCoherence.isNaN())
+        assertTrue(render.frameSubmissionCpuMs.isNaN())
+        assertTrue(render.filamentFrameRendered)
+    }
+
+    @Test
     fun analyzerReportsInputPoseAndThermalQuality() {
         val samples = (0..2).map { index ->
             poseOnlyMeasurement(1_000L + index * 33L, index * 0.01f, index * 0.01f).copy(
@@ -141,6 +187,56 @@ class TrackingTelemetryTest {
         assertEquals(0.8f, metrics.medianPoseFitQuality, EPSILON)
         assertEquals(2, metrics.maximumThermalStatus)
         assertEquals(31f, metrics.medianBatteryTemperatureCelsius, EPSILON)
+    }
+
+    @Test
+    fun analyzerReportsFinishCoherenceAndFrameSubmissionTiming() {
+        val renders = listOf(
+            renderSample(1_100L, 0f).copy(
+                lipstickFinish = "SATIN",
+                materialCameraCoherence = 1f,
+                materialMotionSpeed = 0.1f,
+                materialTemporalMismatchMs = 10f,
+                frameSubmissionCpuMs = 2f,
+                filamentFrameRendered = true,
+            ),
+            renderSample(1_116L, 0.01f).copy(
+                lipstickFinish = "SATIN",
+                materialCameraCoherence = 0.4f,
+                materialMotionSpeed = 0.8f,
+                materialTemporalMismatchMs = 40f,
+                frameSubmissionCpuMs = 6f,
+                filamentFrameRendered = false,
+            ),
+            renderSample(1_132L, 0.02f).copy(
+                lipstickFinish = "GLOSS",
+                materialCameraCoherence = 0.2f,
+                materialMotionSpeed = 1.0f,
+                materialTemporalMismatchMs = 50f,
+                frameSubmissionCpuMs = 4f,
+                filamentFrameRendered = true,
+            ),
+        )
+
+        val metrics = TrackingTelemetryAnalyzer.analyze(
+            TrackingTelemetrySession(
+                TrackingTelemetryHeader("material", 0L),
+                renders,
+                droppedEventCount = 0L,
+            ),
+        ).renderPerformance
+
+        assertEquals(listOf("GLOSS", "SATIN"), metrics.lipstickFinishes)
+        assertEquals(4f, metrics.medianFrameSubmissionCpuMs, EPSILON)
+        assertEquals(2f / 3f, metrics.filamentRenderedFrameFraction, EPSILON)
+        assertEquals(0.4f, metrics.medianMaterialCameraCoherence, EPSILON)
+        assertEquals(40f, metrics.p95MaterialTemporalMismatchMs, EPSILON)
+        assertEquals(2, metrics.byFinish.size)
+        assertEquals("GLOSS", metrics.byFinish[0].finish)
+        assertEquals(1, metrics.byFinish[0].renderCount)
+        assertEquals("SATIN", metrics.byFinish[1].finish)
+        assertEquals(2, metrics.byFinish[1].renderCount)
+        assertEquals(0.5f, metrics.byFinish[1].filamentRenderedFrameFraction, EPSILON)
     }
 
     @Test

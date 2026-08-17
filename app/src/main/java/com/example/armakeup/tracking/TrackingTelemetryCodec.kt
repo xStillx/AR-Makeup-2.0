@@ -68,7 +68,7 @@ object TrackingTelemetryCodec {
             }
             when (eventType) {
                 EVENT_MEASUREMENT -> events += readMeasurement(data, version)
-                EVENT_RENDER -> events += readRender(data)
+                EVENT_RENDER -> events += readRender(data, version)
                 EVENT_FOOTER -> {
                     droppedEventCount = data.readLong()
                     break
@@ -142,19 +142,39 @@ object TrackingTelemetryCodec {
         data.writeBoolean(sample.lipVisible)
         data.writeFloatArray(sample.outerLipPoints)
         data.writeFloatArray(sample.innerLipPoints)
+        data.writeUTF(sample.lipstickFinish)
+        data.writeFloat(sample.materialCameraCoherence)
+        data.writeFloat(sample.materialMotionSpeed)
+        data.writeFloat(sample.materialTemporalMismatchMs)
+        data.writeFloat(sample.frameSubmissionCpuMs)
+        data.writeBoolean(sample.filamentFrameRendered)
     }
 
-    private fun readRender(data: DataInputStream): TrackingRenderSample = TrackingRenderSample(
-        renderTimestampMs = data.readLong(),
-        measurementTimestampMs = data.readLong(),
-        sensorTimestampNs = data.readLong(),
-        predictionSeconds = data.readFloat(),
-        viewportWidth = data.readInt(),
-        viewportHeight = data.readInt(),
-        lipVisible = data.readBoolean(),
-        outerLipPoints = data.readFloatArray(),
-        innerLipPoints = data.readFloatArray(),
-    )
+    private fun readRender(data: DataInputStream, version: Int): TrackingRenderSample {
+        val base = TrackingRenderSample(
+            renderTimestampMs = data.readLong(),
+            measurementTimestampMs = data.readLong(),
+            sensorTimestampNs = data.readLong(),
+            predictionSeconds = data.readFloat(),
+            viewportWidth = data.readInt(),
+            viewportHeight = data.readInt(),
+            lipVisible = data.readBoolean(),
+            outerLipPoints = data.readFloatArray(),
+            innerLipPoints = data.readFloatArray(),
+        )
+        return if (version >= VERSION_WITH_MATERIAL_TEMPORAL_STATE) {
+            base.copy(
+                lipstickFinish = data.readUTF(),
+                materialCameraCoherence = data.readFloat(),
+                materialMotionSpeed = data.readFloat(),
+                materialTemporalMismatchMs = data.readFloat(),
+                frameSubmissionCpuMs = data.readFloat(),
+                filamentFrameRendered = data.readBoolean(),
+            )
+        } else {
+            base
+        }
+    }
 
     private fun DataOutputStream.writeGeometry(geometry: TrackingGeometry) {
         writeFloat(geometry.pose.centerX)
@@ -239,9 +259,10 @@ object TrackingTelemetryCodec {
         this as? DataInputStream ?: DataInputStream(this)
 
     private const val MAGIC = 0x41525636 // "ARV6"
-    private const val VERSION = 2
+    private const val VERSION = 3
     private const val MINIMUM_SUPPORTED_VERSION = 1
     private const val VERSION_WITH_INPUT_QUALITY = 2
+    private const val VERSION_WITH_MATERIAL_TEMPORAL_STATE = 3
     private const val EVENT_MEASUREMENT = 1
     private const val EVENT_RENDER = 2
     private const val EVENT_FOOTER = 0x7f

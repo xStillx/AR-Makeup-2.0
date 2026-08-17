@@ -106,6 +106,7 @@ internal class FilamentMakeupRenderer(
     )
     private val skybox = Skybox.Builder().color(0f, 0f, 0f, 1f).build(engine)
     private val lipTessellator = LipMeshTessellator()
+    private val materialTemporalController = LipstickMaterialTemporalController()
     private val temporalLandmarkRefiner = TemporalLandmarkRefiner()
     private val cameraMesh = createCameraMesh()
     private val lipMesh = createLipMesh()
@@ -137,6 +138,8 @@ internal class FilamentMakeupRenderer(
     private var displayedMeasurementTimestampMs = NO_TIMESTAMP
     private var displayedSensorTimestampNs = NO_TIMESTAMP
     private var displayedPredictionSeconds = 0f
+    private var displayedMaterialTemporalState =
+        LipstickMaterialTemporalController.State.STATIONARY
 
     @get:StringRes
     internal val renderBackendLabelRes: Int
@@ -277,6 +280,7 @@ internal class FilamentMakeupRenderer(
             setCameraTextureTransform(instance, IDENTITY_MATRIX)
         }
         setIlluminationSampleStep(DEFAULT_ILLUMINATION_STEP, DEFAULT_ILLUMINATION_STEP)
+        setCameraDetailCoherence(FULL_CAMERA_DETAIL_COHERENCE)
         applyLipstickRenderProfile(lipstickFinish)
     }
 
@@ -301,6 +305,7 @@ internal class FilamentMakeupRenderer(
             material.setParameter("luminancePreservation", profile.luminancePreservation)
         }
         applyLipstickOptics(profile.optics)
+        applyCurrentCameraDetailCoherence()
     }
 
     private fun applyLipstickOptics(profile: LipstickOpticalProfile) {
@@ -316,6 +321,26 @@ internal class FilamentMakeupRenderer(
     private fun setIlluminationSampleStep(horizontal: Float, vertical: Float) {
         listOf(upperLipMaterialInstance, lowerLipMaterialInstance).forEach { material ->
             material.setParameter("illuminationSampleStep", horizontal, vertical)
+        }
+    }
+
+    private fun applyCurrentCameraDetailCoherence() {
+        setCameraDetailCoherence(effectiveCameraDetailCoherence())
+    }
+
+    private fun effectiveCameraDetailCoherence(): Float =
+        if (lipstickFinish == LipstickFinish.TRACKING_TEST) {
+            FULL_CAMERA_DETAIL_COHERENCE
+        } else {
+            displayedMaterialTemporalState.cameraDetailCoherence
+        }
+
+    private fun setCameraDetailCoherence(coherence: Float) {
+        listOf(upperLipMaterialInstance, lowerLipMaterialInstance).forEach { material ->
+            material.setParameter(
+                "cameraDetailCoherence",
+                coherence.coerceIn(MIN_CAMERA_DETAIL_COHERENCE, FULL_CAMERA_DETAIL_COHERENCE),
+            )
         }
     }
 
@@ -422,7 +447,6 @@ internal class FilamentMakeupRenderer(
     private fun updateLipGeometry(renderTimestampMs: Long) {
         val state = latestLandmarks ?: run {
             hideLipEntity()
-            recordHiddenLip(renderTimestampMs)
             return
         }
         if (
@@ -435,7 +459,6 @@ internal class FilamentMakeupRenderer(
         }
         if (state.landmarks.size <= MAX_REQUIRED_LANDMARK_INDEX) {
             hideLipEntity()
-            recordHiddenLip(renderTimestampMs)
             return
         }
 
@@ -484,6 +507,19 @@ internal class FilamentMakeupRenderer(
         )
         val uploaded = lipVertexUploader.upload { buffer -> writeLipVertices(buffer, tessellated) }
         if (uploaded) {
+            displayedMaterialTemporalState = materialTemporalController.update(
+                timestampMs = renderTimestampMs,
+                outerPoints = outerPoints,
+                innerPoints = innerPoints,
+                viewportWidth = viewportWidth,
+                viewportHeight = viewportHeight,
+                temporalMismatchMs = materialTemporalMismatchMs(
+                    state = state,
+                    renderTimestampMs = renderTimestampMs,
+                    predictionSeconds = predictionSeconds,
+                ),
+            )
+            applyCurrentCameraDetailCoherence()
             if (trackingTelemetrySink != null) {
                 outerPoints.copyInto(displayedOuterPoints)
                 innerPoints.copyInto(displayedInnerPoints)
@@ -493,13 +529,35 @@ internal class FilamentMakeupRenderer(
             }
             showLipEntity()
         }
-        recordDisplayedLip(renderTimestampMs)
     }
 
-    private fun recordDisplayedLip(renderTimestampMs: Long) {
+    private fun materialTemporalMismatchMs(
+        state: LandmarkState,
+        renderTimestampMs: Long,
+        predictionSeconds: Float,
+    ): Float {
+        val cameraSensorTimestampNs = cameraInput?.latestFrameSensorTimestampNs ?: NO_TIMESTAMP
+        if (cameraSensorTimestampNs != NO_TIMESTAMP && state.sensorTimestampNs != NO_TIMESTAMP) {
+            val predictedMeshSensorTimestampNs = state.sensorTimestampNs +
+                (predictionSeconds * NANOS_PER_SECOND).toLong()
+            return kotlin.math.abs(
+                cameraSensorTimestampNs - predictedMeshSensorTimestampNs,
+            ) / NANOS_PER_MILLISECOND.toFloat()
+        }
+        return kotlin.math.abs(
+            renderTimestampMs - state.landmarks.measurementTimestampMs -
+                predictionSeconds * MILLIS_PER_SECOND,
+        )
+    }
+
+    private fun recordDisplayedLip(
+        renderTimestampMs: Long,
+        frameSubmissionCpuMs: Float,
+        filamentFrameRendered: Boolean,
+    ) {
         val sink = trackingTelemetrySink ?: return
         if (!lipEntityVisible || displayedMeasurementTimestampMs == NO_TIMESTAMP) {
-            recordHiddenLip(renderTimestampMs)
+            recordHiddenLip(renderTimestampMs, frameSubmissionCpuMs, filamentFrameRendered)
             return
         }
         sink.recordRender(
@@ -513,11 +571,23 @@ internal class FilamentMakeupRenderer(
                 lipVisible = true,
                 outerLipPoints = displayedOuterPoints.copyOf(),
                 innerLipPoints = displayedInnerPoints.copyOf(),
+                lipstickFinish = lipstickFinish.name,
+                materialCameraCoherence = effectiveCameraDetailCoherence(),
+                materialMotionSpeed =
+                    displayedMaterialTemporalState.motionSpeedShortEdgesPerSecond,
+                materialTemporalMismatchMs =
+                    displayedMaterialTemporalState.temporalMismatchMs,
+                frameSubmissionCpuMs = frameSubmissionCpuMs,
+                filamentFrameRendered = filamentFrameRendered,
             ),
         )
     }
 
-    private fun recordHiddenLip(renderTimestampMs: Long) {
+    private fun recordHiddenLip(
+        renderTimestampMs: Long,
+        frameSubmissionCpuMs: Float,
+        filamentFrameRendered: Boolean,
+    ) {
         trackingTelemetrySink?.recordRender(
             TrackingRenderSample(
                 renderTimestampMs = renderTimestampMs,
@@ -529,6 +599,14 @@ internal class FilamentMakeupRenderer(
                 lipVisible = false,
                 outerLipPoints = FloatArray(0),
                 innerLipPoints = FloatArray(0),
+                lipstickFinish = lipstickFinish.name,
+                materialCameraCoherence = effectiveCameraDetailCoherence(),
+                materialMotionSpeed =
+                    displayedMaterialTemporalState.motionSpeedShortEdgesPerSecond,
+                materialTemporalMismatchMs =
+                    displayedMaterialTemporalState.temporalMismatchMs,
+                frameSubmissionCpuMs = frameSubmissionCpuMs,
+                filamentFrameRendered = filamentFrameRendered,
             ),
         )
     }
@@ -644,9 +722,21 @@ internal class FilamentMakeupRenderer(
     }
 
     private fun hideLipEntity() {
-        if (!lipEntityVisible) return
-        scene.removeEntity(lipMesh.entity)
-        lipEntityVisible = false
+        if (
+            !lipEntityVisible &&
+            displayedMeasurementTimestampMs == NO_TIMESTAMP &&
+            displayedMaterialTemporalState.motionSpeedShortEdgesPerSecond == 0f &&
+            displayedMaterialTemporalState.cameraDetailCoherence == FULL_CAMERA_DETAIL_COHERENCE
+        ) {
+            return
+        }
+        if (lipEntityVisible) {
+            scene.removeEntity(lipMesh.entity)
+            lipEntityVisible = false
+        }
+        materialTemporalController.reset()
+        displayedMaterialTemporalState = LipstickMaterialTemporalController.State.STATIONARY
+        applyCurrentCameraDetailCoherence()
         displayedMeasurementTimestampMs = NO_TIMESTAMP
         displayedSensorTimestampNs = NO_TIMESTAMP
         displayedPredictionSeconds = 0f
@@ -836,13 +926,29 @@ internal class FilamentMakeupRenderer(
         override fun onFrame(frameTimeNanos: Long) {
             if (!resumed || destroyRequested || destroyed || !uiHelper.isReadyToRender) return
             try {
+                val frameCpuStartedNs = SystemClock.elapsedRealtimeNanos()
+                val renderTimestampMs = SystemClock.uptimeMillis()
                 cameraInput?.pushLatestFrame()
-                updateLipGeometry(SystemClock.uptimeMillis())
-                val currentSwapChain = swapChain ?: return
-                if (filamentRenderer.beginFrame(currentSwapChain, frameTimeNanos)) {
+                updateLipGeometry(renderTimestampMs)
+                val currentSwapChain = swapChain
+                val filamentFrameRendered = if (
+                    currentSwapChain != null &&
+                    filamentRenderer.beginFrame(currentSwapChain, frameTimeNanos)
+                ) {
                     filamentRenderer.render(view)
                     filamentRenderer.endFrame()
+                    true
+                } else {
+                    false
                 }
+                val frameSubmissionCpuMs = (
+                    SystemClock.elapsedRealtimeNanos() - frameCpuStartedNs
+                ) / NANOS_PER_MILLISECOND.toFloat()
+                recordDisplayedLip(
+                    renderTimestampMs = renderTimestampMs,
+                    frameSubmissionCpuMs = frameSubmissionCpuMs,
+                    filamentFrameRendered = filamentFrameRendered,
+                )
             } catch (error: RuntimeException) {
                 reportFatalError(error.message ?: "Filament render failure")
             }
@@ -901,6 +1007,7 @@ internal class FilamentMakeupRenderer(
         val surface: Surface
         val requiresHorizontalUvCompensation: Boolean
         val requiresVerticalUvCompensation: Boolean
+        val latestFrameSensorTimestampNs: Long
         fun pushLatestFrame()
         fun close()
     }
@@ -921,6 +1028,7 @@ internal class FilamentMakeupRenderer(
         override val surface: Surface = Surface(surfaceTexture)
         override val requiresHorizontalUvCompensation: Boolean = false
         override val requiresVerticalUvCompensation: Boolean = false
+        override val latestFrameSensorTimestampNs: Long = NO_TIMESTAMP
 
         init {
             cameraTexture.setExternalStream(engine, stream)
@@ -952,6 +1060,8 @@ internal class FilamentMakeupRenderer(
         }
         override val requiresHorizontalUvCompensation: Boolean = true
         override val requiresVerticalUvCompensation: Boolean = true
+        override var latestFrameSensorTimestampNs: Long = NO_TIMESTAMP
+            private set
         private val firstFrameLogged = AtomicBoolean(false)
 
         init {
@@ -968,6 +1078,7 @@ internal class FilamentMakeupRenderer(
             )
             if (frame == null) return
             try {
+                latestFrameSensorTimestampNs = frame.sensorTimestampNs
                 val temporalTracking = frame.temporalTracking
                 if (temporalTracking != null) {
                     temporalLandmarkRefiner.offer(
@@ -1027,6 +1138,8 @@ internal class FilamentMakeupRenderer(
             activeBackend == MakeupRenderBackend.OPENGL
         override val requiresVerticalUvCompensation: Boolean =
             activeBackend == MakeupRenderBackend.OPENGL
+        override var latestFrameSensorTimestampNs: Long = NO_TIMESTAMP
+            private set
 
         init {
             cameraTexture.setExternalStream(engine, stream)
@@ -1043,6 +1156,7 @@ internal class FilamentMakeupRenderer(
                 image.close()
                 return
             }
+            latestFrameSensorTimestampNs = image.timestamp
             stream.setAcquiredImage(hardwareBuffer, mainHandler) {
                 image.close()
             }
@@ -1114,6 +1228,10 @@ internal class FilamentMakeupRenderer(
         private const val FULL_ROTATION = 360
         private const val NO_TIMESTAMP = -1L
         private const val NANOS_PER_MILLISECOND = 1_000_000L
+        private const val NANOS_PER_SECOND = 1_000_000_000f
+        private const val MILLIS_PER_SECOND = 1_000f
+        private const val MIN_CAMERA_DETAIL_COHERENCE = 0f
+        private const val FULL_CAMERA_DETAIL_COHERENCE = 1f
         private const val ROI_WIDTH_SCALE = 1.35f
         private const val ROI_HEIGHT_SCALE = 2.2f
         private const val ROI_ASPECT_HEIGHT = 0.75f
