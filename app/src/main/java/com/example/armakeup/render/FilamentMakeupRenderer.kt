@@ -142,6 +142,7 @@ internal class FilamentMakeupRenderer(
     private var latestCameraTransform: VulkanCameraTransform? = null
     private var cameraProjectionCalibration: CameraProjectionCalibration? = null
     private var gyroscopeCorrectionEnabled = true
+    private var displayQueueProtectionEnabled = readDisplayQueueProtectionState()
     private var lipEntityVisible = false
     private var resumed = false
     private var destroyRequested = false
@@ -178,7 +179,8 @@ internal class FilamentMakeupRenderer(
         Log.i(RENDER_LOG_TAG, engineSelection.diagnostic)
         Log.i(
             RENDER_LOG_TAG,
-            "temporalFlowVisible=${temporalLandmarkRefiner.visibleApplicationEnabled}",
+            "temporalFlowVisible=${temporalLandmarkRefiner.visibleApplicationEnabled} " +
+                "displayQueueProtection=$displayQueueProtectionEnabled",
         )
         Log.i(NATIVE_VULKAN_LOG_TAG, nativeVulkanProbe.diagnostic)
         configureMaterialInstances()
@@ -281,6 +283,42 @@ internal class FilamentMakeupRenderer(
         }
         Log.i(GYROSCOPE_LOG_TAG, "correctionEnabled=$enabled")
     }
+
+    /**
+     * Enables Filament's own actual-display feedback guard for a controlled debug A/B.
+     *
+     * The native renderer compares completed frame history with the Choreographer target and
+     * lets [Renderer.beginFrame] skip a submission when the CPU/display queue has grown by at
+     * least one additional refresh interval. This does not change tracker prediction or makeup
+     * geometry; it only allows the compositor queue to drain.
+     */
+    fun setDisplayQueueProtectionEnabled(enabled: Boolean) {
+        ensureMainThread()
+        if (destroyRequested || destroyed) return
+        val available = runCatching {
+            engine.hasFeatureFlag(DISPLAY_QUEUE_PROTECTION_FEATURE)
+        }.getOrDefault(false)
+        val accepted = available && runCatching {
+            engine.setFeatureFlag(DISPLAY_QUEUE_PROTECTION_FEATURE, enabled)
+        }.getOrDefault(false)
+        displayQueueProtectionEnabled = if (available) {
+            runCatching {
+                engine.getFeatureFlag(DISPLAY_QUEUE_PROTECTION_FEATURE)
+            }.getOrDefault(false)
+        } else {
+            false
+        }
+        Log.i(
+            RENDER_LOG_TAG,
+            "displayQueueProtection requested=$enabled available=$available " +
+                "accepted=$accepted active=$displayQueueProtectionEnabled",
+        )
+    }
+
+    private fun readDisplayQueueProtectionState(): Boolean = runCatching {
+        engine.hasFeatureFlag(DISPLAY_QUEUE_PROTECTION_FEATURE) &&
+            engine.getFeatureFlag(DISPLAY_QUEUE_PROTECTION_FEATURE)
+    }.getOrDefault(false)
 
     fun clear() {
         ensureMainThread()
@@ -688,6 +726,7 @@ internal class FilamentMakeupRenderer(
                 gyroscopeRollRadians = displayedGyroscopeCorrection.rollRadians,
                 cameraMotionPredictionSeconds = displayedCameraMotionPredictionSeconds,
                 globalPredictionCoverage = displayedGlobalPredictionCoverage,
+                displayQueueProtectionEnabled = displayQueueProtectionEnabled,
                 renderTiming = renderTiming,
             ),
         )
@@ -719,6 +758,7 @@ internal class FilamentMakeupRenderer(
                 frameSubmissionCpuMs = frameSubmissionCpuMs,
                 filamentFrameRendered = filamentFrameRendered,
                 gyroscopeApplied = false,
+                displayQueueProtectionEnabled = displayQueueProtectionEnabled,
                 renderTiming = renderTiming.copy(
                     geometryUploadAcceptedTimestampNs = NO_TIMESTAMP,
                 ),
@@ -1425,6 +1465,8 @@ internal class FilamentMakeupRenderer(
         private const val NATIVE_VULKAN_LOG_TAG = "ARMakeupVulkan"
         private const val GYROSCOPE_LOG_TAG = "ARMakeupGyroV6"
         private const val FRAME_TRACE_PREFIX = "ARMK_FRAME:"
+        private const val DISPLAY_QUEUE_PROTECTION_FEATURE =
+            "engine.skip_frame_when_cpu_ahead_of_display"
         private val IDENTITY_MATRIX = floatArrayOf(
             1f, 0f, 0f, 0f,
             0f, 1f, 0f, 0f,

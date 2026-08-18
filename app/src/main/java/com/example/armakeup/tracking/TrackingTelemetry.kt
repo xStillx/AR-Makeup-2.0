@@ -182,6 +182,8 @@ data class TrackingRenderSample(
     val gyroscopeRollRadians: Float = 0f,
     val cameraMotionPredictionSeconds: Float = Float.NaN,
     val globalPredictionCoverage: Float = Float.NaN,
+    /** True when Filament may skip a frame to drain an overfilled display queue. */
+    val displayQueueProtectionEnabled: Boolean = false,
     val renderTiming: TrackingRenderTiming = TrackingRenderTiming.UNKNOWN,
 ) : TrackingTelemetryEvent
 

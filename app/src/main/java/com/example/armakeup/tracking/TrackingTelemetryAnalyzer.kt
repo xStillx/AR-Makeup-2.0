@@ -71,6 +71,7 @@ data class TrackingRenderPerformanceMetrics(
     val medianFrameSubmissionCpuMs: Float,
     val p95FrameSubmissionCpuMs: Float,
     val filamentRenderedFrameFraction: Float,
+    val displayQueueProtectionEnabledFrameFraction: Float,
     val medianMaterialCameraCoherence: Float,
     val p05MaterialCameraCoherence: Float,
     val medianMaterialMotionSpeed: Float,
@@ -245,6 +246,10 @@ data class TrackingTelemetryMetrics(
             .append(renderPerformance.p95FrameSubmissionCpuMs.formatMetric())
         append(" filamentRenderedFraction=")
             .append(renderPerformance.filamentRenderedFrameFraction.formatMetric())
+        append(" displayQueueProtectionFraction=")
+            .append(
+                renderPerformance.displayQueueProtectionEnabledFrameFraction.formatMetric(),
+            )
         append(" materialCoherenceMedian=")
             .append(renderPerformance.medianMaterialCameraCoherence.formatMetric())
         append(" materialCoherenceP05=")
@@ -647,6 +652,11 @@ object TrackingTelemetryAnalyzer {
             medianFrameSubmissionCpuMs = percentile(cpuTimes, 0.5f),
             p95FrameSubmissionCpuMs = percentile(cpuTimes, 0.95f),
             filamentRenderedFrameFraction = renderedFraction,
+            displayQueueProtectionEnabledFrameFraction = if (renders.isEmpty()) {
+                Float.NaN
+            } else {
+                renders.count { it.displayQueueProtectionEnabled }.toFloat() / renders.size
+            },
             medianMaterialCameraCoherence = percentile(coherence, 0.5f),
             p05MaterialCameraCoherence = percentile(coherence, 0.05f),
             medianMaterialMotionSpeed = percentile(motionSpeeds, 0.5f),

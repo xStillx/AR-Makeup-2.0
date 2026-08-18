@@ -69,6 +69,10 @@ class FilamentMakeupView @JvmOverloads constructor(
         compositor?.setGyroscopeCorrectionEnabled(enabled)
     }
 
+    fun setDisplayQueueProtectionEnabled(enabled: Boolean) {
+        compositor?.setDisplayQueueProtectionEnabled(enabled)
+    }
+
     fun setResult(
         landmarks: LandmarkRenderFrame,
         sourceWidth: Int,

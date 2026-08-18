@@ -80,6 +80,14 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
             !intent.getBooleanExtra(EXTRA_DISABLE_GYROSCOPE_CORRECTION, false),
         )
         val debuggable = applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
+        if (
+            debuggable &&
+            intent.hasExtra(EXTRA_ENABLE_DISPLAY_QUEUE_PROTECTION)
+        ) {
+            binding.makeupRenderer.setDisplayQueueProtectionEnabled(
+                intent.getBooleanExtra(EXTRA_ENABLE_DISPLAY_QUEUE_PROTECTION, false),
+            )
+        }
         binding.finishTrackingTest.visibility = if (debuggable) View.VISIBLE else View.GONE
         trackingTelemetryRecorder = TrackingTelemetryRecorder.createIfRequested(
             context = applicationContext,
@@ -470,6 +478,8 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
     companion object {
         const val EXTRA_DISABLE_GYROSCOPE_CORRECTION =
             "com.example.armakeup.extra.DISABLE_GYROSCOPE_CORRECTION"
+        const val EXTRA_ENABLE_DISPLAY_QUEUE_PROTECTION =
+            "com.example.armakeup.extra.ENABLE_DISPLAY_QUEUE_PROTECTION"
         private const val MIN_CAMERA_FPS = 30
         private const val MAX_CAMERA_FPS = 60
         private const val PERFORMANCE_LOG_TAG = "ARMakeupPerf"

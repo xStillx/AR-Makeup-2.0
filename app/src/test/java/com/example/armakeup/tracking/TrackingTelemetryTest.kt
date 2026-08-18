@@ -72,6 +72,7 @@ class TrackingTelemetryTest {
             gyroscopeRollRadians = -0.03f,
             cameraMotionPredictionSeconds = 0.011f,
             globalPredictionCoverage = 0.25f,
+            displayQueueProtectionEnabled = true,
             renderTiming = TrackingRenderTiming(
                 vsyncTimestampNs = 1_100_000_000L,
                 renderStartTimestampNs = 1_102_000_000L,
@@ -144,6 +145,7 @@ class TrackingTelemetryTest {
             decodedRender.globalPredictionCoverage,
             0f,
         )
+        assertTrue(decodedRender.displayQueueProtectionEnabled)
         assertEquals(render.renderTiming, decodedRender.renderTiming)
     }
 
@@ -404,6 +406,41 @@ class TrackingTelemetryTest {
     }
 
     @Test
+    fun codecReadsLegacyV8RenderWithDisplayQueueProtectionDisabled() {
+        val bytes = ByteArrayOutputStream().also { output ->
+            DataOutputStream(output).apply {
+                writeInt(0x41525636)
+                writeInt(8)
+                writeUTF("legacy_v8_render")
+                writeLong(42L)
+                writeByte(2)
+                writeLong(1_100L)
+                writeLong(1_000L)
+                writeLong(999_000_000L)
+                writeFloat(0.04f)
+                writeInt(1080)
+                writeInt(2400)
+                writeBoolean(true)
+                repeat(2) { writeInt(0) }
+                writeUTF("SATIN")
+                repeat(4) { writeFloat(1f) }
+                writeBoolean(true)
+                writeBoolean(true)
+                repeat(7) { writeFloat(0.01f) }
+                repeat(2) { writeFloat(0.02f) }
+                repeat(10) { writeLong(1_000_000_000L + it * 1_000_000L) }
+                writeByte(0x7f)
+                writeLong(0L)
+            }
+        }.toByteArray()
+
+        val render = TrackingTelemetryCodec.read(ByteArrayInputStream(bytes)).renders.single()
+
+        assertFalse(render.displayQueueProtectionEnabled)
+        assertEquals(1_007_000_000L, render.renderTiming.frameTimelineVsyncId)
+    }
+
+    @Test
     fun analyzerReportsInputPoseAndThermalQuality() {
         val samples = (0..2).map { index ->
             poseOnlyMeasurement(1_000L + index * 33L, index * 0.01f, index * 0.01f).copy(
@@ -533,6 +570,7 @@ class TrackingTelemetryTest {
                 materialTemporalMismatchMs = 10f,
                 frameSubmissionCpuMs = 2f,
                 filamentFrameRendered = true,
+                displayQueueProtectionEnabled = true,
                 cameraMotionPredictionSeconds = 0f,
                 globalPredictionCoverage = 0f,
             ),
@@ -557,6 +595,7 @@ class TrackingTelemetryTest {
                 materialTemporalMismatchMs = 50f,
                 frameSubmissionCpuMs = 4f,
                 filamentFrameRendered = true,
+                displayQueueProtectionEnabled = true,
                 gyroscopeApplied = true,
                 gyroscopeIntervalMs = 50f,
                 gyroscopeRotationY = 0.02f,
@@ -577,6 +616,11 @@ class TrackingTelemetryTest {
         assertEquals(listOf("GLOSS", "SATIN"), metrics.lipstickFinishes)
         assertEquals(4f, metrics.medianFrameSubmissionCpuMs, EPSILON)
         assertEquals(2f / 3f, metrics.filamentRenderedFrameFraction, EPSILON)
+        assertEquals(
+            2f / 3f,
+            metrics.displayQueueProtectionEnabledFrameFraction,
+            EPSILON,
+        )
         assertEquals(0.4f, metrics.medianMaterialCameraCoherence, EPSILON)
         assertEquals(40f, metrics.p95MaterialTemporalMismatchMs, EPSILON)
         assertEquals(2f / 3f, metrics.gyroscopeAppliedFrameFraction, EPSILON)

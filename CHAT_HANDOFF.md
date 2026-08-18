@@ -13,10 +13,10 @@ Native Android-приложение виртуальной примерки ма
 ## Репозиторий и состояние
 
 - Путь: `C:\Users\User\AndroidStudioProjects\ARMakeup`.
-- Ветка: `master`; актуальный implementation checkpoint `7bd498f [FF1] Correlate render frames with display timeline`, remote `origin/master` пока остаётся на `a1931cf`. Точки отката: `cc82370` / `tracking-v6.2-stable-2026-08-17`, `d4636ac` / `tracking-v6.2-fast-motion-2026-08-17`, `ab8796a` / `material-temporal-v1-candidate-2026-08-17`, `dd095f7` / `tracking-v6.3-gyro-experimental-2026-08-17`. FF1/FF2 commits: `0554924`, `d083af2`, `19a2280`, `3419063`, `7bd498f`. Видимая geometry/material/predictor в `7bd498f` не изменены.
+- Ветка: `master`; baseline implementation checkpoint `7bd498f [FF1] Correlate render frames with display timeline`, актуальный docs checkpoint и `origin/master` — `ee7f3cb`. Поверх него подготовлен отдельный FF1 display-queue candidate; до device A/B он не считается принятым. Точки отката: `cc82370` / `tracking-v6.2-stable-2026-08-17`, `d4636ac` / `tracking-v6.2-fast-motion-2026-08-17`, `ab8796a` / `material-temporal-v1-candidate-2026-08-17`, `dd095f7` / `tracking-v6.3-gyro-experimental-2026-08-17`. FF1/FF2 commits: `0554924`, `d083af2`, `19a2280`, `3419063`, `7bd498f`, docs `ee7f3cb`. Видимая geometry/material/predictor в candidate не изменены.
 - Основные коммиты: `cc82370 [V6.2]`, `cd1a560 [UpdateContext]`, `8d48b46 [V6]`, `4f8039b [V5]`, `3d3572e [V4]`, `395d3f3 [V3]`.
 - Kotlin, XML/View UI, один модуль `:app`; `minSdk 24`, `targetSdk/compileSdk 37`.
-- Последняя полная проверка: 129 unit-тестов, 0 failures/errors, lint и debug APK успешно; native код собирается для `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`.
+- Последняя полная проверка: 130 unit-тестов, 0 failures/errors, lint и debug APK успешно; native код собирается для `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`.
 
 ## Текущий pipeline
 
@@ -81,8 +81,10 @@ Device `ff1_frame_timeline_v8b`: `858/1801`, dropped `0`, timeline coverage `1.0
 
 Actual Filament BLAST-layer измерен `dumpsys SurfaceFlinger --latency`, чьи AOSP columns — desired/actual/ready. Совместный `ff1_actual_present_v8b`: `.arv6` `575/1201`, dropped `0`, thermal `1`, battery `36.2 °C`; sensor→vsync `108.56/123.25 ms`, render CPU `3.17/6.35 ms`, vsync→expected `33.33 ms`, submit margin p05/median `9.01/12.35 ms`. Sidecar: `1464` frames, desired→actual `44.18/45.51 ms`, ready→actual `40.23/41.75 ms`, actual interval `16.688/16.799 ms`; только `2/1463` intervals >25 ms. Значит renderer smooth и CPU on-time, но display queue добавляет около 44 ms; грубый sensor→actual median около `186 ms`. Артефакты находятся в `app/build/tracking-telemetry`.
 
-1. Снять отдельные cold stationary/head-motion/phone-motion `.arv6` v8 + SurfaceFlinger sidecar A/B; mixed runs не включать в acceptance.
-2. Проверить low-latency scheduling/presentation candidate против `7bd498f`: уменьшить actual desired→present и sensor→display без роста missed intervals/jitter/CPU-GPU cost. До этого predictor не расширять.
+Следующий FF1 candidate использует штатный Filament 1.74 feature flag `engine.skip_frame_when_cpu_ahead_of_display`, который может пропустить render submit, если CPU накопил лишний кадр относительно фактического дисплея. Debug A/B явно передаёт intent-extra `com.example.armakeup.extra.ENABLE_DISPLAY_QUEUE_PROTECTION=false/true`; без extra и в release path не меняется. `.arv6` v9 обратно читает v1–v8 и пишет `displayQueueProtectionEnabled`, analyzer показывает fraction. Baseline/candidate валидны только при runtime log `active=false/true` и fraction `0.0/1.0`. Если runtime setter не принят, перенести этот же flag в `Engine.Builder`. Device ещё не подключён, поэтому A/B не выполнен. Сравнить desired→actual, ready→actual, sensor→display, p95 actual interval, intervals `>25 ms`, stationary jitter, CPU/GPU и `filamentFrameRendered` fraction. Если очередь не сокращается без регрессий, следующий proof — native Vulkan visible swapchain/present, а не дальнейшее расширение predictor.
+
+1. Подключить SM-G990B, установить exact candidate APK и снять отдельные cold stationary/head-motion/phone-motion baseline/candidate `.arv6` v9 + SurfaceFlinger sidecar A/B; mixed runs не включать в acceptance.
+2. Подтвердить `active=true`/fraction `1.0` и принять candidate только при снижении actual desired→present/ready→present/sensor→display без роста missed intervals, jitter и CPU/GPU cost. До этого predictor не расширять.
 3. Записать face-visible yaw/pitch, stop/dropout/weak-light/thermal и сравнить baseline-centered matrix continuity с 22-anchor/gyro по sensor/actual-display timestamps.
 4. После FF1/FF2 перейти к FF3 model-independent `FaceObservation` / `FullFaceRenderState`.
 5. V6.3 strong phone-motion visual acceptance выполнить отдельно; matrix не подключать в renderer до численного и visual acceptance.

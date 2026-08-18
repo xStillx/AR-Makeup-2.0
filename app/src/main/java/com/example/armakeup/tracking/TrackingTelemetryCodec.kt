@@ -169,6 +169,7 @@ object TrackingTelemetryCodec {
         data.writeFloat(sample.cameraMotionPredictionSeconds)
         data.writeFloat(sample.globalPredictionCoverage)
         data.writeRenderTiming(sample.renderTiming)
+        data.writeBoolean(sample.displayQueueProtectionEnabled)
     }
 
     private fun readRender(data: DataInputStream, version: Int): TrackingRenderSample {
@@ -217,10 +218,15 @@ object TrackingTelemetryCodec {
         } else {
             withGyroscope
         }
-        return if (version >= VERSION_WITH_RENDER_TIMELINE) {
+        val withRenderTimeline = if (version >= VERSION_WITH_RENDER_TIMELINE) {
             withPredictionCoverage.copy(renderTiming = data.readRenderTiming(version))
         } else {
             withPredictionCoverage
+        }
+        return if (version >= VERSION_WITH_DISPLAY_QUEUE_PROTECTION) {
+            withRenderTimeline.copy(displayQueueProtectionEnabled = data.readBoolean())
+        } else {
+            withRenderTimeline
         }
     }
 
@@ -365,7 +371,7 @@ object TrackingTelemetryCodec {
         this as? DataInputStream ?: DataInputStream(this)
 
     private const val MAGIC = 0x41525636 // "ARV6"
-    private const val VERSION = 8
+    private const val VERSION = 9
     private const val MINIMUM_SUPPORTED_VERSION = 1
     private const val VERSION_WITH_INPUT_QUALITY = 2
     private const val VERSION_WITH_MATERIAL_TEMPORAL_STATE = 3
@@ -374,6 +380,7 @@ object TrackingTelemetryCodec {
     private const val VERSION_WITH_PIPELINE_TIMING_AND_3D_TRANSFORM = 6
     private const val VERSION_WITH_RENDER_TIMELINE = 7
     private const val VERSION_WITH_FRAME_TIMELINE_CORRELATION = 8
+    private const val VERSION_WITH_DISPLAY_QUEUE_PROTECTION = 9
     private const val EVENT_MEASUREMENT = 1
     private const val EVENT_RENDER = 2
     private const val EVENT_FOOTER = 0x7f
