@@ -13,16 +13,16 @@ Native Android-приложение виртуальной примерки ма
 ## Репозиторий и состояние
 
 - Путь: `C:\Users\User\AndroidStudioProjects\ARMakeup`.
-- Ветка: `master`; Filament baseline checkpoint `7bd498f`, remote `origin/master` — `ee7f3cb`; актуальный локальный FF1 device-validation checkpoint — `6be330f`. Точки отката: `cc82370` / `tracking-v6.2-stable-2026-08-17`, `d4636ac` / `tracking-v6.2-fast-motion-2026-08-17`, `ab8796a` / `material-temporal-v1-candidate-2026-08-17`, `dd095f7` / `tracking-v6.3-gyro-experimental-2026-08-17`. FF1/FF2 commits: `0554924`, `d083af2`, `19a2280`, `3419063`, `7bd498f`, candidate `1e02424`, device queue/hints validation `6be330f`. Оба scheduling candidate отклонены; default Filament path и видимая geometry/material/predictor не изменены.
+- Ветка: `master`; remote `origin/master` — `c1566d7`; актуальный native-visible FF1 checkpoint — `9bc3efb`. Точки отката: `cc82370` / `tracking-v6.2-stable-2026-08-17`, `d4636ac` / `tracking-v6.2-fast-motion-2026-08-17`, `ab8796a` / `material-temporal-v1-candidate-2026-08-17`, `dd095f7` / `tracking-v6.3-gyro-experimental-2026-08-17`. FF1/FF2 commits: `0554924`, `d083af2`, `19a2280`, `3419063`, `7bd498f`, candidate `1e02424`, device queue/hints validation `6be330f`, native visible proof `9bc3efb`. Оба Filament scheduling candidate отклонены; default остаётся Filament, а native proof включается только debug-extra.
 - Основные коммиты: `cc82370 [V6.2]`, `cd1a560 [UpdateContext]`, `8d48b46 [V6]`, `4f8039b [V5]`, `3d3572e [V4]`, `395d3f3 [V3]`.
 - Kotlin, XML/View UI, один модуль `:app`; `minSdk 24`, `targetSdk/compileSdk 37`.
-- Последняя полная проверка: 131 unit-тест, 0 failures/errors, lint и debug APK успешно; native код собирается для `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`.
+- Последняя полная проверка: 133 unit-теста, 0 failures/errors, lint и debug APK успешно; native код собирается для `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`.
 
 ## Текущий pipeline
 
 - CameraX 1.6.1: Preview и `ImageAnalysis` с общим ViewPort, latest-only, analysis 640×480.
 - MediaPipe Face Landmarker 1.0.0: 478 landmarks, `LIVE_STREAM`, GPU delegate с CPU fallback. Он остаётся текущим заменяемым anchor-backend; следующий архитектурный слой должен скрыть его за `FaceTrackingBackend`/`FaceObservation`, чтобы renderer и temporal fusion не зависели от MediaPipe-specific типов.
-- Видимый compositor: Filament 1.74.0 / OpenGL bridge. Camera texture и lip mesh находятся в одной GPU scene.
+- Видимый default compositor: Filament 1.74.0 / OpenGL bridge. Camera texture и lip mesh находятся в одной GPU scene. Отдельный debug-extra теперь взаимоисключающе отдаёт тот же единственный `SurfaceView` native Vulkan visible proof; Filament в этом процессе не создаётся.
 - Native Vulkan V3 напрямую импортирует camera `AHardwareBuffer`, использует YCbCr sampling и fences без CPU-копии. V4 luma pyramid + pyramidal LK optical flow + similarity fit остаётся невидимым и в V6.2 вообще не запускается вне активной telemetry-записи.
 - Ориентация, front-camera mirror и lip/camera alignment на SM-G990B исправлены и покрыты тестами. Не менять display/camera transforms без отдельной regression-проверки.
 
@@ -83,10 +83,22 @@ Actual Filament BLAST-layer измерен `dumpsys SurfaceFlinger --latency`, �
 
 FF1 Filament scheduling A/B закрыты численно. Queue-protection flag оказался constant и уже включён по умолчанию; после переноса override в `Engine.Builder` v9 off/on дал desired→actual `44.05/44.22 ms`, ready→actual `39.80/40.00 ms`, `filamentRenderedFraction=1.0`, thermal `0`, dropped `0` — candidate отклонён. `.arv6` v10 отдельно записывает `filamentPresentationHintsEnabled`: hints on/off дал desired→actual `43.88/59.27 ms`, ready→actual `39.77/49.64 ms`, thermal `1`, dropped `0`; отключение ухудшает очередь, поэтому default queue protection on + hints on сохраняется. Predictor, geometry, camera transforms и shaders не менялись. Артефакты лежат в `app/build/tracking-telemetry`.
 
-1. Сохранить v10/device-results checkpoint; актуальный gate — 131 test, lint/APK/четыре ABI.
-2. Следующий FF1 vertical slice — собственный native Vulkan visible swapchain/present с actual-present feedback и A/B против неизменённого Filament baseline. Не расширять predictor и не переносить full-face renderer в том же изменении.
-3. Записать face-visible yaw/pitch, stop/dropout/weak-light/thermal и сравнить baseline-centered matrix continuity с 22-anchor/gyro по sensor/actual-display timestamps.
-4. После FF1/FF2 перейти к FF3 model-independent `FaceObservation` / `FullFaceRenderState`.
+Первый native Vulkan visible proof реализован по `docs/adr/001-native-vulkan-visible-proof.md`. Debug запуск:
+
+```powershell
+adb shell am force-stop com.example.armakeup
+adb shell am start -n com.example.armakeup/.MainActivity `
+  --ez com.example.armakeup.extra.ENABLE_NATIVE_VULKAN_VISIBLE true
+```
+
+Режим выбирается до CameraX binding, исключительно владеет full-screen `SurfaceView`, переиспользует существующие native `AImageReader`/AHB/YCbCr/fences/transform и рисует camera + текущую `LipMeshTessellator` geometry bright `TRACKING_TEST`. `VK_GOOGLE_display_timing` поддержан на SM-G990B и связывает actual present с camera sensor timestamp. Обычный запуск без extra остаётся прежним Filament baseline; predictor, MediaPipe, transforms, product materials, зависимости и модели не менялись.
+
+Device proof: visible swapchain `1080×2340`, 5 images, camera `1440×1080`, orientation/mirror/crop/lip alignment правильные; более 1020 camera frames, `cameraDropped=0`, lifecycle Home/resume/Back без crash. Direct native sensor→actual rolling p50/p95 около `127.1/135.2 ms`. SurfaceFlinger 20 s: native `583` frames, desired→actual `30.78/31.37 ms`, interval `33.38/33.60 ms`, `578/582 >25 ms`; same-APK Filament `1186` frames, desired→actual `29.10/46.04 ms`, interval `16.689/16.788 ms`, `1/1185 >25 ms`. Native actual feedback и p95 стабильны, но present выполняется только при новом 30-FPS camera buffer, поэтому production cutover отклонён. Default остаётся Filament.
+
+1. Сохранить native-visible 30-Hz proof checkpoint; актуальный gate после двух новых timing tests — 133 test, lint/APK/четыре ABI.
+2. Следующий FF1 slice: native runtime удерживает ровно один последний camera image и независимо представляет camera + актуальную predicted geometry на каждом 60-Hz vsync; latest-only acquisition, foreign ownership и fences не ослаблять.
+3. Затем controlled telemetry-on Filament/Vulkan A/B по direct sensor→actual, interval/jank, camera drops, CPU/GPU/thermal и visual head/phone motion. Не расширять predictor и не переносить full-face/material path одновременно.
+4. Записать face-visible yaw/pitch, stop/dropout/weak-light/thermal; после FF1/FF2 перейти к FF3 model-independent `FaceObservation` / `FullFaceRenderState`.
 5. V6.3 strong phone-motion visual acceptance выполнить отдельно; matrix не подключать в renderer до численного и visual acceptance.
 
 Acceptance V6: нет заметного jitter на неподвижном лице, отставания при движении и скачка после остановки; нет regressions orientation/mirror/lip alignment; pipeline остаётся latest-only и укладывается в GPU compositor budget 6–8 ms на целевом устройстве.
@@ -120,8 +132,10 @@ V5 реализует reconstructed lip normals, camera-conditioned lighting и 
 - `app/src/main/java/com/example/armakeup/tracking/FaceLandmarkerTracker.kt` — MediaPipe и camera timestamp path.
 - `app/src/main/java/com/example/armakeup/tracking/TrackingTelemetry*.kt` — V6 recorder/codec/analyzer и global/local decomposition.
 - `app/src/main/java/com/example/armakeup/render/FilamentMakeupRenderer.kt` — видимая lip mesh, camera bridge и flow integration.
+- `app/src/main/java/com/example/armakeup/render/NativeVulkanVisibleRenderer.kt` и `app/src/main/cpp/vulkan/VulkanDiagnosticRuntime.cpp` — debug exclusive-surface Vulkan camera/lip proof и actual-present feedback.
+- `docs/adr/001-native-vulkan-visible-proof.md` — ownership/rollback/timing решение текущего FF1 slice.
 - `app/src/main/java/com/example/armakeup/makeup/LipstickMaterialProfile.kt` — продуктовые render-профили и временный `TRACKING_TEST`.
 - `app/src/main/java/com/example/armakeup/render/FilamentMaterialFactory.kt` — lipstick shader, включая диагностические coverage/luminance uniforms.
 - `app/src/test/java/com/example/armakeup/tracking/` — tracking regression tests.
 
-Начни новый чат с изучения `AGENTS.md`, `PROJECT_CONTEXT.md`, `FULL_FACE_ROADMAP.md` и перечисленных tracking/render-файлов. Точки отката: baseline `cc82370`, fast-motion `d4636ac`, material candidate `ab8796a`, V6.3 experimental `dd095f7`; FF1/FF2 checkpoints `0554924`, `19a2280`, `3419063`, `7bd498f`. Следующий шаг — controlled low-latency scheduling/presentation A/B и оставшиеся FF1/FF2 runs; matrix не подключать в renderer и predictor не расширять до acceptance.
+Начни новый чат с изучения `AGENTS.md`, `PROJECT_CONTEXT.md`, `FULL_FACE_ROADMAP.md`, ADR 001 и перечисленных tracking/render-файлов. Точки отката: baseline `cc82370`, fast-motion `d4636ac`, material candidate `ab8796a`, V6.3 experimental `dd095f7`; FF1/FF2 checkpoints `0554924`, `19a2280`, `3419063`, `7bd498f`, Filament validation `6be330f`, native visible proof `9bc3efb`. Следующий шаг — retained latest camera image + независимый native 60-Hz present, затем controlled A/B; matrix не подключать в renderer и predictor не расширять до acceptance.

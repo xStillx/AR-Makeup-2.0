@@ -84,6 +84,30 @@ Device result на SM-G990B: flag является constant после Engine cr
 `filamentRenderedFraction=1.0/1.0`. Guard не активировал skip и не уменьшил очередь; candidate
 отклонён, default остаётся on.
 
+## FF1 native Vulkan visible proof
+
+Debug-only режим выбирает native Vulkan как единственного владельца существующего `SurfaceView`;
+обычный запуск без extra остаётся Filament baseline:
+
+```powershell
+adb shell am force-stop com.example.armakeup
+adb shell am start -n com.example.armakeup/.MainActivity `
+  --ez com.example.armakeup.extra.ENABLE_NATIVE_VULKAN_VISIBLE true
+```
+
+На SM-G990B `VK_GOOGLE_display_timing` доступен и даёт in-process actual-present для каждого
+native `presentID`, связанного с camera sensor timestamp. SurfaceFlinger sidecar всё равно запускать
+параллельно: он проверяет BLAST cadence независимо от Vulkan extension.
+
+Первый 20-секундный proof `ff1-native-visible-final.csv`: `583` frames, desired→actual
+`30.78/31.37 ms`, ready→actual `29.73/30.56 ms`, actual interval `33.38/33.60 ms` median/p95.
+Same-APK Filament control `ff1-filament-baseline-same-apk.csv`: `1186` frames,
+desired→actual `29.10/46.04 ms`, ready→actual `25.13/42.07 ms`, interval
+`16.689/16.788 ms`. Native proof пока представляет только при новом 30-FPS camera AHB, поэтому
+не является production candidate, несмотря на actual feedback и ровный queue p95. Следующий gate —
+retained latest camera image и независимый native 60-Hz present; expected interval около `16.7 ms`
+при `cameraDropped=0`.
+
 ## FF1 Filament presentation-hints negative control
 
 `.arv6` v10 добавляет `filamentPresentationHintsEnabled`. Этот debug-only negative control
