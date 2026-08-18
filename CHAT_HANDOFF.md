@@ -13,7 +13,7 @@ Native Android-приложение виртуальной примерки ма
 ## Репозиторий и состояние
 
 - Путь: `C:\Users\User\AndroidStudioProjects\ARMakeup`.
-- Ветка: `master`, HEAD/origin до текущего diff — `19a2280 [FF2] Validate canonical face transform contract`. Точки отката: `cc82370` / `tracking-v6.2-stable-2026-08-17`, `d4636ac` / `tracking-v6.2-fast-motion-2026-08-17`, `ab8796a` / `material-temporal-v1-candidate-2026-08-17`, `dd095f7` / `tracking-v6.3-gyro-experimental-2026-08-17`. FF1/FF2 commits: `0554924`, `d083af2`, `19a2280`. Текущий diff — `.arv6` v7 CPU-observable render timeline; видимая geometry/material/predictor не изменены.
+- Ветка: `master`; FF1 render timeline v7 сохранён локальным checkpoint `3419063 [FF1]`, remote `origin/master` пока остаётся на `19a2280`. Точки отката: `cc82370` / `tracking-v6.2-stable-2026-08-17`, `d4636ac` / `tracking-v6.2-fast-motion-2026-08-17`, `ab8796a` / `material-temporal-v1-candidate-2026-08-17`, `dd095f7` / `tracking-v6.3-gyro-experimental-2026-08-17`. FF1/FF2 commits: `0554924`, `d083af2`, `19a2280`, `3419063`. Видимая geometry/material/predictor в `3419063` не изменены.
 - Основные коммиты: `cc82370 [V6.2]`, `cd1a560 [UpdateContext]`, `8d48b46 [V6]`, `4f8039b [V5]`, `3d3572e [V4]`, `395d3f3 [V3]`.
 - Kotlin, XML/View UI, один модуль `:app`; `minSdk 24`, `targetSdk/compileSdk 37`.
 - Последняя полная проверка: 126 unit-тестов, 0 failures/errors, lint и debug APK успешно; native код собирается для `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`.
@@ -116,4 +116,4 @@ V5 реализует reconstructed lip normals, camera-conditioned lighting и 
 - `app/src/main/java/com/example/armakeup/render/FilamentMaterialFactory.kt` — lipstick shader, включая диагностические coverage/luminance uniforms.
 - `app/src/test/java/com/example/armakeup/tracking/` — tracking regression tests.
 
-Начни новый чат с изучения `AGENTS.md`, `PROJECT_CONTEXT.md`, `FULL_FACE_ROADMAP.md` и перечисленных tracking/render-файлов. Точки отката: baseline `cc82370`, fast-motion `d4636ac`, material candidate `ab8796a`, V6.3 experimental `dd095f7`; FF1/FF2 checkpoints `0554924` и `19a2280`. Текущий незакоммиченный шаг — `.arv6` v7 render timeline. Следующий шаг после его фиксации — Perfetto/FrameTimeline actual-presentation capture и оставшиеся controlled FF1/FF2 runs; matrix не подключать в renderer до acceptance.
+Начни новый чат с изучения `AGENTS.md`, `PROJECT_CONTEXT.md`, `FULL_FACE_ROADMAP.md` и перечисленных tracking/render-файлов. Точки отката: baseline `cc82370`, fast-motion `d4636ac`, material candidate `ab8796a`, V6.3 experimental `dd095f7`; FF1/FF2 checkpoints `0554924`, `19a2280`, `3419063`. Следующий шаг — Perfetto/FrameTimeline actual-presentation capture и оставшиеся controlled FF1/FF2 runs; matrix не подключать в renderer до acceptance.
