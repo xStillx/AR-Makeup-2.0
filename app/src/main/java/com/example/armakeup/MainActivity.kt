@@ -67,6 +67,16 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        val debuggable = applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
+        val displayQueueProtectionOverride = if (
+            debuggable && intent.hasExtra(EXTRA_ENABLE_DISPLAY_QUEUE_PROTECTION)
+        ) {
+            intent.getBooleanExtra(EXTRA_ENABLE_DISPLAY_QUEUE_PROTECTION, false)
+        } else {
+            null
+        }
+        val filamentPresentationHintsEnabled = !debuggable ||
+            !intent.getBooleanExtra(EXTRA_DISABLE_FILAMENT_PRESENTATION_HINTS, false)
         enableEdgeToEdge()
         WindowCompat.getInsetsController(window, window.decorView).apply {
             isAppearanceLightStatusBars = false
@@ -76,18 +86,13 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
         setContentView(binding.root)
         binding.root.keepScreenOn = true
         binding.makeupRenderer.setErrorListener(::showFatalRendererState)
+        binding.makeupRenderer.initializeRenderer(
+            displayQueueProtectionEnabled = displayQueueProtectionOverride,
+            filamentPresentationHintsEnabled = filamentPresentationHintsEnabled,
+        )
         binding.makeupRenderer.setGyroscopeCorrectionEnabled(
             !intent.getBooleanExtra(EXTRA_DISABLE_GYROSCOPE_CORRECTION, false),
         )
-        val debuggable = applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
-        if (
-            debuggable &&
-            intent.hasExtra(EXTRA_ENABLE_DISPLAY_QUEUE_PROTECTION)
-        ) {
-            binding.makeupRenderer.setDisplayQueueProtectionEnabled(
-                intent.getBooleanExtra(EXTRA_ENABLE_DISPLAY_QUEUE_PROTECTION, false),
-            )
-        }
         binding.finishTrackingTest.visibility = if (debuggable) View.VISIBLE else View.GONE
         trackingTelemetryRecorder = TrackingTelemetryRecorder.createIfRequested(
             context = applicationContext,
@@ -480,6 +485,8 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
             "com.example.armakeup.extra.DISABLE_GYROSCOPE_CORRECTION"
         const val EXTRA_ENABLE_DISPLAY_QUEUE_PROTECTION =
             "com.example.armakeup.extra.ENABLE_DISPLAY_QUEUE_PROTECTION"
+        const val EXTRA_DISABLE_FILAMENT_PRESENTATION_HINTS =
+            "com.example.armakeup.extra.DISABLE_FILAMENT_PRESENTATION_HINTS"
         private const val MIN_CAMERA_FPS = 30
         private const val MAX_CAMERA_FPS = 60
         private const val PERFORMANCE_LOG_TAG = "ARMakeupPerf"

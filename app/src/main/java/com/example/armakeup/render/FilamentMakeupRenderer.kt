@@ -68,12 +68,17 @@ import java.util.concurrent.atomic.AtomicBoolean
 internal class FilamentMakeupRenderer(
     context: Context,
     private val surfaceView: SurfaceView,
+    displayQueueProtectionOverride: Boolean?,
+    private val filamentPresentationHintsEnabled: Boolean,
     private val onError: (String) -> Unit,
 ) {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val mainExecutor = ContextCompat.getMainExecutor(context)
     private val displayHelper = DisplayHelper(context)
-    private val engineSelection = FilamentEngineFactory.create(context)
+    private val engineSelection = FilamentEngineFactory.create(
+        context = context,
+        displayQueueProtectionEnabled = displayQueueProtectionOverride,
+    )
     private val engine = engineSelection.engine
     private val activeBackend = engineSelection.activeBackend
     private val nativeVulkanProbe = NativeVulkanBootstrap.probe()
@@ -142,7 +147,7 @@ internal class FilamentMakeupRenderer(
     private var latestCameraTransform: VulkanCameraTransform? = null
     private var cameraProjectionCalibration: CameraProjectionCalibration? = null
     private var gyroscopeCorrectionEnabled = true
-    private var displayQueueProtectionEnabled = readDisplayQueueProtectionState()
+    private val displayQueueProtectionEnabled = readDisplayQueueProtectionState()
     private var lipEntityVisible = false
     private var resumed = false
     private var destroyRequested = false
@@ -179,15 +184,19 @@ internal class FilamentMakeupRenderer(
         Log.i(RENDER_LOG_TAG, engineSelection.diagnostic)
         Log.i(
             RENDER_LOG_TAG,
-            "temporalFlowVisible=${temporalLandmarkRefiner.visibleApplicationEnabled} " +
-                "displayQueueProtection=$displayQueueProtectionEnabled",
+                "temporalFlowVisible=${temporalLandmarkRefiner.visibleApplicationEnabled} " +
+                "displayQueueProtectionRequested=${engineSelection.displayQueueProtectionOverride} " +
+                "displayQueueProtectionActive=$displayQueueProtectionEnabled " +
+                "filamentPresentationHints=$filamentPresentationHintsEnabled",
         )
         Log.i(NATIVE_VULKAN_LOG_TAG, nativeVulkanProbe.diagnostic)
         configureMaterialInstances()
         configureScene()
         uiHelper.renderCallback = SurfaceCallback()
         uiHelper.attachTo(surfaceView)
-        frameScheduler.setRenderer(filamentRenderer)
+        if (filamentPresentationHintsEnabled) {
+            frameScheduler.setRenderer(filamentRenderer)
+        }
     }
 
     fun onSurfaceRequested(request: SurfaceRequest) {
@@ -284,40 +293,9 @@ internal class FilamentMakeupRenderer(
         Log.i(GYROSCOPE_LOG_TAG, "correctionEnabled=$enabled")
     }
 
-    /**
-     * Enables Filament's own actual-display feedback guard for a controlled debug A/B.
-     *
-     * The native renderer compares completed frame history with the Choreographer target and
-     * lets [Renderer.beginFrame] skip a submission when the CPU/display queue has grown by at
-     * least one additional refresh interval. This does not change tracker prediction or makeup
-     * geometry; it only allows the compositor queue to drain.
-     */
-    fun setDisplayQueueProtectionEnabled(enabled: Boolean) {
-        ensureMainThread()
-        if (destroyRequested || destroyed) return
-        val available = runCatching {
-            engine.hasFeatureFlag(DISPLAY_QUEUE_PROTECTION_FEATURE)
-        }.getOrDefault(false)
-        val accepted = available && runCatching {
-            engine.setFeatureFlag(DISPLAY_QUEUE_PROTECTION_FEATURE, enabled)
-        }.getOrDefault(false)
-        displayQueueProtectionEnabled = if (available) {
-            runCatching {
-                engine.getFeatureFlag(DISPLAY_QUEUE_PROTECTION_FEATURE)
-            }.getOrDefault(false)
-        } else {
-            false
-        }
-        Log.i(
-            RENDER_LOG_TAG,
-            "displayQueueProtection requested=$enabled available=$available " +
-                "accepted=$accepted active=$displayQueueProtectionEnabled",
-        )
-    }
-
     private fun readDisplayQueueProtectionState(): Boolean = runCatching {
-        engine.hasFeatureFlag(DISPLAY_QUEUE_PROTECTION_FEATURE) &&
-            engine.getFeatureFlag(DISPLAY_QUEUE_PROTECTION_FEATURE)
+        engine.hasFeatureFlag(FilamentEngineFactory.DISPLAY_QUEUE_PROTECTION_FEATURE) &&
+            engine.getFeatureFlag(FilamentEngineFactory.DISPLAY_QUEUE_PROTECTION_FEATURE)
     }.getOrDefault(false)
 
     fun clear() {
@@ -727,6 +705,7 @@ internal class FilamentMakeupRenderer(
                 cameraMotionPredictionSeconds = displayedCameraMotionPredictionSeconds,
                 globalPredictionCoverage = displayedGlobalPredictionCoverage,
                 displayQueueProtectionEnabled = displayQueueProtectionEnabled,
+                filamentPresentationHintsEnabled = filamentPresentationHintsEnabled,
                 renderTiming = renderTiming,
             ),
         )
@@ -759,6 +738,7 @@ internal class FilamentMakeupRenderer(
                 filamentFrameRendered = filamentFrameRendered,
                 gyroscopeApplied = false,
                 displayQueueProtectionEnabled = displayQueueProtectionEnabled,
+                filamentPresentationHintsEnabled = filamentPresentationHintsEnabled,
                 renderTiming = renderTiming.copy(
                     geometryUploadAcceptedTimestampNs = NO_TIMESTAMP,
                 ),
@@ -1465,8 +1445,6 @@ internal class FilamentMakeupRenderer(
         private const val NATIVE_VULKAN_LOG_TAG = "ARMakeupVulkan"
         private const val GYROSCOPE_LOG_TAG = "ARMakeupGyroV6"
         private const val FRAME_TRACE_PREFIX = "ARMK_FRAME:"
-        private const val DISPLAY_QUEUE_PROTECTION_FEATURE =
-            "engine.skip_frame_when_cpu_ahead_of_display"
         private val IDENTITY_MATRIX = floatArrayOf(
             1f, 0f, 0f, 0f,
             0f, 1f, 0f, 0f,

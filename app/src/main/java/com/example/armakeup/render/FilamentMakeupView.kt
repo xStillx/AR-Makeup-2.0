@@ -23,13 +23,20 @@ class FilamentMakeupView @JvmOverloads constructor(
 
     private var errorListener: ((String) -> Unit)? = null
     private var initializationError: Throwable? = null
-    private val compositor: FilamentMakeupRenderer? = if (isInEditMode) {
-        null
-    } else {
-        runCatching {
+    private var compositor: FilamentMakeupRenderer? = null
+
+    /** Must be called once after inflation and before CameraX requests its input surface. */
+    fun initializeRenderer(
+        displayQueueProtectionEnabled: Boolean?,
+        filamentPresentationHintsEnabled: Boolean,
+    ) {
+        if (isInEditMode || compositor != null || initializationError != null) return
+        compositor = runCatching {
             FilamentMakeupRenderer(
                 context = context,
                 surfaceView = this,
+                displayQueueProtectionOverride = displayQueueProtectionEnabled,
+                filamentPresentationHintsEnabled = filamentPresentationHintsEnabled,
                 onError = ::dispatchError,
             )
         }.onFailure { initializationError = it }.getOrNull()
@@ -67,10 +74,6 @@ class FilamentMakeupView @JvmOverloads constructor(
 
     fun setGyroscopeCorrectionEnabled(enabled: Boolean) {
         compositor?.setGyroscopeCorrectionEnabled(enabled)
-    }
-
-    fun setDisplayQueueProtectionEnabled(enabled: Boolean) {
-        compositor?.setDisplayQueueProtectionEnabled(enabled)
     }
 
     fun setResult(

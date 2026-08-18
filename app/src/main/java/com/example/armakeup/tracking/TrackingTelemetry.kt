@@ -184,6 +184,8 @@ data class TrackingRenderSample(
     val globalPredictionCoverage: Float = Float.NaN,
     /** True when Filament may skip a frame to drain an overfilled display queue. */
     val displayQueueProtectionEnabled: Boolean = false,
+    /** True when Android expected-presentation and render-deadline hints are sent to Filament. */
+    val filamentPresentationHintsEnabled: Boolean = true,
     val renderTiming: TrackingRenderTiming = TrackingRenderTiming.UNKNOWN,
 ) : TrackingTelemetryEvent
 

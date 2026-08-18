@@ -16,6 +16,7 @@ internal object FilamentEngineFactory {
         val activeBackend: MakeupRenderBackend,
         val capabilities: RenderDeviceCapabilities,
         val fallbackReason: String?,
+        val displayQueueProtectionOverride: Boolean?,
     ) {
         val diagnostic: String
             get() = buildString {
@@ -36,7 +37,10 @@ internal object FilamentEngineFactory {
             }
     }
 
-    fun create(context: Context): Selection {
+    fun create(
+        context: Context,
+        displayQueueProtectionEnabled: Boolean? = null,
+    ): Selection {
         val capabilities = readCapabilities(context.packageManager)
         val requested = RenderBackendPolicy.select(capabilities)
         return createSelection(
@@ -48,6 +52,7 @@ internal object FilamentEngineFactory {
             } else {
                 null
             },
+            displayQueueProtectionEnabled = displayQueueProtectionEnabled,
         )
     }
 
@@ -56,8 +61,13 @@ internal object FilamentEngineFactory {
         activeBackend: MakeupRenderBackend,
         capabilities: RenderDeviceCapabilities,
         fallbackReason: String?,
+        displayQueueProtectionEnabled: Boolean?,
     ): Selection {
-        val engine = Engine.create(activeBackend.filamentBackend)
+        val engineBuilder = Engine.Builder().backend(activeBackend.filamentBackend)
+        displayQueueProtectionEnabled?.let {
+            engineBuilder.feature(DISPLAY_QUEUE_PROTECTION_FEATURE, it)
+        }
+        val engine = engineBuilder.build()
         return try {
             Selection(
                 engine = engine,
@@ -66,6 +76,7 @@ internal object FilamentEngineFactory {
                 activeBackend = activeBackend,
                 capabilities = capabilities,
                 fallbackReason = fallbackReason,
+                displayQueueProtectionOverride = displayQueueProtectionEnabled,
             )
         } catch (error: RuntimeException) {
             engine.destroy()
@@ -96,4 +107,6 @@ internal object FilamentEngineFactory {
 
     private const val FILAMENT_VULKAN_CAMERA_UNAVAILABLE =
         "Filament Vulkan camera streams are unsupported; native renderer pending"
+    const val DISPLAY_QUEUE_PROTECTION_FEATURE =
+        "engine.skip_frame_when_cpu_ahead_of_display"
 }

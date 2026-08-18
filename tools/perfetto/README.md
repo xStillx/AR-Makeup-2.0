@@ -78,6 +78,34 @@ adb shell am start -n com.example.armakeup/.MainActivity `
 ready→actual, доля `filamentFrameRendered`, actual frame interval p95 и число интервалов `>25 ms`.
 Уменьшение queue latency нельзя принимать ценой регулярных дубликатов/рывков.
 
+Device result на SM-G990B: flag является constant после Engine creation и уже включён по умолчанию,
+поэтому override задаётся через `Engine.Builder`. Cold stationary off/on дал desired→actual
+`44.05/44.22 ms`, ready→actual `39.80/40.00 ms`, actual interval p95 `16.793/16.802 ms` и
+`filamentRenderedFraction=1.0/1.0`. Guard не активировал skip и не уменьшил очередь; candidate
+отклонён, default остаётся on.
+
+## FF1 Filament presentation-hints negative control
+
+`.arv6` v10 добавляет `filamentPresentationHintsEnabled`. Этот debug-only negative control
+отключает передачу expected-presentation/deadline из Android 13+ `ChoreographerHelper`, не меняя
+queue guard, tracker, mesh, camera transform или shader:
+
+```powershell
+adb shell am force-stop com.example.armakeup
+adb shell am start -n com.example.armakeup/.MainActivity `
+  --ez com.example.armakeup.extra.TRACKING_TELEMETRY true `
+  --el com.example.armakeup.extra.TRACKING_WARMUP_MS 5000 `
+  --el com.example.armakeup.extra.TRACKING_DURATION_MS 15000 `
+  --es com.example.armakeup.extra.TRACKING_SCENARIO ff1_stationary_hints_off_v10 `
+  --ez com.example.armakeup.extra.ENABLE_DISPLAY_QUEUE_PROTECTION true `
+  --ez com.example.armakeup.extra.DISABLE_FILAMENT_PRESENTATION_HINTS true
+```
+
+Этот вариант намеренно не является production candidate. Device on/off дал desired→actual
+`43.88/59.27 ms`, ready→actual `39.77/49.64 ms`, actual interval p95 `16.796/16.825 ms` и
+intervals `>25 ms` `5/7`. Отключение ухудшает очередь примерно на один кадр; presentation hints
+обязаны оставаться включёнными. Следующий FF1 proof — native Vulkan visible swapchain/present.
+
 - [FrameTimeline data source and SQL tables](https://perfetto.dev/docs/data-sources/frametimeline)
 - [System trace recording](https://perfetto.dev/docs/getting-started/system-tracing)
 - [Trace Processor](https://perfetto.dev/docs/contributing/embedding)
