@@ -2,15 +2,17 @@
 
 Статус: принят 2026-08-17.
 
-Текущий прогресс 2026-08-17:
+Текущий прогресс 2026-08-18:
 
 - FF0 выполнен: V6.3 сохранён commit `dd095f7` и тегом `tracking-v6.3-gyro-experimental-2026-08-17` после полного unit/lint/assemble gate. Это experimental, не stable.
 - Первый shadow slice FF1/FF2 реализован поверх checkpoint: `.arv6` v6 разделяет tracker latency на camera→analysis, analysis→submit, MediaPipe inference и callback queue, отдельно пишет RGBA/quality/result-processing CPU duration.
 - MediaPipe 4×4 facial transformation matrix включается только при debug telemetry, сохраняется с timestamp исходного camera frame и пока не передаётся в renderer.
 - Device stationary/head-motion/phone-motion/roll benchmark выполнен на SM-G990B при thermal status `0`: во всех валидных runs `dropped=0`, matrix coverage/right-handed/similarity `1.0`; callback/result CPU мал относительно camera→analysis и inference.
 - Column-major layout, metric axes/handedness, affine/similarity, yaw/pitch/roll, rotation/mirror/crop зафиксированы кодом и unit tests. Roll device correlation с текущим 22-anchor pose равна `0.999461`; matrix пока остаётся shadow-only.
-- Актуальный локальный gate: `124` unit tests, `0` failures/errors, lint и debug APK/четыре ABI успешны.
-- До завершения FF1 ещё нужны camera presentation/vsync и geometry-upload timestamps; до завершения FF2 — face-visible yaw/pitch, stop/dropout/light/thermal matrix runs и controlled continuity/overhead acceptance.
+- `.arv6` v7 добавляет CPU-observable render timeline: нормализованный Choreographer vsync, render callback start, sensor timestamp и принятие camera buffer, принятие geometry upload и CPU render submit. Actual presentation отдельно хранится как unknown (`-1`), потому что Filament Java API не предоставляет feedback о показе кадра.
+- Первый device v7 run дал полное coverage всех CPU markers, `dropped=0`: vsync callback `0.88/6.25 ms`, camera sensor→vsync `112.75/128.71 ms`, camera selection→submit `13.25/25.69 ms`, geometry upload→submit `0.62/2.99 ms`, render start→submit `3.49/9.39 ms` median/p95. Это functional proof, не controlled A/B.
+- Актуальный локальный gate: `126` unit tests, `0` failures/errors, lint и debug APK/четыре ABI успешны.
+- До завершения FF1 ещё нужны actual presentation timestamps через Perfetto/FrameTimeline и controlled stationary/head/phone runs; до завершения FF2 — face-visible yaw/pitch, stop/dropout/light/thermal matrix runs и controlled continuity/overhead acceptance.
 
 Этот файл задаёт порядок дальнейшей разработки после V6.3. Полный исторический и технический контекст находится в `PROJECT_CONTEXT.md`; компактный перенос между чатами — в `CHAT_HANDOFF.md`.
 
@@ -55,8 +57,8 @@ MediaPipe 3D landmarks + canonical face transform
 - submit в MediaPipe и callback результата;
 - pose/fusion/prediction;
 - принятие geometry upload;
-- timestamp реально показанного camera buffer;
-- render submission и presentation/vsync, насколько это доступно API/инструментам.
+- sensor timestamp и момент принятия выбранного camera buffer, не смешивая это с presentation;
+- render submission, Choreographer vsync и actual presentation через FrameTimeline/Perfetto, насколько это доступно API/инструментам.
 
 Использовать `.arv6`, Perfetto/trace sections и существующую Camera2 metadata. Все realtime-ветки остаются latest-only; диагностическая запись не создаёт новую очередь кадров.
 

@@ -34,6 +34,7 @@ import com.example.armakeup.tracking.LandmarkRenderFrame
 import com.example.armakeup.tracking.NormalizedImageTransform
 import com.example.armakeup.tracking.TemporalLandmarkRefiner
 import com.example.armakeup.tracking.TrackingRenderSample
+import com.example.armakeup.tracking.TrackingRenderTiming
 import com.example.armakeup.tracking.TrackingTelemetrySink
 import com.google.android.filament.Box
 import com.google.android.filament.Camera
@@ -150,6 +151,7 @@ internal class FilamentMakeupRenderer(
     private var trackingTelemetrySink: TrackingTelemetrySink? = null
     private var displayedMeasurementTimestampMs = NO_TIMESTAMP
     private var displayedSensorTimestampNs = NO_TIMESTAMP
+    private var displayedGeometryUploadAcceptedTimestampNs = NO_TIMESTAMP
     private var displayedPredictionSeconds = 0f
     private var displayedCameraMotionPredictionSeconds = 0f
     private var displayedGlobalPredictionCoverage = 0f
@@ -577,6 +579,7 @@ internal class FilamentMakeupRenderer(
         )
         val uploaded = lipVertexUploader.upload { buffer -> writeLipVertices(buffer, tessellated) }
         if (uploaded) {
+            displayedGeometryUploadAcceptedTimestampNs = SystemClock.elapsedRealtimeNanos()
             displayedMaterialTemporalState = materialTemporalController.update(
                 timestampMs = renderTimestampMs,
                 outerPoints = outerPoints,
@@ -628,10 +631,16 @@ internal class FilamentMakeupRenderer(
         renderTimestampMs: Long,
         frameSubmissionCpuMs: Float,
         filamentFrameRendered: Boolean,
+        renderTiming: TrackingRenderTiming,
     ) {
         val sink = trackingTelemetrySink ?: return
         if (!lipEntityVisible || displayedMeasurementTimestampMs == NO_TIMESTAMP) {
-            recordHiddenLip(renderTimestampMs, frameSubmissionCpuMs, filamentFrameRendered)
+            recordHiddenLip(
+                renderTimestampMs,
+                frameSubmissionCpuMs,
+                filamentFrameRendered,
+                renderTiming,
+            )
             return
         }
         sink.recordRender(
@@ -663,6 +672,7 @@ internal class FilamentMakeupRenderer(
                 gyroscopeRollRadians = displayedGyroscopeCorrection.rollRadians,
                 cameraMotionPredictionSeconds = displayedCameraMotionPredictionSeconds,
                 globalPredictionCoverage = displayedGlobalPredictionCoverage,
+                renderTiming = renderTiming,
             ),
         )
     }
@@ -671,6 +681,7 @@ internal class FilamentMakeupRenderer(
         renderTimestampMs: Long,
         frameSubmissionCpuMs: Float,
         filamentFrameRendered: Boolean,
+        renderTiming: TrackingRenderTiming,
     ) {
         trackingTelemetrySink?.recordRender(
             TrackingRenderSample(
@@ -692,6 +703,9 @@ internal class FilamentMakeupRenderer(
                 frameSubmissionCpuMs = frameSubmissionCpuMs,
                 filamentFrameRendered = filamentFrameRendered,
                 gyroscopeApplied = false,
+                renderTiming = renderTiming.copy(
+                    geometryUploadAcceptedTimestampNs = NO_TIMESTAMP,
+                ),
             ),
         )
     }
@@ -1023,7 +1037,10 @@ internal class FilamentMakeupRenderer(
         override fun onFrame(frameTimeNanos: Long) {
             if (!resumed || destroyRequested || destroyed || !uiHelper.isReadyToRender) return
             try {
-                val frameCpuStartedNs = SystemClock.elapsedRealtimeNanos()
+                val callbackMonotonicTimestampNs = System.nanoTime()
+                val renderStartTimestampNs = SystemClock.elapsedRealtimeNanos()
+                val vsyncElapsedRealtimeTimestampNs = renderStartTimestampNs -
+                    (callbackMonotonicTimestampNs - frameTimeNanos)
                 val renderTimestampMs = SystemClock.uptimeMillis()
                 cameraInput?.pushLatestFrame()
                 updateLipGeometry(renderTimestampMs)
@@ -1038,13 +1055,26 @@ internal class FilamentMakeupRenderer(
                 } else {
                     false
                 }
+                val renderSubmitTimestampNs = SystemClock.elapsedRealtimeNanos()
                 val frameSubmissionCpuMs = (
-                    SystemClock.elapsedRealtimeNanos() - frameCpuStartedNs
+                    renderSubmitTimestampNs - renderStartTimestampNs
                 ) / NANOS_PER_MILLISECOND.toFloat()
                 recordDisplayedLip(
                     renderTimestampMs = renderTimestampMs,
                     frameSubmissionCpuMs = frameSubmissionCpuMs,
                     filamentFrameRendered = filamentFrameRendered,
+                    renderTiming = TrackingRenderTiming(
+                        vsyncTimestampNs = vsyncElapsedRealtimeTimestampNs,
+                        renderStartTimestampNs = renderStartTimestampNs,
+                        cameraFrameSelectedTimestampNs =
+                            cameraInput?.latestFrameSelectedTimestampNs ?: NO_TIMESTAMP,
+                        cameraFrameSensorTimestampNs =
+                            cameraInput?.latestFrameSensorTimestampNs ?: NO_TIMESTAMP,
+                        geometryUploadAcceptedTimestampNs =
+                            displayedGeometryUploadAcceptedTimestampNs,
+                        renderSubmitTimestampNs = renderSubmitTimestampNs,
+                        presentationTimestampNs = NO_TIMESTAMP,
+                    ),
                 )
             } catch (error: RuntimeException) {
                 reportFatalError(error.message ?: "Filament render failure")
@@ -1105,6 +1135,7 @@ internal class FilamentMakeupRenderer(
         val requiresHorizontalUvCompensation: Boolean
         val requiresVerticalUvCompensation: Boolean
         val latestFrameSensorTimestampNs: Long
+        val latestFrameSelectedTimestampNs: Long
         fun pushLatestFrame()
         fun close()
     }
@@ -1126,6 +1157,7 @@ internal class FilamentMakeupRenderer(
         override val requiresHorizontalUvCompensation: Boolean = false
         override val requiresVerticalUvCompensation: Boolean = false
         override val latestFrameSensorTimestampNs: Long = NO_TIMESTAMP
+        override val latestFrameSelectedTimestampNs: Long = NO_TIMESTAMP
 
         init {
             cameraTexture.setExternalStream(engine, stream)
@@ -1159,6 +1191,8 @@ internal class FilamentMakeupRenderer(
         override val requiresVerticalUvCompensation: Boolean = true
         override var latestFrameSensorTimestampNs: Long = NO_TIMESTAMP
             private set
+        override var latestFrameSelectedTimestampNs: Long = NO_TIMESTAMP
+            private set
         private val firstFrameLogged = AtomicBoolean(false)
 
         init {
@@ -1175,7 +1209,6 @@ internal class FilamentMakeupRenderer(
             )
             if (frame == null) return
             try {
-                latestFrameSensorTimestampNs = frame.sensorTimestampNs
                 val temporalTracking = frame.temporalTracking
                 if (temporalTracking != null) {
                     temporalLandmarkRefiner.offer(
@@ -1188,6 +1221,8 @@ internal class FilamentMakeupRenderer(
                 stream.setAcquiredImage(frame.hardwareBuffer, mainHandler) {
                     runtime.releaseCameraFrame(frame)
                 }
+                latestFrameSensorTimestampNs = frame.sensorTimestampNs
+                latestFrameSelectedTimestampNs = SystemClock.elapsedRealtimeNanos()
                 if (firstFrameLogged.compareAndSet(false, true)) {
                     val landmarkAgeMs = frame.landmarkAgeNs?.div(NANOS_PER_MILLISECOND)
                     Log.i(
@@ -1237,6 +1272,8 @@ internal class FilamentMakeupRenderer(
             activeBackend == MakeupRenderBackend.OPENGL
         override var latestFrameSensorTimestampNs: Long = NO_TIMESTAMP
             private set
+        override var latestFrameSelectedTimestampNs: Long = NO_TIMESTAMP
+            private set
 
         init {
             cameraTexture.setExternalStream(engine, stream)
@@ -1253,10 +1290,11 @@ internal class FilamentMakeupRenderer(
                 image.close()
                 return
             }
-            latestFrameSensorTimestampNs = image.timestamp
             stream.setAcquiredImage(hardwareBuffer, mainHandler) {
                 image.close()
             }
+            latestFrameSensorTimestampNs = image.timestamp
+            latestFrameSelectedTimestampNs = SystemClock.elapsedRealtimeNanos()
         }
 
         override fun close() {

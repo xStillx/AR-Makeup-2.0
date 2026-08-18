@@ -1,6 +1,6 @@
 # ARMakeup — компактный контекст для нового чата
 
-Актуально на 2026-08-17. Полный источник истины — `PROJECT_CONTEXT.md`; правила репозитория — `AGENTS.md`.
+Актуально на 2026-08-18. Полный источник истины — `PROJECT_CONTEXT.md`; правила репозитория — `AGENTS.md`.
 
 ## Цель и приоритет
 
@@ -13,10 +13,10 @@ Native Android-приложение виртуальной примерки ма
 ## Репозиторий и состояние
 
 - Путь: `C:\Users\User\AndroidStudioProjects\ARMakeup`.
-- Ветка: `master`; стабильный V6.2 baseline — commit `cc82370` / tag `tracking-v6.2-stable-2026-08-17`; принятый fast-motion вариант — commit `d4636ac` / tag `tracking-v6.2-fast-motion-2026-08-17`; material-temporal candidate — commit `ab8796a` / tag `material-temporal-v1-candidate-2026-08-17` (runtime принят, visual acceptance ожидается). Текущий незакоммиченный diff после `ab8796a` — V6.3 timestamped gyroscope camera-motion correction с coverage-aware timestamp, `.arv6` v5, тесты и контекст; predictor geometry не меняется, добавлен только честный signal реально применённой доли global prediction.
+- Ветка: `master`, HEAD/origin до текущего diff — `19a2280 [FF2] Validate canonical face transform contract`. Точки отката: `cc82370` / `tracking-v6.2-stable-2026-08-17`, `d4636ac` / `tracking-v6.2-fast-motion-2026-08-17`, `ab8796a` / `material-temporal-v1-candidate-2026-08-17`, `dd095f7` / `tracking-v6.3-gyro-experimental-2026-08-17`. FF1/FF2 commits: `0554924`, `d083af2`, `19a2280`. Текущий diff — `.arv6` v7 CPU-observable render timeline; видимая geometry/material/predictor не изменены.
 - Основные коммиты: `cc82370 [V6.2]`, `cd1a560 [UpdateContext]`, `8d48b46 [V6]`, `4f8039b [V5]`, `3d3572e [V4]`, `395d3f3 [V3]`.
 - Kotlin, XML/View UI, один модуль `:app`; `minSdk 24`, `targetSdk/compileSdk 37`.
-- Последняя полная проверка: 111 unit-тестов, 0 failures/errors, lint и debug APK успешно; native код собирается для `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`.
+- Последняя полная проверка: 126 unit-тестов, 0 failures/errors, lint и debug APK успешно; native код собирается для `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`.
 
 ## Текущий pipeline
 
@@ -71,8 +71,12 @@ FF0 завершён: V6.3 сохранён commit `dd095f7` и experimental-т�
 
 Добавлен `CanonicalFaceTransform`: официальный MediaPipe column-major layout, right-handed metric camera space, translation indices 12..14, affine/similarity checks, baseline-centered yaw/pitch/roll и отдельный rotation→mirror→crop display contract. Matrix raw не зеркалится. Device correlations: X→pose X `0.879–0.994`, metric Y→image Y `-0.974…-0.993`; roll run `438/902`, latency `116/139 ms`, roll correlation с 22-anchor pose `0.999461`, p95 deviations yaw/pitch/roll `9.30°/4.58°/41.56°`. Актуальный gate: 124 tests, 0 failures/errors, lint/APK/четыре ABI. Валидные `.arv6` лежат в `app/build/tracking-telemetry`. Один cold-start empty и один no-face combined run отклонены; нужен отдельный face-visible yaw/pitch run.
 
+Текущий FF1 diff поднимает `.arv6` до v7 и добавляет CPU-observable timeline: vsync в elapsed-realtime clock, render start, camera buffer sensor/acceptance, geometry upload acceptance и render submit. Actual presentation честно остаётся `-1`: Filament Java API его не сообщает, поэтому нужен Perfetto/FrameTimeline. Device run `ff1_render_timeline_v7`: `293/721`, dropped `0`, coverage CPU markers `1.0`, presentation `0`; median/p95 vsync callback `0.88/6.25 ms`, camera sensor→vsync `112.75/128.71 ms`, camera selection→submit `13.25/25.69 ms`, geometry upload→submit `0.62/2.99 ms`, render start→submit `3.49/9.39 ms`. Файл сохранён в `app/build/tracking-telemetry`. Это functional proof, не controlled A/B.
+
+Точный финальный APK после переноса camera marker за успешный `setAcquiredImage` проверен повтором `ff1_render_timeline_v7_final`: `172/484`, dropped `0`, CPU coverage `1.0`, presentation `0`, timing того же порядка. Thermal max уже был `2` и battery median `38.3 °C`, поэтому этот run годится только как финальный runtime/codec proof.
+
 1. Записать face-visible yaw/pitch, stop/dropout/weak-light/thermal matrix runs; cold-start и no-face файлы не включать в acceptance.
-2. Добавить FF1 geometry-upload и camera-presentation/vsync timestamps. До этого capture-to-result не является полной display latency.
+2. Снять actual presentation через Perfetto/FrameTimeline и сопоставить с v7 CPU markers; selection/submit не называть presentation.
 3. Сравнить baseline-centered matrix continuity с 22-anchor/gyro по sensor/display timestamps и только затем принимать FF2.
 4. После FF1/FF2 перейти к FF3 model-independent `FaceObservation` / `FullFaceRenderState`.
 5. V6.3 strong phone-motion visual acceptance выполнить отдельно; matrix не подключать в renderer до численного и visual acceptance.
@@ -112,4 +116,4 @@ V5 реализует reconstructed lip normals, camera-conditioned lighting и 
 - `app/src/main/java/com/example/armakeup/render/FilamentMaterialFactory.kt` — lipstick shader, включая диагностические coverage/luminance uniforms.
 - `app/src/test/java/com/example/armakeup/tracking/` — tracking regression tests.
 
-Начни новый чат с изучения `AGENTS.md`, `PROJECT_CONTEXT.md`, `FULL_FACE_ROADMAP.md` и перечисленных tracking/render-файлов. Точки отката: baseline `cc82370`, fast-motion `d4636ac`, material candidate `ab8796a`, V6.3 experimental `dd095f7` / `tracking-v6.3-gyro-experimental-2026-08-17`. В отдельном commit поверх `dd095f7` сохранён FF1/FF2 shadow telemetry v6 + MediaPipe 4×4 transform; полный локальный gate прошёл, видимый renderer не менялся. Следующий шаг — device `.arv6` v6 benchmark и axis/layout tests; не подключать matrix к рендеру до acceptance.
+Начни новый чат с изучения `AGENTS.md`, `PROJECT_CONTEXT.md`, `FULL_FACE_ROADMAP.md` и перечисленных tracking/render-файлов. Точки отката: baseline `cc82370`, fast-motion `d4636ac`, material candidate `ab8796a`, V6.3 experimental `dd095f7`; FF1/FF2 checkpoints `0554924` и `19a2280`. Текущий незакоммиченный шаг — `.arv6` v7 render timeline. Следующий шаг после его фиксации — Perfetto/FrameTimeline actual-presentation capture и оставшиеся controlled FF1/FF2 runs; matrix не подключать в renderer до acceptance.

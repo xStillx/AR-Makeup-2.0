@@ -72,6 +72,15 @@ class TrackingTelemetryTest {
             gyroscopeRollRadians = -0.03f,
             cameraMotionPredictionSeconds = 0.011f,
             globalPredictionCoverage = 0.25f,
+            renderTiming = TrackingRenderTiming(
+                vsyncTimestampNs = 1_100_000_000L,
+                renderStartTimestampNs = 1_102_000_000L,
+                cameraFrameSelectedTimestampNs = 1_099_000_000L,
+                cameraFrameSensorTimestampNs = 1_060_000_000L,
+                geometryUploadAcceptedTimestampNs = 1_103_000_000L,
+                renderSubmitTimestampNs = 1_108_000_000L,
+                presentationTimestampNs = -1L,
+            ),
         )
         val bytes = ByteArrayOutputStream().also { output ->
             TrackingTelemetryCodec.writeHeader(
@@ -132,6 +141,7 @@ class TrackingTelemetryTest {
             decodedRender.globalPredictionCoverage,
             0f,
         )
+        assertEquals(render.renderTiming, decodedRender.renderTiming)
     }
 
     @Test
@@ -315,6 +325,40 @@ class TrackingTelemetryTest {
         assertTrue(render.gyroscopeApplied)
         assertTrue(render.cameraMotionPredictionSeconds.isNaN())
         assertTrue(render.globalPredictionCoverage.isNaN())
+    }
+
+    @Test
+    fun codecReadsLegacyV6RenderWithUnknownRenderTimeline() {
+        val bytes = ByteArrayOutputStream().also { output ->
+            DataOutputStream(output).apply {
+                writeInt(0x41525636)
+                writeInt(6)
+                writeUTF("legacy_v6_render")
+                writeLong(42L)
+                writeByte(2)
+                writeLong(1_100L)
+                writeLong(1_000L)
+                writeLong(999_000_000L)
+                writeFloat(0.04f)
+                writeInt(1080)
+                writeInt(2400)
+                writeBoolean(true)
+                repeat(2) { writeInt(0) }
+                writeUTF("SATIN")
+                repeat(4) { writeFloat(1f) }
+                writeBoolean(true)
+                writeBoolean(true)
+                repeat(7) { writeFloat(0.01f) }
+                repeat(2) { writeFloat(0.02f) }
+                writeByte(0x7f)
+                writeLong(0L)
+            }
+        }.toByteArray()
+
+        val render = TrackingTelemetryCodec.read(ByteArrayInputStream(bytes)).renders.single()
+
+        assertEquals(0.02f, render.globalPredictionCoverage, 0f)
+        assertEquals(TrackingRenderTiming.UNKNOWN, render.renderTiming)
     }
 
     @Test
@@ -504,6 +548,66 @@ class TrackingTelemetryTest {
         assertEquals("SATIN", metrics.byFinish[1].finish)
         assertEquals(2, metrics.byFinish[1].renderCount)
         assertEquals(0.5f, metrics.byFinish[1].filamentRenderedFrameFraction, EPSILON)
+    }
+
+    @Test
+    fun analyzerReportsCpuObservableRenderTimelineWithoutInventingPresentation() {
+        val renders = listOf(
+            renderSample(1_100L, 0f).copy(
+                renderTiming = TrackingRenderTiming(
+                    vsyncTimestampNs = 1_000_000_000L,
+                    renderStartTimestampNs = 1_002_000_000L,
+                    cameraFrameSelectedTimestampNs = 995_000_000L,
+                    cameraFrameSensorTimestampNs = 960_000_000L,
+                    geometryUploadAcceptedTimestampNs = 1_003_000_000L,
+                    renderSubmitTimestampNs = 1_008_000_000L,
+                    presentationTimestampNs = -1L,
+                ),
+            ),
+            renderSample(1_120L, 0.01f).copy(
+                renderTiming = TrackingRenderTiming(
+                    vsyncTimestampNs = 1_020_000_000L,
+                    renderStartTimestampNs = 1_024_000_000L,
+                    cameraFrameSelectedTimestampNs = 1_015_000_000L,
+                    cameraFrameSensorTimestampNs = 980_000_000L,
+                    geometryUploadAcceptedTimestampNs = 1_025_000_000L,
+                    renderSubmitTimestampNs = 1_032_000_000L,
+                    presentationTimestampNs = 1_035_000_000L,
+                ),
+            ),
+            renderSample(1_140L, 0.02f).copy(
+                lipVisible = false,
+                renderTiming = TrackingRenderTiming(
+                    vsyncTimestampNs = 1_040_000_000L,
+                    renderStartTimestampNs = 1_041_000_000L,
+                    cameraFrameSelectedTimestampNs = 1_035_000_000L,
+                    cameraFrameSensorTimestampNs = 1_000_000_000L,
+                    geometryUploadAcceptedTimestampNs = -1L,
+                    renderSubmitTimestampNs = 1_045_000_000L,
+                    presentationTimestampNs = -1L,
+                ),
+            ),
+        )
+
+        val timeline = TrackingTelemetryAnalyzer.analyze(
+            TrackingTelemetrySession(
+                TrackingTelemetryHeader("render_timeline", 0L),
+                renders,
+                droppedEventCount = 0L,
+            ),
+        ).renderTimeline
+
+        assertEquals(3, timeline.renderSampleCount)
+        assertEquals(1f, timeline.vsyncTimestampCoverage, EPSILON)
+        assertEquals(1f, timeline.cameraFrameSelectionCoverage, EPSILON)
+        assertEquals(1f, timeline.geometryUploadAcceptedCoverage, EPSILON)
+        assertEquals(1f, timeline.renderSubmitTimestampCoverage, EPSILON)
+        assertEquals(1f / 3f, timeline.presentationTimestampCoverage, EPSILON)
+        assertEquals(2f, timeline.medianVsyncCallbackDelayMs, EPSILON)
+        assertEquals(40f, timeline.medianCameraSensorToVsyncMs, EPSILON)
+        assertEquals(13f, timeline.medianCameraSelectionToSubmitMs, EPSILON)
+        assertEquals(5f, timeline.medianGeometryUploadToSubmitMs, EPSILON)
+        assertEquals(6f, timeline.medianRenderStartToSubmitMs, EPSILON)
     }
 
     @Test

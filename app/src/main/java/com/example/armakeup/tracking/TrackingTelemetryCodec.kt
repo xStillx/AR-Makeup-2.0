@@ -168,6 +168,7 @@ object TrackingTelemetryCodec {
         data.writeFloat(sample.gyroscopeRollRadians)
         data.writeFloat(sample.cameraMotionPredictionSeconds)
         data.writeFloat(sample.globalPredictionCoverage)
+        data.writeRenderTiming(sample.renderTiming)
     }
 
     private fun readRender(data: DataInputStream, version: Int): TrackingRenderSample {
@@ -208,7 +209,7 @@ object TrackingTelemetryCodec {
         } else {
             withMaterial
         }
-        return if (version >= VERSION_WITH_PREDICTION_COVERAGE) {
+        val withPredictionCoverage = if (version >= VERSION_WITH_PREDICTION_COVERAGE) {
             withGyroscope.copy(
                 cameraMotionPredictionSeconds = data.readFloat(),
                 globalPredictionCoverage = data.readFloat(),
@@ -216,7 +217,32 @@ object TrackingTelemetryCodec {
         } else {
             withGyroscope
         }
+        return if (version >= VERSION_WITH_RENDER_TIMELINE) {
+            withPredictionCoverage.copy(renderTiming = data.readRenderTiming())
+        } else {
+            withPredictionCoverage
+        }
     }
+
+    private fun DataOutputStream.writeRenderTiming(timing: TrackingRenderTiming) {
+        writeLong(timing.vsyncTimestampNs)
+        writeLong(timing.renderStartTimestampNs)
+        writeLong(timing.cameraFrameSelectedTimestampNs)
+        writeLong(timing.cameraFrameSensorTimestampNs)
+        writeLong(timing.geometryUploadAcceptedTimestampNs)
+        writeLong(timing.renderSubmitTimestampNs)
+        writeLong(timing.presentationTimestampNs)
+    }
+
+    private fun DataInputStream.readRenderTiming(): TrackingRenderTiming = TrackingRenderTiming(
+        vsyncTimestampNs = readLong(),
+        renderStartTimestampNs = readLong(),
+        cameraFrameSelectedTimestampNs = readLong(),
+        cameraFrameSensorTimestampNs = readLong(),
+        geometryUploadAcceptedTimestampNs = readLong(),
+        renderSubmitTimestampNs = readLong(),
+        presentationTimestampNs = readLong(),
+    )
 
     private fun DataOutputStream.writeGeometry(geometry: TrackingGeometry) {
         writeFloat(geometry.pose.centerX)
@@ -322,13 +348,14 @@ object TrackingTelemetryCodec {
         this as? DataInputStream ?: DataInputStream(this)
 
     private const val MAGIC = 0x41525636 // "ARV6"
-    private const val VERSION = 6
+    private const val VERSION = 7
     private const val MINIMUM_SUPPORTED_VERSION = 1
     private const val VERSION_WITH_INPUT_QUALITY = 2
     private const val VERSION_WITH_MATERIAL_TEMPORAL_STATE = 3
     private const val VERSION_WITH_GYROSCOPE_CORRECTION = 4
     private const val VERSION_WITH_PREDICTION_COVERAGE = 5
     private const val VERSION_WITH_PIPELINE_TIMING_AND_3D_TRANSFORM = 6
+    private const val VERSION_WITH_RENDER_TIMELINE = 7
     private const val EVENT_MEASUREMENT = 1
     private const val EVENT_RENDER = 2
     private const val EVENT_FOOTER = 0x7f

@@ -84,6 +84,25 @@ data class TrackingRenderPerformanceMetrics(
     val byFinish: List<TrackingFinishRenderPerformanceMetrics>,
 )
 
+data class TrackingRenderTimelineMetrics(
+    val renderSampleCount: Int,
+    val vsyncTimestampCoverage: Float,
+    val cameraFrameSelectionCoverage: Float,
+    val geometryUploadAcceptedCoverage: Float,
+    val renderSubmitTimestampCoverage: Float,
+    val presentationTimestampCoverage: Float,
+    val medianVsyncCallbackDelayMs: Float,
+    val p95VsyncCallbackDelayMs: Float,
+    val medianCameraSensorToVsyncMs: Float,
+    val p95CameraSensorToVsyncMs: Float,
+    val medianCameraSelectionToSubmitMs: Float,
+    val p95CameraSelectionToSubmitMs: Float,
+    val medianGeometryUploadToSubmitMs: Float,
+    val p95GeometryUploadToSubmitMs: Float,
+    val medianRenderStartToSubmitMs: Float,
+    val p95RenderStartToSubmitMs: Float,
+)
+
 data class TrackingFinishRenderPerformanceMetrics(
     val finish: String,
     val renderCount: Int,
@@ -107,6 +126,7 @@ data class TrackingTelemetryMetrics(
     val shadow3d: TrackingShadow3dMetrics,
     val inputQuality: TrackingInputQualityMetrics,
     val renderPerformance: TrackingRenderPerformanceMetrics,
+    val renderTimeline: TrackingRenderTimelineMetrics,
     val rawLipJitter: TrackingJitterMetric,
     val filteredLipJitter: TrackingJitterMetric,
     val rawLocalLipJitter: TrackingJitterMetric,
@@ -246,6 +266,37 @@ data class TrackingTelemetryMetrics(
                     finish.filamentRenderedFrameFraction.formatMetric()
             }.ifEmpty { "n/a" }
         )
+        append(" renderTimelineSamples=").append(renderTimeline.renderSampleCount)
+        append(" vsyncTimestampCoverage=")
+            .append(renderTimeline.vsyncTimestampCoverage.formatMetric())
+        append(" cameraFrameSelectionCoverage=")
+            .append(renderTimeline.cameraFrameSelectionCoverage.formatMetric())
+        append(" geometryUploadAcceptedCoverage=")
+            .append(renderTimeline.geometryUploadAcceptedCoverage.formatMetric())
+        append(" renderSubmitTimestampCoverage=")
+            .append(renderTimeline.renderSubmitTimestampCoverage.formatMetric())
+        append(" presentationTimestampCoverage=")
+            .append(renderTimeline.presentationTimestampCoverage.formatMetric())
+        append(" vsyncCallbackMedianMs=")
+            .append(renderTimeline.medianVsyncCallbackDelayMs.formatMetric())
+        append(" vsyncCallbackP95Ms=")
+            .append(renderTimeline.p95VsyncCallbackDelayMs.formatMetric())
+        append(" cameraSensorToVsyncMedianMs=")
+            .append(renderTimeline.medianCameraSensorToVsyncMs.formatMetric())
+        append(" cameraSensorToVsyncP95Ms=")
+            .append(renderTimeline.p95CameraSensorToVsyncMs.formatMetric())
+        append(" cameraSelectionToSubmitMedianMs=")
+            .append(renderTimeline.medianCameraSelectionToSubmitMs.formatMetric())
+        append(" cameraSelectionToSubmitP95Ms=")
+            .append(renderTimeline.p95CameraSelectionToSubmitMs.formatMetric())
+        append(" geometryUploadToSubmitMedianMs=")
+            .append(renderTimeline.medianGeometryUploadToSubmitMs.formatMetric())
+        append(" geometryUploadToSubmitP95Ms=")
+            .append(renderTimeline.p95GeometryUploadToSubmitMs.formatMetric())
+        append(" renderStartToSubmitMedianMs=")
+            .append(renderTimeline.medianRenderStartToSubmitMs.formatMetric())
+        append(" renderStartToSubmitP95Ms=")
+            .append(renderTimeline.p95RenderStartToSubmitMs.formatMetric())
         append(" rawJitterRms=").append(rawLipJitter.rms.formatMetric())
         append(" filteredJitterRms=").append(filteredLipJitter.rms.formatMetric())
         append(" rawLocalJitterRms=").append(rawLocalLipJitter.rms.formatMetric())
@@ -273,7 +324,8 @@ object TrackingTelemetryAnalyzer {
 
     fun analyze(session: TrackingTelemetrySession): TrackingTelemetryMetrics {
         val measurements = session.measurements
-        val renders = session.renders.filter { it.lipVisible }
+        val allRenders = session.renders
+        val renders = allRenders.filter { it.lipVisible }
         val eventTimes = session.events.mapNotNull { event ->
             when (event) {
                 is TrackingMeasurementSample -> event.deliveryTimestampMs
@@ -315,6 +367,7 @@ object TrackingTelemetryAnalyzer {
             shadow3d = analyzeShadow3d(measurements),
             inputQuality = analyzeInputQuality(measurements),
             renderPerformance = analyzeRenderPerformance(renders),
+            renderTimeline = analyzeRenderTimeline(allRenders, renders),
             rawLipJitter = pointCloudJitter(
                 stationaryMeasurements.mapNotNull {
                     extractLipPoints(it.rawLandmarks)
@@ -604,6 +657,86 @@ object TrackingTelemetryAnalyzer {
                     )
                 },
         )
+    }
+
+    private fun analyzeRenderTimeline(
+        allRenders: List<TrackingRenderSample>,
+        visibleRenders: List<TrackingRenderSample>,
+    ): TrackingRenderTimelineMetrics {
+        val vsyncCallbackDelay = allRenders.mapNotNull { sample ->
+            orderedDurationNs(
+                sample.renderTiming.vsyncTimestampNs,
+                sample.renderTiming.renderStartTimestampNs,
+            )
+        }
+        val cameraSensorToVsync = allRenders.mapNotNull { sample ->
+            orderedDurationNs(
+                sample.renderTiming.cameraFrameSensorTimestampNs,
+                sample.renderTiming.vsyncTimestampNs,
+            )
+        }
+        val cameraSelectionToSubmit = allRenders.mapNotNull { sample ->
+            orderedDurationNs(
+                sample.renderTiming.cameraFrameSelectedTimestampNs,
+                sample.renderTiming.renderSubmitTimestampNs,
+            )
+        }
+        val geometryUploadToSubmit = visibleRenders.mapNotNull { sample ->
+            orderedDurationNs(
+                sample.renderTiming.geometryUploadAcceptedTimestampNs,
+                sample.renderTiming.renderSubmitTimestampNs,
+            )
+        }
+        val renderStartToSubmit = allRenders.mapNotNull { sample ->
+            orderedDurationNs(
+                sample.renderTiming.renderStartTimestampNs,
+                sample.renderTiming.renderSubmitTimestampNs,
+            )
+        }
+        return TrackingRenderTimelineMetrics(
+            renderSampleCount = allRenders.size,
+            vsyncTimestampCoverage = timestampCoverage(allRenders) {
+                it.renderTiming.vsyncTimestampNs
+            },
+            cameraFrameSelectionCoverage = timestampCoverage(allRenders) {
+                it.renderTiming.cameraFrameSelectedTimestampNs
+            },
+            geometryUploadAcceptedCoverage = timestampCoverage(visibleRenders) {
+                it.renderTiming.geometryUploadAcceptedTimestampNs
+            },
+            renderSubmitTimestampCoverage = timestampCoverage(allRenders) {
+                it.renderTiming.renderSubmitTimestampNs
+            },
+            presentationTimestampCoverage = timestampCoverage(allRenders) {
+                it.renderTiming.presentationTimestampNs
+            },
+            medianVsyncCallbackDelayMs = percentile(vsyncCallbackDelay, 0.5f),
+            p95VsyncCallbackDelayMs = percentile(vsyncCallbackDelay, 0.95f),
+            medianCameraSensorToVsyncMs = percentile(cameraSensorToVsync, 0.5f),
+            p95CameraSensorToVsyncMs = percentile(cameraSensorToVsync, 0.95f),
+            medianCameraSelectionToSubmitMs = percentile(cameraSelectionToSubmit, 0.5f),
+            p95CameraSelectionToSubmitMs = percentile(cameraSelectionToSubmit, 0.95f),
+            medianGeometryUploadToSubmitMs = percentile(geometryUploadToSubmit, 0.5f),
+            p95GeometryUploadToSubmitMs = percentile(geometryUploadToSubmit, 0.95f),
+            medianRenderStartToSubmitMs = percentile(renderStartToSubmit, 0.5f),
+            p95RenderStartToSubmitMs = percentile(renderStartToSubmit, 0.95f),
+        )
+    }
+
+    private fun timestampCoverage(
+        renders: List<TrackingRenderSample>,
+        timestamp: (TrackingRenderSample) -> Long,
+    ): Float = if (renders.isEmpty()) {
+        Float.NaN
+    } else {
+        renders.count { timestamp(it) >= 0L }.toFloat() / renders.size
+    }
+
+    private fun orderedDurationNs(startTimestampNs: Long, endTimestampNs: Long): Float? {
+        if (startTimestampNs < 0L || endTimestampNs < startTimestampNs) return null
+        val durationNs = endTimestampNs - startTimestampNs
+        if (durationNs > MAXIMUM_RENDER_TIMELINE_DURATION_NS) return null
+        return durationNs / NANOSECONDS_PER_MILLISECOND
     }
 
     private fun analyzeInputQuality(
@@ -968,6 +1101,7 @@ object TrackingTelemetryAnalyzer {
     private const val STATIONARY_WINDOW_MS = 2_000L
     private const val MINIMUM_STATIONARY_WINDOW_MS = 1_900L
     private const val NANOSECONDS_PER_MILLISECOND = 1_000_000f
+    private const val MAXIMUM_RENDER_TIMELINE_DURATION_NS = 2_000_000_000L
     private const val MILLISECONDS_PER_SECOND = 1_000f
     private const val RADIANS_TO_DEGREES = 57.29578f
     private const val HALF_ANGLE_RADIANS = 3.1415927f

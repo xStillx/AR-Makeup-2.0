@@ -114,6 +114,39 @@ data class TrackingDeviceState(
     }
 }
 
+/**
+ * CPU-observable render timeline markers, expressed in the elapsed-realtime nanosecond clock.
+ * Choreographer's monotonic frame time is normalized into that clock at callback entry.
+ *
+ * The camera marker means that a buffer was handed to Filament, and the geometry marker means
+ * that Filament accepted the vertex-buffer upload command. Neither marker proves GPU completion.
+ * Filament's Java API does not currently expose an actual presentation timestamp, so that field
+ * deliberately remains [UNKNOWN_TIMESTAMP_NS] until a native/FrameTimeline source is added.
+ */
+data class TrackingRenderTiming(
+    val vsyncTimestampNs: Long,
+    val renderStartTimestampNs: Long,
+    val cameraFrameSelectedTimestampNs: Long,
+    val cameraFrameSensorTimestampNs: Long,
+    val geometryUploadAcceptedTimestampNs: Long,
+    val renderSubmitTimestampNs: Long,
+    val presentationTimestampNs: Long,
+) {
+    companion object {
+        const val UNKNOWN_TIMESTAMP_NS = -1L
+
+        val UNKNOWN = TrackingRenderTiming(
+            vsyncTimestampNs = UNKNOWN_TIMESTAMP_NS,
+            renderStartTimestampNs = UNKNOWN_TIMESTAMP_NS,
+            cameraFrameSelectedTimestampNs = UNKNOWN_TIMESTAMP_NS,
+            cameraFrameSensorTimestampNs = UNKNOWN_TIMESTAMP_NS,
+            geometryUploadAcceptedTimestampNs = UNKNOWN_TIMESTAMP_NS,
+            renderSubmitTimestampNs = UNKNOWN_TIMESTAMP_NS,
+            presentationTimestampNs = UNKNOWN_TIMESTAMP_NS,
+        )
+    }
+}
+
 data class TrackingRenderSample(
     val renderTimestampMs: Long,
     val measurementTimestampMs: Long,
@@ -140,6 +173,7 @@ data class TrackingRenderSample(
     val gyroscopeRollRadians: Float = 0f,
     val cameraMotionPredictionSeconds: Float = Float.NaN,
     val globalPredictionCoverage: Float = Float.NaN,
+    val renderTiming: TrackingRenderTiming = TrackingRenderTiming.UNKNOWN,
 ) : TrackingTelemetryEvent
 
 private const val UNKNOWN_LIPSTICK_FINISH = "UNKNOWN"
