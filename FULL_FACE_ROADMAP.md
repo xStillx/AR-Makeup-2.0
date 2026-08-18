@@ -216,9 +216,9 @@ Parsing выполняется ориентировочно 15–30 раз/с п
 
 ## Следующее действие
 
-1. Сохранить текущий native-visible 30-Hz proof отдельным checkpoint; default остаётся Filament с queue protection on + presentation hints on.
-2. Разделить camera acquisition и display cadence: native runtime удерживает один последний завершённый camera AHB/image, безопасно заменяет его latest-кадром и представляет camera + новую predicted tracking-test geometry на каждом 60-Hz vsync. Не добавлять camera queue и не переносить product materials/full-face renderer в том же slice.
-3. Записать controlled telemetry-on Filament/Vulkan A/B: direct sensor→actual, desired/ready→actual, actual interval/jank, duplicated frames, CPU/GPU/thermal и head/phone-motion visual response. Gate: около `16.7 ms` interval при сохранении orientation/mirror/crop и `cameraDropped=0`.
-4. Записать face-visible yaw и pitch, затем stop/dropout/weak-light/thermal и сопоставить matrix continuity с 22-anchor pose/gyro по sensor/actual-display timestamps; абсолютный Euler zero не использовать.
+1. Разделить camera acquisition и display cadence: native runtime удерживает один последний завершённый camera AHB/image, безопасно заменяет его latest-кадром и представляет camera + новую predicted tracking-test geometry на каждом 60-Hz vsync. Не добавлять camera queue и не переносить product materials/full-face renderer в том же slice.
+2. Записать controlled telemetry-on Filament/Vulkan A/B: direct sensor→actual, desired/ready→actual, actual interval/jank, duplicated frames, CPU/GPU/thermal и head/phone-motion visual response. Gate: около `16.7 ms` interval при сохранении orientation/mirror/crop и `cameraDropped=0`.
+3. После display-cadence gate исследовать сообщение iOS-разработчика об ARKit + «точке на губах»: получить точный код/coordinate ownership и реализовать Android local 3D lip anchor (центр, оси, normal), а не одиночную 2D-точку. В shadow A/B сравнить MediaPipe facial transformation matrix и ARCore Augmented Faces pose/mesh при одинаковом renderer/predictor; ARCore не добавлять до license review.
+4. Записать face-visible yaw и pitch, затем stop/dropout/weak-light/thermal и сопоставить matrix/lip-anchor continuity с 22-anchor pose/gyro по sensor/actual-display timestamps; абсолютный Euler zero не использовать.
 5. После полного FF1/FF2 numerical + visual gate перейти к FF3 model-independent `FaceObservation` / `FullFaceRenderState`.
-6. Matrix не подключать в renderer до этого gate; V6.3 strong phone-motion visual acceptance остаётся отдельной задачей.
+6. Matrix или ARCore не подключать в production renderer до этого gate; V6.3 strong phone-motion visual acceptance остаётся отдельной задачей.

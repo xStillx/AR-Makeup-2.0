@@ -286,6 +286,14 @@ Native runtime опционально включает `VK_GOOGLE_display_timing
 
 Следующий обязательный FF1 slice: native runtime удерживает ровно один последний завершённый camera image, заменяет его только latest-кадром с корректным fence/foreign-queue ownership и представляет background + новую predicted lip geometry на каждом display vsync. Acceptance требует `~16.7 ms` actual interval без роста camera queue, direct sensor→actual не хуже текущего proof, 60-Hz geometry response, правильный teardown и controlled telemetry-on A/B. До этого debug-extra не включается по умолчанию и текущий Filament queue protection/presentation hints остаются включены.
 
+## Отложенная гипотеза ARKit / локального lip anchor — 2026-08-18
+
+iOS-разработчик сообщил, что устранил слёт и заметное отставание с помощью ARKit и добавленной «точки на губах». Это пока внешний qualitative result, а не доказательство, что одна 2D-точка решает проблему: `ARFaceAnchor` уже предоставляет согласованную позицию/ориентацию лица и деформируемую face geometry, поэтому прикреплённая к нему точка может неявно наследовать полную 3D-позу и синхронизацию ARKit. Перед воспроизведением нужно получить iOS-фрагмент создания/обновления точки и установить, является ли она дочерним узлом face anchor, вершиной face geometry или независимо фильтруемой screen-space координатой.
+
+Android-кандидат формулируется как локальная 3D-система губ, а не одиночная screen-space точка: устойчивый центр по нескольким центральным landmarks, горизонтальная ось по уголкам, вертикальная ось по верхней/нижней губе и нормаль/глубина из общей canonical face pose. Глобальное движение головы берётся из общей 3D-позы лица, локальное открытие и мимика — из lip landmarks, а late reprojection выполняется к actual display timestamp. Одна точка может исправлять только перенос и не определяет rotation, scale, opening или асимметричную деформацию.
+
+Ближайший Android A/B после завершения independent 60-Hz Vulkan present: текущая MediaPipe facial transformation matrix против ARCore Augmented Faces center pose/468-point mesh, при одинаковом локальном lip anchor, predictor, renderer и тестовых движениях. ARCore не предоставляет отдельную готовую lip region pose, поэтому lip anchor всё равно строится из mesh/landmarks. Сравниваются sensor→actual latency, stationary jitter, head-motion/phone-motion lag, stop overshoot, dropout/reacquisition и деформация рта. До этого gate MediaPipe не заменяется, ARCore не подключается к visible path, а новая зависимость сначала проходит проверку условий распространения и обновление `LICENSE_COMPLIANCE.md`. Эксперимент намеренно выполняется после 60-Гц compositor slice, иначе текущий 30-Гц present будет искажать выводы о tracker/backend.
+
 V6.0 вместе с актуальным на тот момент `PROJECT_CONTEXT.md` и `CHAT_HANDOFF.md` зафиксирован и отправлен в remote commit `8d48b46` (`[V6]`). Этот commit является воспроизводимой точкой старта для V6.1; дальнейшие tracking-изменения должны сравниваться с ним на одинаковых `.arv6` записях.
 
 Официальный model bundle сохранён в `app/src/main/assets/face_landmarker.task`. Его SHA-256: `64184E229B263107BC2B804C6625DB1341FF2BB731874B0BCC2FE6544E0BC9FF`. BlazeFace, Face Mesh V2 и Blendshape V2 проверены по официальным model cards; все три компонента имеют лицензию Apache 2.0. Детали находятся в `app/src/main/assets/MODEL_LICENSES.md`.
@@ -564,3 +572,5 @@ Preview и ImageAnalysis должны использовать общий `ViewP
 - Google Filament: https://github.com/google/filament
 - Filament Materials Guide: https://google.github.io/filament/main/materials.html
 - ARCore Augmented Faces: https://developers.google.com/ar/develop/augmented-faces
+- Apple ARFaceAnchor: https://developer.apple.com/documentation/arkit/arfaceanchor
+- Apple face tracking and geometry sample: https://developer.apple.com/documentation/arkit/tracking-and-visualizing-faces

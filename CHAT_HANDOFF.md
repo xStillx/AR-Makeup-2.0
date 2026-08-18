@@ -95,11 +95,11 @@ adb shell am start -n com.example.armakeup/.MainActivity `
 
 Device proof: visible swapchain `1080×2340`, 5 images, camera `1440×1080`, orientation/mirror/crop/lip alignment правильные; более 1020 camera frames, `cameraDropped=0`, lifecycle Home/resume/Back без crash. Direct native sensor→actual rolling p50/p95 около `127.1/135.2 ms`. SurfaceFlinger 20 s: native `583` frames, desired→actual `30.78/31.37 ms`, interval `33.38/33.60 ms`, `578/582 >25 ms`; same-APK Filament `1186` frames, desired→actual `29.10/46.04 ms`, interval `16.689/16.788 ms`, `1/1185 >25 ms`. Native actual feedback и p95 стабильны, но present выполняется только при новом 30-FPS camera buffer, поэтому production cutover отклонён. Default остаётся Filament.
 
-1. Сохранить native-visible 30-Hz proof checkpoint; актуальный gate после двух новых timing tests — 133 test, lint/APK/четыре ABI.
-2. Следующий FF1 slice: native runtime удерживает ровно один последний camera image и независимо представляет camera + актуальную predicted geometry на каждом 60-Hz vsync; latest-only acquisition, foreign ownership и fences не ослаблять.
-3. Затем controlled telemetry-on Filament/Vulkan A/B по direct sensor→actual, interval/jank, camera drops, CPU/GPU/thermal и visual head/phone motion. Не расширять predictor и не переносить full-face/material path одновременно.
+1. Следующий FF1 slice: native runtime удерживает ровно один последний camera image и независимо представляет camera + актуальную predicted geometry на каждом 60-Hz vsync; latest-only acquisition, foreign ownership и fences не ослаблять.
+2. Затем controlled telemetry-on Filament/Vulkan A/B по direct sensor→actual, interval/jank, camera drops, CPU/GPU/thermal и visual head/phone motion. Не расширять predictor и не переносить full-face/material path одновременно.
+3. После 60-Hz gate вернуться к iOS-наблюдению «ARKit + точка на губах»: запросить точный код и проверить, наследует ли точка `ARFaceAnchor`/face geometry. Android-вариант — local 3D lip anchor по нескольким landmarks; shadow A/B MediaPipe face matrix против ARCore Augmented Faces pose/mesh. Одиночная 2D-точка не считается достаточной; ARCore требует предварительного license review.
 4. Записать face-visible yaw/pitch, stop/dropout/weak-light/thermal; после FF1/FF2 перейти к FF3 model-independent `FaceObservation` / `FullFaceRenderState`.
-5. V6.3 strong phone-motion visual acceptance выполнить отдельно; matrix не подключать в renderer до численного и visual acceptance.
+5. V6.3 strong phone-motion visual acceptance выполнить отдельно; matrix/ARCore не подключать в production renderer до численного и visual acceptance.
 
 Acceptance V6: нет заметного jitter на неподвижном лице, отставания при движении и скачка после остановки; нет regressions orientation/mirror/lip alignment; pipeline остаётся latest-only и укладывается в GPU compositor budget 6–8 ms на целевом устройстве.
 
