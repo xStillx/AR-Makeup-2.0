@@ -16,6 +16,8 @@ set(generated_shader_directory "${CMAKE_CURRENT_BINARY_DIR}/generated")
 set(camera_vertex_spirv "${generated_shader_directory}/camera_frame.vert.spv")
 set(camera_fragment_spirv "${generated_shader_directory}/camera_frame.frag.spv")
 set(camera_shader_header "${generated_shader_directory}/CameraShaders.generated.h")
+set(tracking_test_lip_vertex_spirv "${generated_shader_directory}/tracking_test_lip.vert.spv")
+set(tracking_test_lip_fragment_spirv "${generated_shader_directory}/tracking_test_lip.frag.spv")
 set(temporal_luma_spirv "${generated_shader_directory}/temporal_luma.comp.spv")
 set(temporal_downsample_spirv "${generated_shader_directory}/temporal_downsample.comp.spv")
 set(temporal_flow_spirv "${generated_shader_directory}/temporal_flow.comp.spv")
@@ -37,6 +39,22 @@ add_custom_command(
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/camera_frame.frag"
         -o "${camera_fragment_spirv}"
     DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/camera_frame.frag"
+    VERBATIM
+)
+add_custom_command(
+    OUTPUT "${tracking_test_lip_vertex_spirv}"
+    COMMAND "${GLSLC_EXECUTABLE}" -O -fshader-stage=vertex
+        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/tracking_test_lip.vert"
+        -o "${tracking_test_lip_vertex_spirv}"
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/tracking_test_lip.vert"
+    VERBATIM
+)
+add_custom_command(
+    OUTPUT "${tracking_test_lip_fragment_spirv}"
+    COMMAND "${GLSLC_EXECUTABLE}" -O -fshader-stage=fragment
+        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/tracking_test_lip.frag"
+        -o "${tracking_test_lip_fragment_spirv}"
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/tracking_test_lip.frag"
     VERBATIM
 )
 add_custom_command(
@@ -76,6 +94,8 @@ add_custom_command(
     COMMAND "${CMAKE_COMMAND}"
         -DVERTEX_SHADER=${camera_vertex_spirv}
         -DFRAGMENT_SHADER=${camera_fragment_spirv}
+        -DTRACKING_TEST_LIP_VERTEX_SHADER=${tracking_test_lip_vertex_spirv}
+        -DTRACKING_TEST_LIP_FRAGMENT_SHADER=${tracking_test_lip_fragment_spirv}
         -DTEMPORAL_LUMA_SHADER=${temporal_luma_spirv}
         -DTEMPORAL_DOWNSAMPLE_SHADER=${temporal_downsample_spirv}
         -DTEMPORAL_FLOW_SHADER=${temporal_flow_spirv}
@@ -85,6 +105,8 @@ add_custom_command(
     DEPENDS
         "${camera_vertex_spirv}"
         "${camera_fragment_spirv}"
+        "${tracking_test_lip_vertex_spirv}"
+        "${tracking_test_lip_fragment_spirv}"
         "${temporal_luma_spirv}"
         "${temporal_downsample_spirv}"
         "${temporal_flow_spirv}"

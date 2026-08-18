@@ -19,6 +19,7 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstdint>
+#include <cstring>
 #include <exception>
 #include <limits>
 #include <memory>
@@ -45,6 +46,21 @@ constexpr std::size_t kTemporalResultElementCount = 8;
 constexpr std::uint32_t kTemporalPyramidLevels = 3;
 constexpr std::uint32_t kTemporalPyramidSize = 192;
 constexpr std::uint32_t kTemporalFlowPointCount = 48;
+constexpr std::size_t kTrackingTestLipVertexComponentCount = 3;
+constexpr std::size_t kTrackingTestLipMaxVertexCount = 1024;
+constexpr std::size_t kTrackingTestLipMaxIndexCount = 6000;
+constexpr std::size_t kPresentationMetadataCount = 7;
+constexpr std::size_t kMaxPendingPresentationSamples = 256;
+
+struct PresentationSample final {
+    std::uint64_t presentationId = 0;
+    std::int64_t cameraSensorTimestampNs = 0;
+    std::uint64_t actualPresentationTimestampNs = 0;
+    std::uint64_t desiredPresentationTimestampNs = 0;
+    std::uint64_t earliestPresentationTimestampNs = 0;
+    std::uint64_t presentMarginNs = 0;
+    std::uint64_t refreshDurationNs = 0;
+};
 
 struct alignas(16) TemporalPushConstants final {
     std::array<float, kTransformElementCount> uvTransform{};
@@ -249,7 +265,9 @@ public:
                << " releaseFences=" << cameraReleaseFences_.load()
                << " temporalComputed=" << temporalComputedFrames_.load()
                << " temporalAccepted=" << temporalAcceptedFrames_.load()
-               << " temporalRejected=" << temporalRejectedFrames_.load();
+               << " temporalRejected=" << temporalRejectedFrames_.load()
+               << " displayTiming=" << (displayTimingSupported_ ? "true" : "false")
+               << " actualPresentId=" << latestPresentationId_.load();
         if (lastCameraWidth_.load() > 0U) {
             output << " camera=" << lastCameraWidth_.load() << 'x' << lastCameraHeight_.load()
                    << " ahbFormat=" << lastCameraFormat_.load()
@@ -458,6 +476,98 @@ public:
         mediaDispatch_.close();
     }
 
+    bool updateTrackingTestLip(
+        JNIEnv* environment,
+        jfloatArray vertices,
+        jshortArray indices,
+        bool visible
+    ) {
+        if (!ready_.load()) {
+            return false;
+        }
+        if (!visible) {
+            std::lock_guard lock(lipMutex_);
+            trackingTestLipVisible_ = false;
+            trackingTestLipVertices_.clear();
+            trackingTestLipIndices_.clear();
+            return true;
+        }
+        if (vertices == nullptr || indices == nullptr) {
+            return false;
+        }
+        const jsize vertexValueCount = environment->GetArrayLength(vertices);
+        const jsize indexCount = environment->GetArrayLength(indices);
+        if (vertexValueCount <= 0 || indexCount <= 0 ||
+            vertexValueCount % static_cast<jsize>(kTrackingTestLipVertexComponentCount) != 0) {
+            return false;
+        }
+        const std::size_t vertexCount = static_cast<std::size_t>(vertexValueCount) /
+            kTrackingTestLipVertexComponentCount;
+        if (vertexCount > kTrackingTestLipMaxVertexCount ||
+            static_cast<std::size_t>(indexCount) > kTrackingTestLipMaxIndexCount) {
+            return false;
+        }
+        std::vector<float> copiedVertices(static_cast<std::size_t>(vertexValueCount));
+        std::vector<jshort> copiedIndices(static_cast<std::size_t>(indexCount));
+        environment->GetFloatArrayRegion(
+            vertices,
+            0,
+            vertexValueCount,
+            copiedVertices.data()
+        );
+        environment->GetShortArrayRegion(indices, 0, indexCount, copiedIndices.data());
+        if (environment->ExceptionCheck() == JNI_TRUE ||
+            !std::all_of(copiedVertices.begin(), copiedVertices.end(), [](float value) {
+                return std::isfinite(value);
+            })) {
+            return false;
+        }
+        std::vector<std::uint16_t> unsignedIndices(copiedIndices.size());
+        for (std::size_t index = 0; index < copiedIndices.size(); ++index) {
+            const std::uint16_t value = static_cast<std::uint16_t>(copiedIndices[index]);
+            if (value >= vertexCount) {
+                return false;
+            }
+            unsignedIndices[index] = value;
+        }
+        std::lock_guard lock(lipMutex_);
+        trackingTestLipVertices_ = std::move(copiedVertices);
+        trackingTestLipIndices_ = std::move(unsignedIndices);
+        trackingTestLipVisible_ = true;
+        return true;
+    }
+
+    bool readLatestPresentationTiming(JNIEnv* environment, jlongArray values) const {
+        if (values == nullptr ||
+            environment->GetArrayLength(values) < static_cast<jsize>(kPresentationMetadataCount)) {
+            return false;
+        }
+        PresentationSample sample{};
+        {
+            std::lock_guard lock(presentationMutex_);
+            if (latestPresentationSample_.presentationId == 0) {
+                return false;
+            }
+            sample = latestPresentationSample_;
+        }
+        const std::array<jlong, kPresentationMetadataCount> output{
+            static_cast<jlong>(sample.presentationId),
+            static_cast<jlong>(sample.cameraSensorTimestampNs),
+            static_cast<jlong>(sample.actualPresentationTimestampNs),
+            static_cast<jlong>(sample.desiredPresentationTimestampNs),
+            static_cast<jlong>(sample.earliestPresentationTimestampNs),
+            static_cast<jlong>(sample.presentMarginNs),
+            static_cast<jlong>(sample.refreshDurationNs),
+        };
+        environment->SetLongArrayRegion(
+            values,
+            0,
+            static_cast<jsize>(output.size()),
+            output.data()
+        );
+        return environment->ExceptionCheck() == JNI_FALSE;
+    }
+
 private:
     struct PendingCameraFrame final {
         AImage* image = nullptr;
@@ -573,6 +683,9 @@ private:
             return;
         }
         if (!createSynchronization()) {
+            return;
+        }
+        if (!createTrackingTestLipPipeline()) {
             return;
         }
 
@@ -694,6 +807,10 @@ private:
                     getPhysicalDeviceMemoryProperties_(candidate, &memoryProperties_);
                     deviceName_ = properties.deviceName;
                     deviceApiVersion_ = properties.apiVersion;
+                    displayTimingSupported_ = supportsDeviceExtension(
+                        candidate,
+                        VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME
+                    );
                     return true;
                 }
             }
@@ -742,12 +859,15 @@ private:
             .queueCount = 1,
             .pQueuePriorities = &queuePriority,
         };
-        const std::array<const char*, 4> deviceExtensions{
+        std::vector<const char*> deviceExtensions{
             VK_KHR_SWAPCHAIN_EXTENSION_NAME,
             VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME,
             VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME,
             VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME,
         };
+        if (displayTimingSupported_) {
+            deviceExtensions.push_back(VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME);
+        }
         const VkPhysicalDeviceFeatures features{};
         const VkDeviceCreateInfo deviceCreateInfo{
             .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
@@ -806,6 +926,10 @@ private:
             loadDevice<PFN_vkCmdBindDescriptorSets>("vkCmdBindDescriptorSets");
         cmdPushConstants_ = loadDevice<PFN_vkCmdPushConstants>("vkCmdPushConstants");
         cmdDraw_ = loadDevice<PFN_vkCmdDraw>("vkCmdDraw");
+        cmdBindVertexBuffers_ =
+            loadDevice<PFN_vkCmdBindVertexBuffers>("vkCmdBindVertexBuffers");
+        cmdBindIndexBuffer_ = loadDevice<PFN_vkCmdBindIndexBuffer>("vkCmdBindIndexBuffer");
+        cmdDrawIndexed_ = loadDevice<PFN_vkCmdDrawIndexed>("vkCmdDrawIndexed");
         cmdDispatch_ = loadDevice<PFN_vkCmdDispatch>("vkCmdDispatch");
         createSemaphore_ = loadDevice<PFN_vkCreateSemaphore>("vkCreateSemaphore");
         destroySemaphore_ = loadDevice<PFN_vkDestroySemaphore>("vkDestroySemaphore");
@@ -817,6 +941,19 @@ private:
         queueSubmit_ = loadDevice<PFN_vkQueueSubmit>("vkQueueSubmit");
         queuePresent_ = loadDevice<PFN_vkQueuePresentKHR>("vkQueuePresentKHR");
         deviceWaitIdle_ = loadDevice<PFN_vkDeviceWaitIdle>("vkDeviceWaitIdle");
+        if (displayTimingSupported_) {
+            getRefreshCycleDuration_ = loadDevice<PFN_vkGetRefreshCycleDurationGOOGLE>(
+                "vkGetRefreshCycleDurationGOOGLE"
+            );
+            getPastPresentationTiming_ = loadDevice<PFN_vkGetPastPresentationTimingGOOGLE>(
+                "vkGetPastPresentationTimingGOOGLE"
+            );
+            if (getRefreshCycleDuration_ == nullptr || getPastPresentationTiming_ == nullptr) {
+                displayTimingSupported_ = false;
+                getRefreshCycleDuration_ = nullptr;
+                getPastPresentationTiming_ = nullptr;
+            }
+        }
         createImage_ = loadDevice<PFN_vkCreateImage>("vkCreateImage");
         destroyImage_ = loadDevice<PFN_vkDestroyImage>("vkDestroyImage");
         getImageMemoryRequirements_ =
@@ -893,6 +1030,9 @@ private:
             cmdBindDescriptorSets_ == nullptr ||
             cmdPushConstants_ == nullptr ||
             cmdDraw_ == nullptr ||
+            cmdBindVertexBuffers_ == nullptr ||
+            cmdBindIndexBuffer_ == nullptr ||
+            cmdDrawIndexed_ == nullptr ||
             cmdDispatch_ == nullptr ||
             createSemaphore_ == nullptr ||
             destroySemaphore_ == nullptr ||
@@ -1033,6 +1173,12 @@ private:
         }
         if (!createImageViews() || !createRenderPass() || !createFramebuffers()) {
             return false;
+        }
+        if (displayTimingSupported_ && getRefreshCycleDuration_ != nullptr) {
+            VkRefreshCycleDurationGOOGLE duration{};
+            if (getRefreshCycleDuration_(device_, swapchain_, &duration) == VK_SUCCESS) {
+                refreshDurationNs_ = duration.refreshDuration;
+            }
         }
         return createAndRecordCommandBuffers();
     }
@@ -1343,6 +1489,329 @@ private:
                 return false;
             }
         }
+        return true;
+    }
+
+    bool createTrackingTestLipPipeline() {
+        const VkPipelineLayoutCreateInfo layoutInfo{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .setLayoutCount = 0,
+            .pSetLayouts = nullptr,
+            .pushConstantRangeCount = 0,
+            .pPushConstantRanges = nullptr,
+        };
+        VkResult result = createPipelineLayout_(
+            device_,
+            &layoutInfo,
+            nullptr,
+            &trackingTestLipPipelineLayout_
+        );
+        if (result != VK_SUCCESS) {
+            setVulkanError("create_tracking_lip_pipeline_layout", result);
+            return false;
+        }
+
+        VkShaderModule vertexModule = VK_NULL_HANDLE;
+        VkShaderModule fragmentModule = VK_NULL_HANDLE;
+        if (!createShaderModule(
+                armakeup::shaders::kTrackingTestLipVertex,
+                sizeof(armakeup::shaders::kTrackingTestLipVertex),
+                &vertexModule
+            ) ||
+            !createShaderModule(
+                armakeup::shaders::kTrackingTestLipFragment,
+                sizeof(armakeup::shaders::kTrackingTestLipFragment),
+                &fragmentModule
+            )) {
+            if (vertexModule != VK_NULL_HANDLE) {
+                destroyShaderModule_(device_, vertexModule, nullptr);
+            }
+            if (fragmentModule != VK_NULL_HANDLE) {
+                destroyShaderModule_(device_, fragmentModule, nullptr);
+            }
+            return false;
+        }
+        const std::array<VkPipelineShaderStageCreateInfo, 2> shaderStages{
+            VkPipelineShaderStageCreateInfo{
+                .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                .pNext = nullptr,
+                .flags = 0,
+                .stage = VK_SHADER_STAGE_VERTEX_BIT,
+                .module = vertexModule,
+                .pName = "main",
+                .pSpecializationInfo = nullptr,
+            },
+            VkPipelineShaderStageCreateInfo{
+                .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                .pNext = nullptr,
+                .flags = 0,
+                .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+                .module = fragmentModule,
+                .pName = "main",
+                .pSpecializationInfo = nullptr,
+            },
+        };
+        const VkVertexInputBindingDescription binding{
+            .binding = 0,
+            .stride = static_cast<std::uint32_t>(
+                sizeof(float) * kTrackingTestLipVertexComponentCount
+            ),
+            .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+        };
+        const std::array<VkVertexInputAttributeDescription, 2> attributes{
+            VkVertexInputAttributeDescription{
+                .location = 0,
+                .binding = 0,
+                .format = VK_FORMAT_R32G32_SFLOAT,
+                .offset = 0,
+            },
+            VkVertexInputAttributeDescription{
+                .location = 1,
+                .binding = 0,
+                .format = VK_FORMAT_R32_SFLOAT,
+                .offset = static_cast<std::uint32_t>(sizeof(float) * 2U),
+            },
+        };
+        const VkPipelineVertexInputStateCreateInfo vertexInput{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .vertexBindingDescriptionCount = 1,
+            .pVertexBindingDescriptions = &binding,
+            .vertexAttributeDescriptionCount = static_cast<std::uint32_t>(attributes.size()),
+            .pVertexAttributeDescriptions = attributes.data(),
+        };
+        const VkPipelineInputAssemblyStateCreateInfo inputAssembly{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+            .primitiveRestartEnable = VK_FALSE,
+        };
+        const VkViewport viewport{
+            .x = 0.0F,
+            .y = 0.0F,
+            .width = static_cast<float>(extent_.width),
+            .height = static_cast<float>(extent_.height),
+            .minDepth = 0.0F,
+            .maxDepth = 1.0F,
+        };
+        const VkRect2D scissor{
+            .offset = VkOffset2D{.x = 0, .y = 0},
+            .extent = extent_,
+        };
+        const VkPipelineViewportStateCreateInfo viewportState{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .viewportCount = 1,
+            .pViewports = &viewport,
+            .scissorCount = 1,
+            .pScissors = &scissor,
+        };
+        const VkPipelineRasterizationStateCreateInfo rasterization{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .depthClampEnable = VK_FALSE,
+            .rasterizerDiscardEnable = VK_FALSE,
+            .polygonMode = VK_POLYGON_MODE_FILL,
+            .cullMode = VK_CULL_MODE_NONE,
+            .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+            .depthBiasEnable = VK_FALSE,
+            .depthBiasConstantFactor = 0.0F,
+            .depthBiasClamp = 0.0F,
+            .depthBiasSlopeFactor = 0.0F,
+            .lineWidth = 1.0F,
+        };
+        const VkPipelineMultisampleStateCreateInfo multisample{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+            .sampleShadingEnable = VK_FALSE,
+            .minSampleShading = 0.0F,
+            .pSampleMask = nullptr,
+            .alphaToCoverageEnable = VK_FALSE,
+            .alphaToOneEnable = VK_FALSE,
+        };
+        const VkPipelineColorBlendAttachmentState blendAttachment{
+            .blendEnable = VK_TRUE,
+            .srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
+            .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+            .colorBlendOp = VK_BLEND_OP_ADD,
+            .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+            .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+            .alphaBlendOp = VK_BLEND_OP_ADD,
+            .colorWriteMask = VK_COLOR_COMPONENT_R_BIT |
+                VK_COLOR_COMPONENT_G_BIT |
+                VK_COLOR_COMPONENT_B_BIT |
+                VK_COLOR_COMPONENT_A_BIT,
+        };
+        const VkPipelineColorBlendStateCreateInfo blend{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .logicOpEnable = VK_FALSE,
+            .logicOp = VK_LOGIC_OP_COPY,
+            .attachmentCount = 1,
+            .pAttachments = &blendAttachment,
+            .blendConstants = {0.0F, 0.0F, 0.0F, 0.0F},
+        };
+        const VkGraphicsPipelineCreateInfo pipelineInfo{
+            .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .stageCount = static_cast<std::uint32_t>(shaderStages.size()),
+            .pStages = shaderStages.data(),
+            .pVertexInputState = &vertexInput,
+            .pInputAssemblyState = &inputAssembly,
+            .pTessellationState = nullptr,
+            .pViewportState = &viewportState,
+            .pRasterizationState = &rasterization,
+            .pMultisampleState = &multisample,
+            .pDepthStencilState = nullptr,
+            .pColorBlendState = &blend,
+            .pDynamicState = nullptr,
+            .layout = trackingTestLipPipelineLayout_,
+            .renderPass = renderPass_,
+            .subpass = 0,
+            .basePipelineHandle = VK_NULL_HANDLE,
+            .basePipelineIndex = -1,
+        };
+        result = createGraphicsPipelines_(
+            device_,
+            VK_NULL_HANDLE,
+            1,
+            &pipelineInfo,
+            nullptr,
+            &trackingTestLipPipeline_
+        );
+        destroyShaderModule_(device_, fragmentModule, nullptr);
+        destroyShaderModule_(device_, vertexModule, nullptr);
+        if (result != VK_SUCCESS) {
+            setVulkanError("create_tracking_lip_pipeline", result);
+            return false;
+        }
+        return true;
+    }
+
+    bool createTrackingTestLipBuffer(
+        VkDeviceSize size,
+        VkBufferUsageFlags usage,
+        VkBuffer* buffer,
+        VkDeviceMemory* memory,
+        void** mapped
+    ) {
+        const VkBufferCreateInfo bufferInfo{
+            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .size = size,
+            .usage = usage,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+            .queueFamilyIndexCount = 0,
+            .pQueueFamilyIndices = nullptr,
+        };
+        VkResult result = createBuffer_(device_, &bufferInfo, nullptr, buffer);
+        if (result != VK_SUCCESS) {
+            setVulkanError("create_tracking_lip_buffer", result);
+            return false;
+        }
+        VkMemoryRequirements requirements{};
+        getBufferMemoryRequirements_(device_, *buffer, &requirements);
+        const std::uint32_t memoryType = findMemoryType(
+            requirements.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+        );
+        if (memoryType == std::numeric_limits<std::uint32_t>::max()) {
+            setError("tracking_lip_host_memory_unavailable");
+            return false;
+        }
+        const VkMemoryAllocateInfo allocateInfo{
+            .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+            .pNext = nullptr,
+            .allocationSize = requirements.size,
+            .memoryTypeIndex = memoryType,
+        };
+        result = allocateMemory_(device_, &allocateInfo, nullptr, memory);
+        if (result != VK_SUCCESS) {
+            setVulkanError("allocate_tracking_lip_buffer", result);
+            return false;
+        }
+        result = bindBufferMemory_(device_, *buffer, *memory, 0);
+        if (result != VK_SUCCESS) {
+            setVulkanError("bind_tracking_lip_buffer", result);
+            return false;
+        }
+        result = mapMemory_(device_, *memory, 0, VK_WHOLE_SIZE, 0, mapped);
+        if (result != VK_SUCCESS || *mapped == nullptr) {
+            setVulkanError("map_tracking_lip_buffer", result);
+            return false;
+        }
+        return true;
+    }
+
+    bool ensureTrackingTestLipBuffers() {
+        if (trackingTestLipVertexBuffers_[0] != VK_NULL_HANDLE) {
+            return true;
+        }
+        const VkDeviceSize vertexBytes = static_cast<VkDeviceSize>(
+            kTrackingTestLipMaxVertexCount * kTrackingTestLipVertexComponentCount * sizeof(float)
+        );
+        const VkDeviceSize indexBytes = static_cast<VkDeviceSize>(
+            kTrackingTestLipMaxIndexCount * sizeof(std::uint16_t)
+        );
+        for (std::size_t index = 0; index < kFramesInFlight; ++index) {
+            if (!createTrackingTestLipBuffer(
+                    vertexBytes,
+                    VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                    &trackingTestLipVertexBuffers_[index],
+                    &trackingTestLipVertexMemories_[index],
+                    &trackingTestLipVertexMapped_[index]
+                ) ||
+                !createTrackingTestLipBuffer(
+                    indexBytes,
+                    VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                    &trackingTestLipIndexBuffers_[index],
+                    &trackingTestLipIndexMemories_[index],
+                    &trackingTestLipIndexMapped_[index]
+                )) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool prepareTrackingTestLipFrame(
+        std::uint32_t frameIndex,
+        std::uint32_t* outputIndexCount
+    ) {
+        if (outputIndexCount == nullptr || frameIndex >= kFramesInFlight) {
+            return false;
+        }
+        *outputIndexCount = 0;
+        std::lock_guard lock(lipMutex_);
+        if (!trackingTestLipVisible_ || trackingTestLipVertices_.empty() ||
+            trackingTestLipIndices_.empty()) {
+            return true;
+        }
+        if (!ensureTrackingTestLipBuffers()) {
+            return false;
+        }
+        std::memcpy(
+            trackingTestLipVertexMapped_[frameIndex],
+            trackingTestLipVertices_.data(),
+            trackingTestLipVertices_.size() * sizeof(float)
+        );
+        std::memcpy(
+            trackingTestLipIndexMapped_[frameIndex],
+            trackingTestLipIndices_.data(),
+            trackingTestLipIndices_.size() * sizeof(std::uint16_t)
+        );
+        *outputIndexCount = static_cast<std::uint32_t>(trackingTestLipIndices_.size());
         return true;
     }
 
@@ -2515,8 +2984,74 @@ private:
         return true;
     }
 
+    void collectPastPresentationTimings() {
+        if (!displayTimingSupported_ || getPastPresentationTiming_ == nullptr) {
+            return;
+        }
+        std::uint32_t timingCount = 0;
+        VkResult result = getPastPresentationTiming_(
+            device_,
+            swapchain_,
+            &timingCount,
+            nullptr
+        );
+        if (result != VK_SUCCESS || timingCount == 0U) {
+            return;
+        }
+        std::vector<VkPastPresentationTimingGOOGLE> timings(timingCount);
+        result = getPastPresentationTiming_(
+            device_,
+            swapchain_,
+            &timingCount,
+            timings.data()
+        );
+        if (result != VK_SUCCESS && result != VK_INCOMPLETE) {
+            return;
+        }
+        for (std::uint32_t index = 0; index < timingCount; ++index) {
+            const VkPastPresentationTimingGOOGLE& timing = timings[index];
+            const auto source = presentationCameraTimestamps_.find(timing.presentID);
+            if (source == presentationCameraTimestamps_.end()) {
+                continue;
+            }
+            const PresentationSample sample{
+                .presentationId = timing.presentID,
+                .cameraSensorTimestampNs = source->second,
+                .actualPresentationTimestampNs = timing.actualPresentTime,
+                .desiredPresentationTimestampNs = timing.desiredPresentTime,
+                .earliestPresentationTimestampNs = timing.earliestPresentTime,
+                .presentMarginNs = timing.presentMargin,
+                .refreshDurationNs = refreshDurationNs_,
+            };
+            {
+                std::lock_guard lock(presentationMutex_);
+                if (sample.presentationId > latestPresentationSample_.presentationId) {
+                    latestPresentationSample_ = sample;
+                    latestPresentationId_.store(sample.presentationId);
+                }
+            }
+            presentationCameraTimestamps_.erase(source);
+        }
+        while (presentationCameraTimestamps_.size() > kMaxPendingPresentationSamples) {
+            presentationCameraTimestamps_.erase(presentationCameraTimestamps_.begin());
+        }
+    }
+
+    std::uint32_t registerCameraPresentation(std::int64_t cameraSensorTimestampNs) {
+        if (!displayTimingSupported_) {
+            return 0;
+        }
+        std::uint32_t presentationId = nextPresentationId_++;
+        if (presentationId == 0U) {
+            presentationId = nextPresentationId_++;
+        }
+        presentationCameraTimestamps_[presentationId] = cameraSensorTimestampNs;
+        return presentationId;
+    }
+
     bool renderImportedCameraFrame() {
         std::lock_guard renderLock(renderMutex_);
+        collectPastPresentationTimings();
         const std::uint32_t frameIndex = currentFrame_ % kFramesInFlight;
         VkResult result = waitForFences_(
             device_,
@@ -2560,12 +3095,16 @@ private:
             }
         }
         imageFences_[imageIndex] = frameFences_[frameIndex];
+        std::uint32_t trackingTestLipIndexCount = 0;
+        if (!prepareTrackingTestLipFrame(frameIndex, &trackingTestLipIndexCount)) {
+            return false;
+        }
         result = resetFences_(device_, 1, &frameFences_[frameIndex]);
         if (result != VK_SUCCESS) {
             setCameraVulkanError("reset_camera_frame_fence", result);
             return false;
         }
-        if (!recordCameraCommandBuffer(imageIndex)) {
+        if (!recordCameraCommandBuffer(imageIndex, frameIndex, trackingTestLipIndexCount)) {
             return false;
         }
 
@@ -2600,9 +3139,22 @@ private:
             setCameraVulkanError("submit_camera_frame", result);
             return false;
         }
+        const std::uint32_t presentationId = registerCameraPresentation(
+            pendingCameraFrame_.timestampNs
+        );
+        const VkPresentTimeGOOGLE presentTime{
+            .presentID = presentationId,
+            .desiredPresentTime = 0,
+        };
+        const VkPresentTimesInfoGOOGLE presentTimesInfo{
+            .sType = VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE,
+            .pNext = nullptr,
+            .swapchainCount = 1,
+            .pTimes = &presentTime,
+        };
         const VkPresentInfoKHR presentInfo{
             .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-            .pNext = nullptr,
+            .pNext = presentationId == 0U ? nullptr : &presentTimesInfo,
             .waitSemaphoreCount = 1,
             .pWaitSemaphores = &renderFinishedSemaphores_[frameIndex],
             .swapchainCount = 1,
@@ -2612,6 +3164,9 @@ private:
         };
         result = queuePresent_(graphicsQueue_, &presentInfo);
         if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
+            if (presentationId != 0U) {
+                presentationCameraTimestamps_.erase(presentationId);
+            }
             waitForFences_(
                 device_,
                 1,
@@ -2625,10 +3180,15 @@ private:
         presentedFrames_.fetch_add(1);
         cameraRenderedFrames_.fetch_add(1);
         currentFrame_ = (currentFrame_ + 1) % kFramesInFlight;
+        collectPastPresentationTimings();
         return true;
     }
 
-    bool recordCameraCommandBuffer(std::uint32_t imageIndex) {
+    bool recordCameraCommandBuffer(
+        std::uint32_t imageIndex,
+        std::uint32_t frameIndex,
+        std::uint32_t trackingTestLipIndexCount
+    ) {
         VkCommandBuffer commandBuffer = commandBuffers_[imageIndex];
         VkResult result = resetCommandBuffer_(commandBuffer, 0);
         if (result != VK_SUCCESS) {
@@ -2715,6 +3275,35 @@ private:
             pendingCameraFrame_.transform.data()
         );
         cmdDraw_(commandBuffer, 3, 1, 0, 0);
+        if (trackingTestLipIndexCount > 0U) {
+            const VkDeviceSize vertexOffset = 0;
+            cmdBindPipeline_(
+                commandBuffer,
+                VK_PIPELINE_BIND_POINT_GRAPHICS,
+                trackingTestLipPipeline_
+            );
+            cmdBindVertexBuffers_(
+                commandBuffer,
+                0,
+                1,
+                &trackingTestLipVertexBuffers_[frameIndex],
+                &vertexOffset
+            );
+            cmdBindIndexBuffer_(
+                commandBuffer,
+                trackingTestLipIndexBuffers_[frameIndex],
+                0,
+                VK_INDEX_TYPE_UINT16
+            );
+            cmdDrawIndexed_(
+                commandBuffer,
+                trackingTestLipIndexCount,
+                1,
+                0,
+                0,
+                0
+            );
+        }
         cmdEndRenderPass_(commandBuffer);
         const VkImageMemoryBarrier releaseBarrier{
             .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
@@ -3411,6 +4000,45 @@ private:
             deviceWaitIdle_(device_);
         }
         if (device_ != VK_NULL_HANDLE) {
+            if (trackingTestLipPipeline_ != VK_NULL_HANDLE && destroyPipeline_ != nullptr) {
+                destroyPipeline_(device_, trackingTestLipPipeline_, nullptr);
+                trackingTestLipPipeline_ = VK_NULL_HANDLE;
+            }
+            if (trackingTestLipPipelineLayout_ != VK_NULL_HANDLE &&
+                destroyPipelineLayout_ != nullptr) {
+                destroyPipelineLayout_(device_, trackingTestLipPipelineLayout_, nullptr);
+                trackingTestLipPipelineLayout_ = VK_NULL_HANDLE;
+            }
+            for (std::size_t index = 0; index < kFramesInFlight; ++index) {
+                if (trackingTestLipVertexMapped_[index] != nullptr && unmapMemory_ != nullptr) {
+                    unmapMemory_(device_, trackingTestLipVertexMemories_[index]);
+                    trackingTestLipVertexMapped_[index] = nullptr;
+                }
+                if (trackingTestLipIndexMapped_[index] != nullptr && unmapMemory_ != nullptr) {
+                    unmapMemory_(device_, trackingTestLipIndexMemories_[index]);
+                    trackingTestLipIndexMapped_[index] = nullptr;
+                }
+                if (trackingTestLipVertexBuffers_[index] != VK_NULL_HANDLE &&
+                    destroyBuffer_ != nullptr) {
+                    destroyBuffer_(device_, trackingTestLipVertexBuffers_[index], nullptr);
+                    trackingTestLipVertexBuffers_[index] = VK_NULL_HANDLE;
+                }
+                if (trackingTestLipIndexBuffers_[index] != VK_NULL_HANDLE &&
+                    destroyBuffer_ != nullptr) {
+                    destroyBuffer_(device_, trackingTestLipIndexBuffers_[index], nullptr);
+                    trackingTestLipIndexBuffers_[index] = VK_NULL_HANDLE;
+                }
+                if (trackingTestLipVertexMemories_[index] != VK_NULL_HANDLE &&
+                    freeMemory_ != nullptr) {
+                    freeMemory_(device_, trackingTestLipVertexMemories_[index], nullptr);
+                    trackingTestLipVertexMemories_[index] = VK_NULL_HANDLE;
+                }
+                if (trackingTestLipIndexMemories_[index] != VK_NULL_HANDLE &&
+                    freeMemory_ != nullptr) {
+                    freeMemory_(device_, trackingTestLipIndexMemories_[index], nullptr);
+                    trackingTestLipIndexMemories_[index] = VK_NULL_HANDLE;
+                }
+            }
             for (const VkFence fence : frameFences_) {
                 if (fence != VK_NULL_HANDLE && destroyFence_ != nullptr) {
                     destroyFence_(device_, fence, nullptr);
@@ -3586,6 +4214,22 @@ private:
     VkBuffer temporalFitBuffer_ = VK_NULL_HANDLE;
     VkDeviceMemory temporalFitMemory_ = VK_NULL_HANDLE;
     void* temporalFitMapped_ = nullptr;
+    VkPipelineLayout trackingTestLipPipelineLayout_ = VK_NULL_HANDLE;
+    VkPipeline trackingTestLipPipeline_ = VK_NULL_HANDLE;
+    std::array<VkBuffer, kFramesInFlight> trackingTestLipVertexBuffers_{};
+    std::array<VkDeviceMemory, kFramesInFlight> trackingTestLipVertexMemories_{};
+    std::array<void*, kFramesInFlight> trackingTestLipVertexMapped_{};
+    std::array<VkBuffer, kFramesInFlight> trackingTestLipIndexBuffers_{};
+    std::array<VkDeviceMemory, kFramesInFlight> trackingTestLipIndexMemories_{};
+    std::array<void*, kFramesInFlight> trackingTestLipIndexMapped_{};
+    std::vector<float> trackingTestLipVertices_;
+    std::vector<std::uint16_t> trackingTestLipIndices_;
+    bool trackingTestLipVisible_ = false;
+    bool displayTimingSupported_ = false;
+    std::uint64_t refreshDurationNs_ = 0;
+    std::uint32_t nextPresentationId_ = 1;
+    std::unordered_map<std::uint32_t, std::int64_t> presentationCameraTimestamps_;
+    PresentationSample latestPresentationSample_{};
 
     std::atomic<bool> ready_{false};
     std::atomic<bool> stopRequested_{false};
@@ -3600,6 +4244,7 @@ private:
     std::atomic<std::uint64_t> temporalComputedFrames_{0};
     std::atomic<std::uint64_t> temporalAcceptedFrames_{0};
     std::atomic<std::uint64_t> temporalRejectedFrames_{0};
+    std::atomic<std::uint64_t> latestPresentationId_{0};
     std::atomic<std::uint32_t> lastCameraWidth_{0};
     std::atomic<std::uint32_t> lastCameraHeight_{0};
     std::atomic<std::uint32_t> lastCameraFormat_{0};
@@ -3610,6 +4255,8 @@ private:
     mutable std::mutex threadMutex_;
     mutable std::mutex statusMutex_;
     mutable std::mutex cameraMutex_;
+    mutable std::mutex lipMutex_;
+    mutable std::mutex presentationMutex_;
     std::mutex renderMutex_;
     std::mutex waitMutex_;
     std::condition_variable wakeCondition_;
@@ -3660,6 +4307,9 @@ private:
     PFN_vkCmdBindDescriptorSets cmdBindDescriptorSets_ = nullptr;
     PFN_vkCmdPushConstants cmdPushConstants_ = nullptr;
     PFN_vkCmdDraw cmdDraw_ = nullptr;
+    PFN_vkCmdBindVertexBuffers cmdBindVertexBuffers_ = nullptr;
+    PFN_vkCmdBindIndexBuffer cmdBindIndexBuffer_ = nullptr;
+    PFN_vkCmdDrawIndexed cmdDrawIndexed_ = nullptr;
     PFN_vkCmdDispatch cmdDispatch_ = nullptr;
     PFN_vkCreateSemaphore createSemaphore_ = nullptr;
     PFN_vkDestroySemaphore destroySemaphore_ = nullptr;
@@ -3671,6 +4321,8 @@ private:
     PFN_vkQueueSubmit queueSubmit_ = nullptr;
     PFN_vkQueuePresentKHR queuePresent_ = nullptr;
     PFN_vkDeviceWaitIdle deviceWaitIdle_ = nullptr;
+    PFN_vkGetRefreshCycleDurationGOOGLE getRefreshCycleDuration_ = nullptr;
+    PFN_vkGetPastPresentationTimingGOOGLE getPastPresentationTiming_ = nullptr;
     PFN_vkCreateImage createImage_ = nullptr;
     PFN_vkDestroyImage destroyImage_ = nullptr;
     PFN_vkGetImageMemoryRequirements getImageMemoryRequirements_ = nullptr;
@@ -3864,4 +4516,35 @@ Java_com_example_armakeup_render_NativeVulkanDiagnosticRuntime_nativeCloseCamera
     if (runtime != nullptr) {
         runtime->closeCamera();
     }
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_example_armakeup_render_NativeVulkanDiagnosticRuntime_nativeUpdateTrackingTestLip(
+    JNIEnv* environment,
+    jobject /* runtime */,
+    jlong handle,
+    jfloatArray vertices,
+    jshortArray indices,
+    jboolean visible
+) {
+    VulkanDiagnosticRuntime* runtime = fromHandle(handle);
+    return runtime != nullptr && runtime->updateTrackingTestLip(
+        environment,
+        vertices,
+        indices,
+        visible == JNI_TRUE
+    ) ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_example_armakeup_render_NativeVulkanDiagnosticRuntime_nativeReadLatestPresentationTiming(
+    JNIEnv* environment,
+    jobject /* runtime */,
+    jlong handle,
+    jlongArray values
+) {
+    const VulkanDiagnosticRuntime* runtime = fromHandle(handle);
+    return runtime != nullptr && runtime->readLatestPresentationTiming(environment, values)
+        ? JNI_TRUE
+        : JNI_FALSE;
 }

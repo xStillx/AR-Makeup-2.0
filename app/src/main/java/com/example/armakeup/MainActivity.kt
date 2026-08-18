@@ -77,6 +77,8 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
         }
         val filamentPresentationHintsEnabled = !debuggable ||
             !intent.getBooleanExtra(EXTRA_DISABLE_FILAMENT_PRESENTATION_HINTS, false)
+        val nativeVulkanVisibleEnabled = debuggable &&
+            intent.getBooleanExtra(EXTRA_ENABLE_NATIVE_VULKAN_VISIBLE, false)
         enableEdgeToEdge()
         WindowCompat.getInsetsController(window, window.decorView).apply {
             isAppearanceLightStatusBars = false
@@ -89,6 +91,7 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
         binding.makeupRenderer.initializeRenderer(
             displayQueueProtectionEnabled = displayQueueProtectionOverride,
             filamentPresentationHintsEnabled = filamentPresentationHintsEnabled,
+            nativeVulkanVisibleEnabled = nativeVulkanVisibleEnabled,
         )
         binding.makeupRenderer.setGyroscopeCorrectionEnabled(
             !intent.getBooleanExtra(EXTRA_DISABLE_GYROSCOPE_CORRECTION, false),
@@ -487,6 +490,8 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
             "com.example.armakeup.extra.ENABLE_DISPLAY_QUEUE_PROTECTION"
         const val EXTRA_DISABLE_FILAMENT_PRESENTATION_HINTS =
             "com.example.armakeup.extra.DISABLE_FILAMENT_PRESENTATION_HINTS"
+        const val EXTRA_ENABLE_NATIVE_VULKAN_VISIBLE =
+            "com.example.armakeup.extra.ENABLE_NATIVE_VULKAN_VISIBLE"
         private const val MIN_CAMERA_FPS = 30
         private const val MAX_CAMERA_FPS = 60
         private const val PERFORMANCE_LOG_TAG = "ARMakeupPerf"

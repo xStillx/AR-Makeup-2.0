@@ -71,7 +71,7 @@ internal class FilamentMakeupRenderer(
     displayQueueProtectionOverride: Boolean?,
     private val filamentPresentationHintsEnabled: Boolean,
     private val onError: (String) -> Unit,
-) {
+) : MakeupRendererController {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val mainExecutor = ContextCompat.getMainExecutor(context)
     private val displayHelper = DisplayHelper(context)
@@ -168,7 +168,7 @@ internal class FilamentMakeupRenderer(
     private var displayedGyroscopeCorrection = GyroscopeLipCompensator.Correction.NONE
 
     @get:StringRes
-    internal val renderBackendLabelRes: Int
+    override val renderBackendLabelRes: Int
         get() = when {
             activeBackend == MakeupRenderBackend.VULKAN -> R.string.render_backend_vulkan
             cameraInput is VulkanCameraInput ->
@@ -199,7 +199,7 @@ internal class FilamentMakeupRenderer(
         }
     }
 
-    fun onSurfaceRequested(request: SurfaceRequest) {
+    override fun onSurfaceRequested(request: SurfaceRequest) {
         ensureMainThread()
         if (destroyRequested || destroyed) {
             request.willNotProvideSurface()
@@ -232,7 +232,7 @@ internal class FilamentMakeupRenderer(
         }
     }
 
-    fun setResult(
+    override fun setResult(
         landmarks: LandmarkRenderFrame,
         sourceWidth: Int,
         sourceHeight: Int,
@@ -251,7 +251,7 @@ internal class FilamentMakeupRenderer(
         )
     }
 
-    fun setTrackingTelemetrySink(sink: TrackingTelemetrySink?) {
+    override fun setTrackingTelemetrySink(sink: TrackingTelemetrySink?) {
         ensureMainThread()
         val timelineObservationWasActive = trackingTelemetrySink != null
         trackingTelemetrySink = sink
@@ -268,7 +268,7 @@ internal class FilamentMakeupRenderer(
         }
     }
 
-    fun setCameraProjectionCalibration(calibration: CameraProjectionCalibration?) {
+    override fun setCameraProjectionCalibration(calibration: CameraProjectionCalibration?) {
         ensureMainThread()
         cameraProjectionCalibration = calibration
         Log.i(
@@ -282,7 +282,7 @@ internal class FilamentMakeupRenderer(
         )
     }
 
-    fun setGyroscopeCorrectionEnabled(enabled: Boolean) {
+    override fun setGyroscopeCorrectionEnabled(enabled: Boolean) {
         ensureMainThread()
         if (gyroscopeCorrectionEnabled == enabled) return
         gyroscopeCorrectionEnabled = enabled
@@ -298,7 +298,7 @@ internal class FilamentMakeupRenderer(
             engine.getFeatureFlag(FilamentEngineFactory.DISPLAY_QUEUE_PROTECTION_FEATURE)
     }.getOrDefault(false)
 
-    fun clear() {
+    override fun clear() {
         ensureMainThread()
         latestLandmarks = null
         temporalLandmarkRefiner.clear()
@@ -306,7 +306,7 @@ internal class FilamentMakeupRenderer(
         hideLipEntity()
     }
 
-    fun setLipstickFinish(finish: LipstickFinish) {
+    override fun setLipstickFinish(finish: LipstickFinish) {
         ensureMainThread()
         if (lipstickFinish == finish) return
         lipstickFinish = finish
@@ -314,7 +314,7 @@ internal class FilamentMakeupRenderer(
         Log.i(RENDER_LOG_TAG, "lipstickFinish=${finish.name}")
     }
 
-    fun resume() {
+    override fun resume() {
         ensureMainThread()
         if (destroyRequested || destroyed || resumed) return
         resumed = true
@@ -324,7 +324,7 @@ internal class FilamentMakeupRenderer(
         frameScheduler.post()
     }
 
-    fun pause() {
+    override fun pause() {
         ensureMainThread()
         if (!resumed) return
         resumed = false
@@ -334,7 +334,7 @@ internal class FilamentMakeupRenderer(
         nativeVulkanRuntime?.stop()
     }
 
-    fun destroy() {
+    override fun destroy() {
         ensureMainThread()
         if (destroyRequested || destroyed) return
         destroyRequested = true

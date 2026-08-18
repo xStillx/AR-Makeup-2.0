@@ -23,22 +23,31 @@ class FilamentMakeupView @JvmOverloads constructor(
 
     private var errorListener: ((String) -> Unit)? = null
     private var initializationError: Throwable? = null
-    private var compositor: FilamentMakeupRenderer? = null
+    private var compositor: MakeupRendererController? = null
 
     /** Must be called once after inflation and before CameraX requests its input surface. */
     fun initializeRenderer(
         displayQueueProtectionEnabled: Boolean?,
         filamentPresentationHintsEnabled: Boolean,
+        nativeVulkanVisibleEnabled: Boolean,
     ) {
         if (isInEditMode || compositor != null || initializationError != null) return
         compositor = runCatching {
-            FilamentMakeupRenderer(
-                context = context,
-                surfaceView = this,
-                displayQueueProtectionOverride = displayQueueProtectionEnabled,
-                filamentPresentationHintsEnabled = filamentPresentationHintsEnabled,
-                onError = ::dispatchError,
-            )
+            if (nativeVulkanVisibleEnabled) {
+                NativeVulkanVisibleRenderer(
+                    context = context,
+                    surfaceView = this,
+                    onError = ::dispatchError,
+                )
+            } else {
+                FilamentMakeupRenderer(
+                    context = context,
+                    surfaceView = this,
+                    displayQueueProtectionOverride = displayQueueProtectionEnabled,
+                    filamentPresentationHintsEnabled = filamentPresentationHintsEnabled,
+                    onError = ::dispatchError,
+                )
+            }
         }.onFailure { initializationError = it }.getOrNull()
     }
 

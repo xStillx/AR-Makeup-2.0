@@ -7,6 +7,7 @@ import android.media.ImageReader
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.SystemClock
 import android.util.Log
 import android.view.Surface
 import androidx.annotation.RequiresApi
@@ -25,8 +26,11 @@ import java.util.concurrent.atomic.AtomicLong
  * buffer to the temporary Filament/OpenGL compositor.
  */
 internal class NativeVulkanDiagnosticRuntime private constructor(
-    private val imageReader: ImageReader,
-    private val callbackThread: HandlerThread,
+    private val imageReader: ImageReader?,
+    private val callbackThread: HandlerThread?,
+    outputSurface: Surface,
+    outputWidth: Int,
+    outputHeight: Int,
 ) : Closeable {
 
     private val consumedFrameCount = AtomicLong(0L)
@@ -34,9 +38,9 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
     private val firstFrameReported = AtomicBoolean(false)
     private val cameraFrameReported = AtomicBoolean(false)
     private var nativeHandle = nativeCreate(
-        imageReader.surface,
-        DIAGNOSTIC_WIDTH,
-        DIAGNOSTIC_HEIGHT,
+        outputSurface,
+        outputWidth,
+        outputHeight,
     )
 
     val isReady: Boolean
@@ -53,7 +57,12 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
         }
 
     init {
-        imageReader.setOnImageAvailableListener(::onImageAvailable, Handler(callbackThread.looper))
+        if (imageReader != null && callbackThread != null) {
+            imageReader.setOnImageAvailableListener(
+                ::onImageAvailable,
+                Handler(callbackThread.looper),
+            )
+        }
     }
 
     fun start() {
@@ -143,6 +152,32 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
         if (handle != 0L) nativeCloseCamera(handle)
     }
 
+    fun updateTrackingTestLip(vertices: FloatArray, indices: ShortArray, visible: Boolean): Boolean {
+        val handle = nativeHandle
+        if (handle == 0L) return false
+        return nativeUpdateTrackingTestLip(handle, vertices, indices, visible)
+    }
+
+    fun latestPresentationSample(): NativeVulkanPresentationSample? {
+        val handle = nativeHandle
+        if (handle == 0L) return null
+        val values = LongArray(PRESENTATION_METADATA_COUNT)
+        if (!nativeReadLatestPresentationTiming(handle, values)) return null
+        val monotonicToElapsedOffsetNs = SystemClock.elapsedRealtimeNanos() - System.nanoTime()
+        return NativeVulkanPresentationSample(
+            presentationId = values[PRESENTATION_ID_INDEX],
+            cameraSensorTimestampNs = values[PRESENTATION_CAMERA_TIMESTAMP_INDEX],
+            actualPresentationTimestampNs =
+                values[PRESENTATION_ACTUAL_TIMESTAMP_INDEX] + monotonicToElapsedOffsetNs,
+            desiredPresentationTimestampNs =
+                values[PRESENTATION_DESIRED_TIMESTAMP_INDEX] + monotonicToElapsedOffsetNs,
+            earliestPresentationTimestampNs =
+                values[PRESENTATION_EARLIEST_TIMESTAMP_INDEX] + monotonicToElapsedOffsetNs,
+            presentMarginNs = values[PRESENTATION_MARGIN_INDEX],
+            refreshDurationNs = values[PRESENTATION_REFRESH_DURATION_INDEX],
+        )
+    }
+
     override fun close() {
         val handle = nativeHandle
         nativeHandle = 0L
@@ -151,9 +186,9 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
             nativeCloseCamera(handle)
             nativeDestroy(handle)
         }
-        imageReader.setOnImageAvailableListener(null, null)
-        imageReader.close()
-        callbackThread.quitSafely()
+        imageReader?.setOnImageAvailableListener(null, null)
+        imageReader?.close()
+        callbackThread?.quitSafely()
         Log.i(LOG_TAG, "destroyed consumed=${consumedFrameCount.get()}")
     }
 
@@ -246,6 +281,16 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
     ): HardwareBuffer?
     private external fun nativeReleaseCameraFrame(handle: Long, token: Long)
     private external fun nativeCloseCamera(handle: Long)
+    private external fun nativeUpdateTrackingTestLip(
+        handle: Long,
+        vertices: FloatArray,
+        indices: ShortArray,
+        visible: Boolean,
+    ): Boolean
+    private external fun nativeReadLatestPresentationTiming(
+        handle: Long,
+        values: LongArray,
+    ): Boolean
 
     companion object {
         private const val LOG_TAG = "ARMakeupVulkanRuntime"
@@ -274,6 +319,14 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
         private const val CAMERA_TEMPORAL_FROM_TIMESTAMP_INDEX = 8
         private const val CAMERA_PROGRESS_INTERVAL = 60L
         private const val NANOS_PER_MILLISECOND = 1_000_000L
+        private const val PRESENTATION_METADATA_COUNT = 7
+        private const val PRESENTATION_ID_INDEX = 0
+        private const val PRESENTATION_CAMERA_TIMESTAMP_INDEX = 1
+        private const val PRESENTATION_ACTUAL_TIMESTAMP_INDEX = 2
+        private const val PRESENTATION_DESIRED_TIMESTAMP_INDEX = 3
+        private const val PRESENTATION_EARLIEST_TIMESTAMP_INDEX = 4
+        private const val PRESENTATION_MARGIN_INDEX = 5
+        private const val PRESENTATION_REFRESH_DURATION_INDEX = 6
 
         init {
             System.loadLibrary(NATIVE_LIBRARY)
@@ -305,7 +358,13 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
                     throw error
                 }
                 pendingReader = imageReader
-                NativeVulkanDiagnosticRuntime(imageReader, callbackThread).also { runtime ->
+                NativeVulkanDiagnosticRuntime(
+                    imageReader = imageReader,
+                    callbackThread = callbackThread,
+                    outputSurface = imageReader.surface,
+                    outputWidth = DIAGNOSTIC_WIDTH,
+                    outputHeight = DIAGNOSTIC_HEIGHT,
+                ).also { runtime ->
                     pendingReader = null
                     pendingThread = null
                     if (!runtime.isReady) {
@@ -321,5 +380,57 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
                 Log.e(LOG_TAG, "creation failed", error)
             }.getOrNull()
         }
+
+        fun createVisibleOrNull(
+            probe: NativeVulkanBootstrap.Probe,
+            surface: Surface,
+            width: Int,
+            height: Int,
+        ): NativeVulkanDiagnosticRuntime? {
+            if (
+                Build.VERSION.SDK_INT < Build.VERSION_CODES.Q ||
+                !probe.vulkanAvailable ||
+                !surface.isValid ||
+                width <= 0 ||
+                height <= 0
+            ) {
+                return null
+            }
+            return runCatching {
+                NativeVulkanDiagnosticRuntime(
+                    imageReader = null,
+                    callbackThread = null,
+                    outputSurface = surface,
+                    outputWidth = width,
+                    outputHeight = height,
+                ).also { runtime ->
+                    if (!runtime.isReady) {
+                        val diagnostic = runtime.diagnostic
+                        runtime.close()
+                        error("Native Vulkan visible runtime unavailable: $diagnostic")
+                    }
+                    Log.i(LOG_TAG, "visibleCreated ${runtime.diagnostic}")
+                }
+            }.onFailure { error ->
+                Log.e(LOG_TAG, "visible creation failed", error)
+            }.getOrNull()
+        }
     }
+}
+
+internal data class NativeVulkanPresentationSample(
+    val presentationId: Long,
+    val cameraSensorTimestampNs: Long,
+    val actualPresentationTimestampNs: Long,
+    val desiredPresentationTimestampNs: Long,
+    val earliestPresentationTimestampNs: Long,
+    val presentMarginNs: Long,
+    val refreshDurationNs: Long,
+) {
+    val sensorToActualMs: Float
+        get() = if (cameraSensorTimestampNs > 0L && actualPresentationTimestampNs > 0L) {
+            (actualPresentationTimestampNs - cameraSensorTimestampNs) / 1_000_000f
+        } else {
+            Float.NaN
+        }
 }
