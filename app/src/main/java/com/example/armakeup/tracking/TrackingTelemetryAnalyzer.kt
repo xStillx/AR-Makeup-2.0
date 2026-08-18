@@ -91,6 +91,9 @@ data class TrackingRenderTimelineMetrics(
     val geometryUploadAcceptedCoverage: Float,
     val renderSubmitTimestampCoverage: Float,
     val presentationTimestampCoverage: Float,
+    val frameTimelineVsyncIdCoverage: Float,
+    val expectedPresentationTimestampCoverage: Float,
+    val renderDeadlineTimestampCoverage: Float,
     val medianVsyncCallbackDelayMs: Float,
     val p95VsyncCallbackDelayMs: Float,
     val medianCameraSensorToVsyncMs: Float,
@@ -101,6 +104,10 @@ data class TrackingRenderTimelineMetrics(
     val p95GeometryUploadToSubmitMs: Float,
     val medianRenderStartToSubmitMs: Float,
     val p95RenderStartToSubmitMs: Float,
+    val medianVsyncToExpectedPresentationMs: Float,
+    val p95VsyncToExpectedPresentationMs: Float,
+    val p05RenderSubmitDeadlineMarginMs: Float,
+    val medianRenderSubmitDeadlineMarginMs: Float,
 )
 
 data class TrackingFinishRenderPerformanceMetrics(
@@ -277,6 +284,12 @@ data class TrackingTelemetryMetrics(
             .append(renderTimeline.renderSubmitTimestampCoverage.formatMetric())
         append(" presentationTimestampCoverage=")
             .append(renderTimeline.presentationTimestampCoverage.formatMetric())
+        append(" frameTimelineVsyncIdCoverage=")
+            .append(renderTimeline.frameTimelineVsyncIdCoverage.formatMetric())
+        append(" expectedPresentationTimestampCoverage=")
+            .append(renderTimeline.expectedPresentationTimestampCoverage.formatMetric())
+        append(" renderDeadlineTimestampCoverage=")
+            .append(renderTimeline.renderDeadlineTimestampCoverage.formatMetric())
         append(" vsyncCallbackMedianMs=")
             .append(renderTimeline.medianVsyncCallbackDelayMs.formatMetric())
         append(" vsyncCallbackP95Ms=")
@@ -297,6 +310,14 @@ data class TrackingTelemetryMetrics(
             .append(renderTimeline.medianRenderStartToSubmitMs.formatMetric())
         append(" renderStartToSubmitP95Ms=")
             .append(renderTimeline.p95RenderStartToSubmitMs.formatMetric())
+        append(" vsyncToExpectedPresentationMedianMs=")
+            .append(renderTimeline.medianVsyncToExpectedPresentationMs.formatMetric())
+        append(" vsyncToExpectedPresentationP95Ms=")
+            .append(renderTimeline.p95VsyncToExpectedPresentationMs.formatMetric())
+        append(" renderSubmitDeadlineMarginP05Ms=")
+            .append(renderTimeline.p05RenderSubmitDeadlineMarginMs.formatMetric())
+        append(" renderSubmitDeadlineMarginMedianMs=")
+            .append(renderTimeline.medianRenderSubmitDeadlineMarginMs.formatMetric())
         append(" rawJitterRms=").append(rawLipJitter.rms.formatMetric())
         append(" filteredJitterRms=").append(filteredLipJitter.rms.formatMetric())
         append(" rawLocalJitterRms=").append(rawLocalLipJitter.rms.formatMetric())
@@ -693,6 +714,18 @@ object TrackingTelemetryAnalyzer {
                 sample.renderTiming.renderSubmitTimestampNs,
             )
         }
+        val vsyncToExpectedPresentation = allRenders.mapNotNull { sample ->
+            orderedDurationNs(
+                sample.renderTiming.vsyncTimestampNs,
+                sample.renderTiming.expectedPresentationTimestampNs,
+            )
+        }
+        val renderSubmitDeadlineMargin = allRenders.mapNotNull { sample ->
+            signedDurationNs(
+                sample.renderTiming.renderSubmitTimestampNs,
+                sample.renderTiming.renderDeadlineTimestampNs,
+            )
+        }
         return TrackingRenderTimelineMetrics(
             renderSampleCount = allRenders.size,
             vsyncTimestampCoverage = timestampCoverage(allRenders) {
@@ -710,6 +743,15 @@ object TrackingTelemetryAnalyzer {
             presentationTimestampCoverage = timestampCoverage(allRenders) {
                 it.renderTiming.presentationTimestampNs
             },
+            frameTimelineVsyncIdCoverage = timestampCoverage(allRenders) {
+                it.renderTiming.frameTimelineVsyncId
+            },
+            expectedPresentationTimestampCoverage = timestampCoverage(allRenders) {
+                it.renderTiming.expectedPresentationTimestampNs
+            },
+            renderDeadlineTimestampCoverage = timestampCoverage(allRenders) {
+                it.renderTiming.renderDeadlineTimestampNs
+            },
             medianVsyncCallbackDelayMs = percentile(vsyncCallbackDelay, 0.5f),
             p95VsyncCallbackDelayMs = percentile(vsyncCallbackDelay, 0.95f),
             medianCameraSensorToVsyncMs = percentile(cameraSensorToVsync, 0.5f),
@@ -720,6 +762,19 @@ object TrackingTelemetryAnalyzer {
             p95GeometryUploadToSubmitMs = percentile(geometryUploadToSubmit, 0.95f),
             medianRenderStartToSubmitMs = percentile(renderStartToSubmit, 0.5f),
             p95RenderStartToSubmitMs = percentile(renderStartToSubmit, 0.95f),
+            medianVsyncToExpectedPresentationMs = percentile(
+                vsyncToExpectedPresentation,
+                0.5f,
+            ),
+            p95VsyncToExpectedPresentationMs = percentile(
+                vsyncToExpectedPresentation,
+                0.95f,
+            ),
+            p05RenderSubmitDeadlineMarginMs = percentile(renderSubmitDeadlineMargin, 0.05f),
+            medianRenderSubmitDeadlineMarginMs = percentile(
+                renderSubmitDeadlineMargin,
+                0.5f,
+            ),
         )
     }
 
@@ -736,6 +791,13 @@ object TrackingTelemetryAnalyzer {
         if (startTimestampNs < 0L || endTimestampNs < startTimestampNs) return null
         val durationNs = endTimestampNs - startTimestampNs
         if (durationNs > MAXIMUM_RENDER_TIMELINE_DURATION_NS) return null
+        return durationNs / NANOSECONDS_PER_MILLISECOND
+    }
+
+    private fun signedDurationNs(startTimestampNs: Long, endTimestampNs: Long): Float? {
+        if (startTimestampNs < 0L || endTimestampNs < 0L) return null
+        val durationNs = endTimestampNs - startTimestampNs
+        if (kotlin.math.abs(durationNs) > MAXIMUM_RENDER_TIMELINE_DURATION_NS) return null
         return durationNs / NANOSECONDS_PER_MILLISECOND
     }
 

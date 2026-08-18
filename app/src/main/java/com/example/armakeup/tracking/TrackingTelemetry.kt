@@ -120,8 +120,11 @@ data class TrackingDeviceState(
  *
  * The camera marker means that a buffer was handed to Filament, and the geometry marker means
  * that Filament accepted the vertex-buffer upload command. Neither marker proves GPU completion.
- * Filament's Java API does not currently expose an actual presentation timestamp, so that field
- * deliberately remains [UNKNOWN_TIMESTAMP_NS] until a native/FrameTimeline source is added.
+ * On API 33+, frame-timeline ids and expected presentation/deadline timestamps are copied from
+ * Choreographer's preferred timeline while its callback is valid. They are correlation markers,
+ * not proof of display. Filament's Java API does not expose the actual presentation timestamp, so
+ * [presentationTimestampNs] deliberately remains [UNKNOWN_TIMESTAMP_NS] until an external
+ * FrameTimeline/Perfetto correlation supplies it.
  */
 data class TrackingRenderTiming(
     val vsyncTimestampNs: Long,
@@ -131,6 +134,9 @@ data class TrackingRenderTiming(
     val geometryUploadAcceptedTimestampNs: Long,
     val renderSubmitTimestampNs: Long,
     val presentationTimestampNs: Long,
+    val frameTimelineVsyncId: Long = -1L,
+    val expectedPresentationTimestampNs: Long = -1L,
+    val renderDeadlineTimestampNs: Long = -1L,
 ) {
     companion object {
         const val UNKNOWN_TIMESTAMP_NS = -1L
@@ -143,6 +149,9 @@ data class TrackingRenderTiming(
             geometryUploadAcceptedTimestampNs = UNKNOWN_TIMESTAMP_NS,
             renderSubmitTimestampNs = UNKNOWN_TIMESTAMP_NS,
             presentationTimestampNs = UNKNOWN_TIMESTAMP_NS,
+            frameTimelineVsyncId = UNKNOWN_TIMESTAMP_NS,
+            expectedPresentationTimestampNs = UNKNOWN_TIMESTAMP_NS,
+            renderDeadlineTimestampNs = UNKNOWN_TIMESTAMP_NS,
         )
     }
 }

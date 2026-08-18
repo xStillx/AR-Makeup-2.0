@@ -10,6 +10,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.os.Trace
 import android.util.Log
 import android.view.Surface
 import android.view.SurfaceView
@@ -90,6 +91,7 @@ internal class FilamentMakeupRenderer(
     private val camera: Camera = engine.createCamera(cameraEntity)
     private val uiHelper = UiHelper(UiHelper.ContextErrorPolicy.DONT_CHECK)
     private val frameScheduler = FrameScheduler()
+    private val frameTimelineObserver = createRenderFrameTimelineObserver()
     private val materials = engineSelection.materials
     private val cameraMaterialInstance = materials.camera.createInstance()
     private val upperLipMaterialInstance = materials.lipstick.createInstance()
@@ -240,7 +242,19 @@ internal class FilamentMakeupRenderer(
 
     fun setTrackingTelemetrySink(sink: TrackingTelemetrySink?) {
         ensureMainThread()
+        val timelineObservationWasActive = trackingTelemetrySink != null
         trackingTelemetrySink = sink
+        val timelineObservationIsActive = sink != null
+        if (resumed && timelineObservationWasActive != timelineObservationIsActive) {
+            if (timelineObservationIsActive) {
+                // Re-post Filament after the observer so both callbacks describe the same frame.
+                frameScheduler.remove()
+                frameTimelineObserver.start()
+                frameScheduler.post()
+            } else {
+                frameTimelineObserver.stop()
+            }
+        }
     }
 
     fun setCameraProjectionCalibration(calibration: CameraProjectionCalibration?) {
@@ -290,6 +304,7 @@ internal class FilamentMakeupRenderer(
         resumed = true
         if (gyroscopeCorrectionEnabled) gyroscopeSource.start()
         nativeVulkanRuntime?.start()
+        if (trackingTelemetrySink != null) frameTimelineObserver.start()
         frameScheduler.post()
     }
 
@@ -298,6 +313,7 @@ internal class FilamentMakeupRenderer(
         if (!resumed) return
         resumed = false
         frameScheduler.remove()
+        frameTimelineObserver.stop()
         gyroscopeSource.stop()
         nativeVulkanRuntime?.stop()
     }
@@ -1036,11 +1052,37 @@ internal class FilamentMakeupRenderer(
     private inner class FrameScheduler : ChoreographerHelper() {
         override fun onFrame(frameTimeNanos: Long) {
             if (!resumed || destroyRequested || destroyed || !uiHelper.isReadyToRender) return
+            val frameTimeline = frameTimelineObserver.consume(frameTimeNanos)
+            val traceStarted = frameTimeline != null &&
+                frameTimeline.vsyncId >= 0L &&
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+                Trace.isEnabled()
+            if (traceStarted) {
+                Trace.beginSection("$FRAME_TRACE_PREFIX${frameTimeline.vsyncId}")
+            }
             try {
                 val callbackMonotonicTimestampNs = System.nanoTime()
                 val renderStartTimestampNs = SystemClock.elapsedRealtimeNanos()
-                val vsyncElapsedRealtimeTimestampNs = renderStartTimestampNs -
-                    (callbackMonotonicTimestampNs - frameTimeNanos)
+                val vsyncElapsedRealtimeTimestampNs = monotonicToElapsedRealtimeTimestampNs(
+                    monotonicTimestampNs = frameTimeNanos,
+                    callbackMonotonicTimestampNs = callbackMonotonicTimestampNs,
+                    callbackElapsedRealtimeTimestampNs = renderStartTimestampNs,
+                )
+                val expectedPresentationTimestampNs =
+                    frameTimeline?.expectedPresentationTimeNanos?.let { timestampNs ->
+                        monotonicToElapsedRealtimeTimestampNs(
+                            monotonicTimestampNs = timestampNs,
+                            callbackMonotonicTimestampNs = callbackMonotonicTimestampNs,
+                            callbackElapsedRealtimeTimestampNs = renderStartTimestampNs,
+                        )
+                    } ?: NO_TIMESTAMP
+                val renderDeadlineTimestampNs = frameTimeline?.deadlineNanos?.let { timestampNs ->
+                    monotonicToElapsedRealtimeTimestampNs(
+                        monotonicTimestampNs = timestampNs,
+                        callbackMonotonicTimestampNs = callbackMonotonicTimestampNs,
+                        callbackElapsedRealtimeTimestampNs = renderStartTimestampNs,
+                    )
+                } ?: NO_TIMESTAMP
                 val renderTimestampMs = SystemClock.uptimeMillis()
                 cameraInput?.pushLatestFrame()
                 updateLipGeometry(renderTimestampMs)
@@ -1074,10 +1116,15 @@ internal class FilamentMakeupRenderer(
                             displayedGeometryUploadAcceptedTimestampNs,
                         renderSubmitTimestampNs = renderSubmitTimestampNs,
                         presentationTimestampNs = NO_TIMESTAMP,
+                        frameTimelineVsyncId = frameTimeline?.vsyncId ?: NO_TIMESTAMP,
+                        expectedPresentationTimestampNs = expectedPresentationTimestampNs,
+                        renderDeadlineTimestampNs = renderDeadlineTimestampNs,
                     ),
                 )
             } catch (error: RuntimeException) {
                 reportFatalError(error.message ?: "Filament render failure")
+            } finally {
+                if (traceStarted) Trace.endSection()
             }
         }
     }
@@ -1377,6 +1424,7 @@ internal class FilamentMakeupRenderer(
         private const val RENDER_LOG_TAG = "ARMakeupRender"
         private const val NATIVE_VULKAN_LOG_TAG = "ARMakeupVulkan"
         private const val GYROSCOPE_LOG_TAG = "ARMakeupGyroV6"
+        private const val FRAME_TRACE_PREFIX = "ARMK_FRAME:"
         private val IDENTITY_MATRIX = floatArrayOf(
             1f, 0f, 0f, 0f,
             0f, 1f, 0f, 0f,
@@ -1388,4 +1436,14 @@ internal class FilamentMakeupRenderer(
             LipLandmarkTopology.innerContour.max(),
         )
     }
+}
+
+internal fun monotonicToElapsedRealtimeTimestampNs(
+    monotonicTimestampNs: Long,
+    callbackMonotonicTimestampNs: Long,
+    callbackElapsedRealtimeTimestampNs: Long,
+): Long {
+    if (monotonicTimestampNs < 0L) return -1L
+    return callbackElapsedRealtimeTimestampNs -
+        (callbackMonotonicTimestampNs - monotonicTimestampNs)
 }

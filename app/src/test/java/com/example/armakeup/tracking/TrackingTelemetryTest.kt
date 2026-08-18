@@ -80,6 +80,9 @@ class TrackingTelemetryTest {
                 geometryUploadAcceptedTimestampNs = 1_103_000_000L,
                 renderSubmitTimestampNs = 1_108_000_000L,
                 presentationTimestampNs = -1L,
+                frameTimelineVsyncId = 7_331L,
+                expectedPresentationTimestampNs = 1_116_000_000L,
+                renderDeadlineTimestampNs = 1_110_000_000L,
             ),
         )
         val bytes = ByteArrayOutputStream().also { output ->
@@ -362,6 +365,45 @@ class TrackingTelemetryTest {
     }
 
     @Test
+    fun codecReadsLegacyV7RenderWithUnknownFrameTimelineCorrelation() {
+        val bytes = ByteArrayOutputStream().also { output ->
+            DataOutputStream(output).apply {
+                writeInt(0x41525636)
+                writeInt(7)
+                writeUTF("legacy_v7_render")
+                writeLong(42L)
+                writeByte(2)
+                writeLong(1_100L)
+                writeLong(1_000L)
+                writeLong(999_000_000L)
+                writeFloat(0.04f)
+                writeInt(1080)
+                writeInt(2400)
+                writeBoolean(true)
+                repeat(2) { writeInt(0) }
+                writeUTF("SATIN")
+                repeat(4) { writeFloat(1f) }
+                writeBoolean(true)
+                writeBoolean(true)
+                repeat(7) { writeFloat(0.01f) }
+                repeat(2) { writeFloat(0.02f) }
+                repeat(7) { writeLong(1_000_000_000L + it * 1_000_000L) }
+                writeByte(0x7f)
+                writeLong(0L)
+            }
+        }.toByteArray()
+
+        val timing = TrackingTelemetryCodec.read(ByteArrayInputStream(bytes))
+            .renders.single().renderTiming
+
+        assertEquals(1_000_000_000L, timing.vsyncTimestampNs)
+        assertEquals(1_006_000_000L, timing.presentationTimestampNs)
+        assertEquals(-1L, timing.frameTimelineVsyncId)
+        assertEquals(-1L, timing.expectedPresentationTimestampNs)
+        assertEquals(-1L, timing.renderDeadlineTimestampNs)
+    }
+
+    @Test
     fun analyzerReportsInputPoseAndThermalQuality() {
         val samples = (0..2).map { index ->
             poseOnlyMeasurement(1_000L + index * 33L, index * 0.01f, index * 0.01f).copy(
@@ -562,6 +604,9 @@ class TrackingTelemetryTest {
                     geometryUploadAcceptedTimestampNs = 1_003_000_000L,
                     renderSubmitTimestampNs = 1_008_000_000L,
                     presentationTimestampNs = -1L,
+                    frameTimelineVsyncId = 10L,
+                    expectedPresentationTimestampNs = 1_016_000_000L,
+                    renderDeadlineTimestampNs = 1_010_000_000L,
                 ),
             ),
             renderSample(1_120L, 0.01f).copy(
@@ -573,6 +618,9 @@ class TrackingTelemetryTest {
                     geometryUploadAcceptedTimestampNs = 1_025_000_000L,
                     renderSubmitTimestampNs = 1_032_000_000L,
                     presentationTimestampNs = 1_035_000_000L,
+                    frameTimelineVsyncId = 11L,
+                    expectedPresentationTimestampNs = 1_036_000_000L,
+                    renderDeadlineTimestampNs = 1_030_000_000L,
                 ),
             ),
             renderSample(1_140L, 0.02f).copy(
@@ -585,6 +633,9 @@ class TrackingTelemetryTest {
                     geometryUploadAcceptedTimestampNs = -1L,
                     renderSubmitTimestampNs = 1_045_000_000L,
                     presentationTimestampNs = -1L,
+                    frameTimelineVsyncId = 12L,
+                    expectedPresentationTimestampNs = 1_056_000_000L,
+                    renderDeadlineTimestampNs = 1_048_000_000L,
                 ),
             ),
         )
@@ -603,11 +654,17 @@ class TrackingTelemetryTest {
         assertEquals(1f, timeline.geometryUploadAcceptedCoverage, EPSILON)
         assertEquals(1f, timeline.renderSubmitTimestampCoverage, EPSILON)
         assertEquals(1f / 3f, timeline.presentationTimestampCoverage, EPSILON)
+        assertEquals(1f, timeline.frameTimelineVsyncIdCoverage, EPSILON)
+        assertEquals(1f, timeline.expectedPresentationTimestampCoverage, EPSILON)
+        assertEquals(1f, timeline.renderDeadlineTimestampCoverage, EPSILON)
         assertEquals(2f, timeline.medianVsyncCallbackDelayMs, EPSILON)
         assertEquals(40f, timeline.medianCameraSensorToVsyncMs, EPSILON)
         assertEquals(13f, timeline.medianCameraSelectionToSubmitMs, EPSILON)
         assertEquals(5f, timeline.medianGeometryUploadToSubmitMs, EPSILON)
         assertEquals(6f, timeline.medianRenderStartToSubmitMs, EPSILON)
+        assertEquals(16f, timeline.medianVsyncToExpectedPresentationMs, EPSILON)
+        assertEquals(-2f, timeline.p05RenderSubmitDeadlineMarginMs, EPSILON)
+        assertEquals(2f, timeline.medianRenderSubmitDeadlineMarginMs, EPSILON)
     }
 
     @Test

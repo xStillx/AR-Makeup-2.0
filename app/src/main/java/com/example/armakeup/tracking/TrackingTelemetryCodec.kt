@@ -218,7 +218,7 @@ object TrackingTelemetryCodec {
             withGyroscope
         }
         return if (version >= VERSION_WITH_RENDER_TIMELINE) {
-            withPredictionCoverage.copy(renderTiming = data.readRenderTiming())
+            withPredictionCoverage.copy(renderTiming = data.readRenderTiming(version))
         } else {
             withPredictionCoverage
         }
@@ -232,17 +232,34 @@ object TrackingTelemetryCodec {
         writeLong(timing.geometryUploadAcceptedTimestampNs)
         writeLong(timing.renderSubmitTimestampNs)
         writeLong(timing.presentationTimestampNs)
+        writeLong(timing.frameTimelineVsyncId)
+        writeLong(timing.expectedPresentationTimestampNs)
+        writeLong(timing.renderDeadlineTimestampNs)
     }
 
-    private fun DataInputStream.readRenderTiming(): TrackingRenderTiming = TrackingRenderTiming(
-        vsyncTimestampNs = readLong(),
-        renderStartTimestampNs = readLong(),
-        cameraFrameSelectedTimestampNs = readLong(),
-        cameraFrameSensorTimestampNs = readLong(),
-        geometryUploadAcceptedTimestampNs = readLong(),
-        renderSubmitTimestampNs = readLong(),
-        presentationTimestampNs = readLong(),
-    )
+    private fun DataInputStream.readRenderTiming(version: Int): TrackingRenderTiming {
+        val legacyTimeline = TrackingRenderTiming(
+            vsyncTimestampNs = readLong(),
+            renderStartTimestampNs = readLong(),
+            cameraFrameSelectedTimestampNs = readLong(),
+            cameraFrameSensorTimestampNs = readLong(),
+            geometryUploadAcceptedTimestampNs = readLong(),
+            renderSubmitTimestampNs = readLong(),
+            presentationTimestampNs = readLong(),
+            frameTimelineVsyncId = TrackingRenderTiming.UNKNOWN_TIMESTAMP_NS,
+            expectedPresentationTimestampNs = TrackingRenderTiming.UNKNOWN_TIMESTAMP_NS,
+            renderDeadlineTimestampNs = TrackingRenderTiming.UNKNOWN_TIMESTAMP_NS,
+        )
+        return if (version >= VERSION_WITH_FRAME_TIMELINE_CORRELATION) {
+            legacyTimeline.copy(
+                frameTimelineVsyncId = readLong(),
+                expectedPresentationTimestampNs = readLong(),
+                renderDeadlineTimestampNs = readLong(),
+            )
+        } else {
+            legacyTimeline
+        }
+    }
 
     private fun DataOutputStream.writeGeometry(geometry: TrackingGeometry) {
         writeFloat(geometry.pose.centerX)
@@ -348,7 +365,7 @@ object TrackingTelemetryCodec {
         this as? DataInputStream ?: DataInputStream(this)
 
     private const val MAGIC = 0x41525636 // "ARV6"
-    private const val VERSION = 7
+    private const val VERSION = 8
     private const val MINIMUM_SUPPORTED_VERSION = 1
     private const val VERSION_WITH_INPUT_QUALITY = 2
     private const val VERSION_WITH_MATERIAL_TEMPORAL_STATE = 3
@@ -356,6 +373,7 @@ object TrackingTelemetryCodec {
     private const val VERSION_WITH_PREDICTION_COVERAGE = 5
     private const val VERSION_WITH_PIPELINE_TIMING_AND_3D_TRANSFORM = 6
     private const val VERSION_WITH_RENDER_TIMELINE = 7
+    private const val VERSION_WITH_FRAME_TIMELINE_CORRELATION = 8
     private const val EVENT_MEASUREMENT = 1
     private const val EVENT_RENDER = 2
     private const val EVENT_FOOTER = 0x7f
