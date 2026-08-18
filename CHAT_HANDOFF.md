@@ -13,10 +13,10 @@ Native Android-приложение виртуальной примерки ма
 ## Репозиторий и состояние
 
 - Путь: `C:\Users\User\AndroidStudioProjects\ARMakeup`.
-- Ветка: `master`; FF1 render timeline v7 сохранён локальным checkpoint `3419063 [FF1]`, remote `origin/master` пока остаётся на `19a2280`. Точки отката: `cc82370` / `tracking-v6.2-stable-2026-08-17`, `d4636ac` / `tracking-v6.2-fast-motion-2026-08-17`, `ab8796a` / `material-temporal-v1-candidate-2026-08-17`, `dd095f7` / `tracking-v6.3-gyro-experimental-2026-08-17`. FF1/FF2 commits: `0554924`, `d083af2`, `19a2280`, `3419063`. Видимая geometry/material/predictor в `3419063` не изменены.
+- Ветка: `master`; актуальный implementation checkpoint `7bd498f [FF1] Correlate render frames with display timeline`, remote `origin/master` пока остаётся на `a1931cf`. Точки отката: `cc82370` / `tracking-v6.2-stable-2026-08-17`, `d4636ac` / `tracking-v6.2-fast-motion-2026-08-17`, `ab8796a` / `material-temporal-v1-candidate-2026-08-17`, `dd095f7` / `tracking-v6.3-gyro-experimental-2026-08-17`. FF1/FF2 commits: `0554924`, `d083af2`, `19a2280`, `3419063`, `7bd498f`. Видимая geometry/material/predictor в `7bd498f` не изменены.
 - Основные коммиты: `cc82370 [V6.2]`, `cd1a560 [UpdateContext]`, `8d48b46 [V6]`, `4f8039b [V5]`, `3d3572e [V4]`, `395d3f3 [V3]`.
 - Kotlin, XML/View UI, один модуль `:app`; `minSdk 24`, `targetSdk/compileSdk 37`.
-- Последняя полная проверка: 126 unit-тестов, 0 failures/errors, lint и debug APK успешно; native код собирается для `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`.
+- Последняя полная проверка: 129 unit-тестов, 0 failures/errors, lint и debug APK успешно; native код собирается для `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`.
 
 ## Текущий pipeline
 
@@ -71,13 +71,19 @@ FF0 завершён: V6.3 сохранён commit `dd095f7` и experimental-т�
 
 Добавлен `CanonicalFaceTransform`: официальный MediaPipe column-major layout, right-handed metric camera space, translation indices 12..14, affine/similarity checks, baseline-centered yaw/pitch/roll и отдельный rotation→mirror→crop display contract. Matrix raw не зеркалится. Device correlations: X→pose X `0.879–0.994`, metric Y→image Y `-0.974…-0.993`; roll run `438/902`, latency `116/139 ms`, roll correlation с 22-anchor pose `0.999461`, p95 deviations yaw/pitch/roll `9.30°/4.58°/41.56°`. Актуальный gate: 124 tests, 0 failures/errors, lint/APK/четыре ABI. Валидные `.arv6` лежат в `app/build/tracking-telemetry`. Один cold-start empty и один no-face combined run отклонены; нужен отдельный face-visible yaw/pitch run.
 
-Текущий FF1 diff поднимает `.arv6` до v7 и добавляет CPU-observable timeline: vsync в elapsed-realtime clock, render start, camera buffer sensor/acceptance, geometry upload acceptance и render submit. Actual presentation честно остаётся `-1`: Filament Java API его не сообщает, поэтому нужен Perfetto/FrameTimeline. Device run `ff1_render_timeline_v7`: `293/721`, dropped `0`, coverage CPU markers `1.0`, presentation `0`; median/p95 vsync callback `0.88/6.25 ms`, camera sensor→vsync `112.75/128.71 ms`, camera selection→submit `13.25/25.69 ms`, geometry upload→submit `0.62/2.99 ms`, render start→submit `3.49/9.39 ms`. Файл сохранён в `app/build/tracking-telemetry`. Это functional proof, не controlled A/B.
+Предыдущий FF1 checkpoint поднял `.arv6` до v7 и добавил CPU-observable timeline: vsync в elapsed-realtime clock, render start, camera buffer sensor/acceptance, geometry upload acceptance и render submit. Actual presentation честно остаётся `-1`: Filament Java API его не сообщает. Device run `ff1_render_timeline_v7`: `293/721`, dropped `0`, coverage CPU markers `1.0`, presentation `0`; median/p95 vsync callback `0.88/6.25 ms`, camera sensor→vsync `112.75/128.71 ms`, camera selection→submit `13.25/25.69 ms`, geometry upload→submit `0.62/2.99 ms`, render start→submit `3.49/9.39 ms`. Файл сохранён в `app/build/tracking-telemetry`. Это functional proof, не controlled A/B.
 
 Точный финальный APK после переноса camera marker за успешный `setAcquiredImage` проверен повтором `ff1_render_timeline_v7_final`: `172/484`, dropped `0`, CPU coverage `1.0`, presentation `0`, timing того же порядка. Thermal max уже был `2` и battery median `38.3 °C`, поэтому этот run годится только как финальный runtime/codec proof.
 
-1. Записать face-visible yaw/pitch, stop/dropout/weak-light/thermal matrix runs; cold-start и no-face файлы не включать в acceptance.
-2. Снять actual presentation через Perfetto/FrameTimeline и сопоставить с v7 CPU markers; selection/submit не называть presentation.
-3. Сравнить baseline-centered matrix continuity с 22-anchor/gyro по sensor/display timestamps и только затем принимать FF2.
+Checkpoint `7bd498f` поднимает `.arv6` до v8 и добавляет preferred Choreographer FrameTimeline `vsyncId`, expected presentation, deadline и `ARMK_FRAME:<vsyncId>` Perfetto sections только при debug telemetry. Expected не выдаётся за actual: `presentationTimestampNs` остаётся `-1`. Codec читает v1–v8; analyzer показывает coverage, vsync→expected и submit→deadline margin. Добавлены `tools/perfetto` config/SQL и layer-specific SurfaceFlinger actual-present sidecar. Новых runtime dependencies/models/assets нет.
+
+Device `ff1_frame_timeline_v8b`: `858/1801`, dropped `0`, timeline coverage `1.0`, camera sensor→vsync `105.65/120.93 ms`, render CPU `3.22/6.09 ms`, vsync→expected `33.33 ms`, submit deadline margin p05/median `8.33/11.84 ms`. Perfetto: `712` `ARMK_FRAME` markers; root activity transaction `688` frames (`686` on-time, `2` prediction-error), но actual FrameTimeline row для Filament `SurfaceView` отсутствует. Root/HWUI timing запрещено считать makeup presentation; официальный Perfetto также документирует отсутствие SurfaceView support.
+
+Actual Filament BLAST-layer измерен `dumpsys SurfaceFlinger --latency`, чьи AOSP columns — desired/actual/ready. Совместный `ff1_actual_present_v8b`: `.arv6` `575/1201`, dropped `0`, thermal `1`, battery `36.2 °C`; sensor→vsync `108.56/123.25 ms`, render CPU `3.17/6.35 ms`, vsync→expected `33.33 ms`, submit margin p05/median `9.01/12.35 ms`. Sidecar: `1464` frames, desired→actual `44.18/45.51 ms`, ready→actual `40.23/41.75 ms`, actual interval `16.688/16.799 ms`; только `2/1463` intervals >25 ms. Значит renderer smooth и CPU on-time, но display queue добавляет около 44 ms; грубый sensor→actual median около `186 ms`. Артефакты находятся в `app/build/tracking-telemetry`.
+
+1. Снять отдельные cold stationary/head-motion/phone-motion `.arv6` v8 + SurfaceFlinger sidecar A/B; mixed runs не включать в acceptance.
+2. Проверить low-latency scheduling/presentation candidate против `7bd498f`: уменьшить actual desired→present и sensor→display без роста missed intervals/jitter/CPU-GPU cost. До этого predictor не расширять.
+3. Записать face-visible yaw/pitch, stop/dropout/weak-light/thermal и сравнить baseline-centered matrix continuity с 22-anchor/gyro по sensor/actual-display timestamps.
 4. После FF1/FF2 перейти к FF3 model-independent `FaceObservation` / `FullFaceRenderState`.
 5. V6.3 strong phone-motion visual acceptance выполнить отдельно; matrix не подключать в renderer до численного и visual acceptance.
 
@@ -116,4 +122,4 @@ V5 реализует reconstructed lip normals, camera-conditioned lighting и 
 - `app/src/main/java/com/example/armakeup/render/FilamentMaterialFactory.kt` — lipstick shader, включая диагностические coverage/luminance uniforms.
 - `app/src/test/java/com/example/armakeup/tracking/` — tracking regression tests.
 
-Начни новый чат с изучения `AGENTS.md`, `PROJECT_CONTEXT.md`, `FULL_FACE_ROADMAP.md` и перечисленных tracking/render-файлов. Точки отката: baseline `cc82370`, fast-motion `d4636ac`, material candidate `ab8796a`, V6.3 experimental `dd095f7`; FF1/FF2 checkpoints `0554924`, `19a2280`, `3419063`. Следующий шаг — Perfetto/FrameTimeline actual-presentation capture и оставшиеся controlled FF1/FF2 runs; matrix не подключать в renderer до acceptance.
+Начни новый чат с изучения `AGENTS.md`, `PROJECT_CONTEXT.md`, `FULL_FACE_ROADMAP.md` и перечисленных tracking/render-файлов. Точки отката: baseline `cc82370`, fast-motion `d4636ac`, material candidate `ab8796a`, V6.3 experimental `dd095f7`; FF1/FF2 checkpoints `0554924`, `19a2280`, `3419063`, `7bd498f`. Следующий шаг — controlled low-latency scheduling/presentation A/B и оставшиеся FF1/FF2 runs; matrix не подключать в renderer и predictor не расширять до acceptance.

@@ -10,10 +10,11 @@
 - Device stationary/head-motion/phone-motion/roll benchmark выполнен на SM-G990B при thermal status `0`: во всех валидных runs `dropped=0`, matrix coverage/right-handed/similarity `1.0`; callback/result CPU мал относительно camera→analysis и inference.
 - Column-major layout, metric axes/handedness, affine/similarity, yaw/pitch/roll, rotation/mirror/crop зафиксированы кодом и unit tests. Roll device correlation с текущим 22-anchor pose равна `0.999461`; matrix пока остаётся shadow-only.
 - `.arv6` v7 добавляет CPU-observable render timeline: нормализованный Choreographer vsync, render callback start, sensor timestamp и принятие camera buffer, принятие geometry upload и CPU render submit. Actual presentation отдельно хранится как unknown (`-1`), потому что Filament Java API не предоставляет feedback о показе кадра.
-- Реализация v7 и device/runtime proof сохранены локальным checkpoint `3419063 [FF1]`; push в remote в рамках этого этапа не выполнялся.
+- `.arv6` v8 добавляет preferred FrameTimeline `vsyncId`, expected presentation и deadline, а trace section `ARMK_FRAME:<vsyncId>` связывает app render callback с Perfetto. Реализация сохранена checkpoint `7bd498f [FF1]`; normal runtime без debug telemetry не получает второго Choreographer callback.
 - Первый device v7 run дал полное coverage всех CPU markers, `dropped=0`: vsync callback `0.88/6.25 ms`, camera sensor→vsync `112.75/128.71 ms`, camera selection→submit `13.25/25.69 ms`, geometry upload→submit `0.62/2.99 ms`, render start→submit `3.49/9.39 ms` median/p95. Это functional proof, не controlled A/B.
-- Актуальный локальный gate: `126` unit tests, `0` failures/errors, lint и debug APK/четыре ABI успешны.
-- До завершения FF1 ещё нужны actual presentation timestamps через Perfetto/FrameTimeline и controlled stationary/head/phone runs; до завершения FF2 — face-visible yaw/pitch, stop/dropout/light/thermal matrix runs и controlled continuity/overhead acceptance.
+- Device v8 подтвердил coverage `vsyncId/expected/deadline=1.0`. Perfetto даёт root-window FrameTimeline, но не Filament `SurfaceView`, поэтому root timing не считается actual makeup presentation. Layer-specific SurfaceFlinger sidecar измерил actual: desired→actual `44.18/45.51 ms`, ready→actual `40.23/41.75 ms`, actual interval `16.688/16.799 ms` median/p95; output плавный, но display queue добавляет около `44 ms` после desired target.
+- Актуальный локальный gate: `129` unit tests, `0` failures/errors, lint и debug APK/четыре ABI успешны.
+- До завершения FF1 нужны controlled cold stationary/head/phone A/B и проверка low-latency scheduling/presentation candidate; до завершения FF2 — face-visible yaw/pitch, stop/dropout/light/thermal matrix runs и controlled continuity/overhead acceptance.
 
 Этот файл задаёт порядок дальнейшей разработки после V6.3. Полный исторический и технический контекст находится в `PROJECT_CONTEXT.md`; компактный перенос между чатами — в `CHAT_HANDOFF.md`.
 
@@ -59,7 +60,7 @@ MediaPipe 3D landmarks + canonical face transform
 - pose/fusion/prediction;
 - принятие geometry upload;
 - sensor timestamp и момент принятия выбранного camera buffer, не смешивая это с presentation;
-- render submission, Choreographer vsync и actual presentation через FrameTimeline/Perfetto, насколько это доступно API/инструментам.
+- render submission, Choreographer vsync/expected/deadline через FrameTimeline/Perfetto и actual presentation текущего `SurfaceView` через layer-specific SurfaceFlinger sidecar; production feedback в будущем должен принадлежать native swapchain.
 
 Использовать `.arv6`, Perfetto/trace sections и существующую Camera2 metadata. Все realtime-ветки остаются latest-only; диагностическая запись не создаёт новую очередь кадров.
 
@@ -211,8 +212,8 @@ Parsing выполняется ориентировочно 15–30 раз/с п
 
 ## Следующее действие
 
-1. Записать отдельные face-visible yaw и pitch runs, затем stop/dropout/weak-light/thermal; cold-start empty и no-face combined windows не считать acceptance.
-2. Добавить недостающие geometry-upload/camera-presentation/vsync timestamps, не меняя видимый renderer.
-3. Сопоставить matrix continuity с 22-anchor pose и gyro по sensor/display timestamps; абсолютный Euler zero не использовать, сравнивать baseline-centered motion.
+1. Снять отдельные cold stationary/head-motion/phone-motion `.arv6` v8 + SurfaceFlinger actual-present sidecar runs; mixed functional runs не считать acceptance.
+2. Проверить low-latency scheduling/presentation candidate controlled A/B против checkpoint `7bd498f`, уменьшая measured desired→actual/actual sensor→display без роста missed intervals, jitter или CPU/GPU budget. Predictor до этого не расширять.
+3. Записать face-visible yaw и pitch, затем stop/dropout/weak-light/thermal и сопоставить matrix continuity с 22-anchor pose/gyro по sensor/actual-display timestamps; абсолютный Euler zero не использовать.
 4. После полного FF1/FF2 numerical + visual gate перейти к FF3 model-independent `FaceObservation` / `FullFaceRenderState`.
 5. Matrix не подключать в renderer до этого gate; V6.3 strong phone-motion visual acceptance остаётся отдельной задачей.
