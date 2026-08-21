@@ -39,8 +39,9 @@ lead gated by rigid-anchor velocity, predictor coverage, and inverse gyro magnit
 face-anchored contour filter that transports the lip through the current eye/nose/cheek similarity
 pose before smoothing only the lip-local residual at 8 Hz. Offline cold replay improved head-motion
 alignment while keeping stationary and phone-motion errors approximately neutral. The candidate
-passed 147 unit tests, lint, APK, and all four native ABIs, but is not accepted until exact device
-visual A/B against `be35764`.
+passed 147 unit tests, lint, APK, and all four native ABIs. Its exact APK was installed on SM-G990B;
+the first functional native run held 16.692/16.748 ms cadence p50/p95 without a crash. It is not
+accepted until user-visible motion A/B against `be35764`.
 
 ## Context
 

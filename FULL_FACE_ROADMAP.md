@@ -75,7 +75,7 @@ MediaPipe 3D landmarks + canonical face transform
 
 Критерий завершения: для stationary, head-motion и phone-motion сценариев известен p50/p95 каждого участка, а решение о собственной landmark model опирается на долю inference в общей задержке, а не на capture-to-result целиком.
 
-Текущий status 2026-08-21: numerical decomposition и cold native/Filament matrix завершены, но `be35764` не прошёл visual acceptance из-за motion-only head lag и micro-jitter. Обратимый checkpoint `1406c24` проверяет residual render lead с motion/gyro gates и face-anchored фильтрацию только lip-local shape, не меняя MediaPipe/`LandmarkMotionPredictor` и не подключая 3D matrix к видимому пути. Offline replay gate улучшил head-motion alignment при почти неизменных stationary/phone metrics; локально пройдены `147` tests, lint, APK и четыре ABI. FF1 остаётся незавершённым до device visual A/B `1406c24` против `be35764`.
+Текущий status 2026-08-21: numerical decomposition и cold native/Filament matrix завершены, но `be35764` не прошёл visual acceptance из-за motion-only head lag и micro-jitter. Обратимый checkpoint `1406c24` проверяет residual render lead с motion/gyro gates и face-anchored фильтрацию только lip-local shape, не меняя MediaPipe/`LandmarkMotionPredictor` и не подключая 3D matrix к видимому пути. Offline replay gate улучшил head-motion alignment при почти неизменных stationary/phone metrics; локально пройдены `147` tests, lint, APK и четыре ABI. Exact APK установлен на SM-G990B, functional cadence/crash gate пройден; FF1 остаётся незавершённым до пользовательского visual A/B `1406c24` против `be35764`.
 
 ## FF2 — MediaPipe 3D transform в shadow-режиме
 
