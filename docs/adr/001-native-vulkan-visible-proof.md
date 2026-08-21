@@ -20,6 +20,16 @@ actual-present feedback to the matching submitted geometry. Unresolved tail fram
 explicit unknown timestamp. The observer and feedback drain run only during explicit debug
 telemetry, and the visible predictor remains anchored to its original vsync timestamp.
 
+Amendment 2026-08-21, low-latency queue: exact cold telemetry rejected the five-image FIFO path:
+submit-to-actual was 63.48/64.45 ms p50/p95 and actual presentation missed the preferred
+Choreographer target by 33.36/33.44 ms. Commit `be35764` therefore prefers
+`VK_PRESENT_MODE_MAILBOX_KHR` when supported and requests, but does not assume it receives, the
+surface minimum image count. The SM-G990B driver reported a minimum of four yet still returned five
+images. MAILBOX nevertheless replaced pending frames and removed one refresh: submit-to-actual
+fell to 46.80/47.73 ms, actual cadence stayed 16.688/16.763 ms, coverage was 0.9945, and no camera
+or telemetry events were dropped. FIFO remains the capability fallback; Filament remains the
+product default until visual acceptance and production-material migration.
+
 ## Context
 
 The current production-visible path imports each latest camera `AHardwareBuffer` into the native
@@ -50,8 +60,9 @@ existing full-screen `SurfaceView`:
   before native resources are released.
 
 The mode is an A/B candidate, not a new default. Orientation, mirror, crop, lip alignment, 60-Hz
-cadence, and lifecycle gates now pass on the target device. Filament stays the default and rollback
-baseline until cold motion-lag/thermal acceptance and the production material path also pass.
+cadence, lifecycle, and cold numerical motion gates now pass on the target device. Filament stays
+the default and rollback baseline until user-visible motion acceptance and the production material
+path also pass.
 
 ## Options considered
 
@@ -100,6 +111,6 @@ changing the normal Filament launch.
 4. Run local tests/lint/assemble, then install the exact APK on SM-G990B. Completed.
 5. Verify retained-camera 60-Hz cadence, transforms, and lifecycle on device. Completed warm gate.
 6. Add exact native geometry-to-present telemetry. Completed in `.arv6` v11.
-7. Run a cold telemetry-on native/Filament head-motion and phone-motion A/B before changing the
-   default compositor.
-8. Migrate and accept production materials as a separate slice if the motion gate passes.
+7. Run a cold telemetry-on native/Filament stationary, head-motion, and phone-motion A/B before
+   changing the default compositor. Numerical gate completed at `be35764`; visual verdict pending.
+8. Migrate and accept production materials as a separate slice if the visual motion gate passes.

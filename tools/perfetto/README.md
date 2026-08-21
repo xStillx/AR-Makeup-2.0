@@ -139,8 +139,30 @@ predictor/gyro state конкретного submit; `presentationTimestampNs` з
 feedback с тем же ID. Последние unresolved frames сохраняются с `-1`, поэтому acceptance требует
 высокого, но не искусственно `1.0` coverage. Первый functional run получил `907` renders,
 `dropped=0`, backend `NATIVE_VULKAN` и presentation coverage `0.99559`. Его sidecar дал
-desired→actual `46.89/47.56 ms`, что расходится с прошлым warm `30.13/30.89 ms`; до exact cold
-repeat результат queue latency считается вариативным, а не преимуществом native.
+desired→actual `46.89/47.56 ms`, что расходится с прошлым warm `30.13/30.89 ms`.
+
+Exact cold FIFO repeat финального checkpoint показал submit→actual `63.48/64.45 ms` и
+expected→actual `33.36/33.44 ms`; sidecar подтвердил `63.60/64.49 ms`. Commit `be35764`
+предпочитает `MAILBOX` при поддержке поверхности. На SM-G990B `surfaceMinImages=4`, actual
+allocation всё равно `5`, но pending replacement убрал один refresh: submit→actual
+`46.80/47.73 ms`, expected→actual `16.68/16.75 ms`, actual interval `16.688/16.763 ms`, coverage
+`0.9945`, `dropped=0`. Clean Filament sidecar остаётся немного короче по своей очереди:
+`44.20/45.66 ms`; его actual-present нельзя связать с exact `.arv6` submit через Java API.
+
+Сохранённую запись можно повторно анализировать без устройства; путь относителен модулю `app`
+либо задаётся абсолютным:
+
+```powershell
+.\gradlew.bat :app:analyzeTrackingTelemetry `
+  "-PtelemetryFile=build/tracking-telemetry/tracking-v6-...arv6"
+```
+
+Analyzer выводит camera sensor/vsync/render submit/expected→actual, presentation coverage и actual
+cadence. Cold matrix сохранена с префиксами `ff1-native-mailbox-*` и `ff1-filament-*` в
+`app/build/tracking-telemetry`. Во всех принятых sidecar actual
+interval p95 около `16.75–16.78 ms`, intervals `>25 ms` отсутствуют. Head-motion lag был одинаков
+`33 ms`; phone-motion lag `0 ms`, native stop overshoot `0.000687` против Filament `0.003843`.
+Повторные движения и материалы не идентичны, поэтому visual verdict остаётся отдельным gate.
 
 ## FF1 Filament presentation-hints negative control
 
