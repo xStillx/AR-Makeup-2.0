@@ -111,7 +111,14 @@ retained latest camera image и независимый native 60-Hz present; exp
 Candidate `2fb7cd7` removes the 30-Hz coupling with a persistent device-local camera texture. Native
 diagnostic must show `retainedPresents` growing at roughly twice `cameraCopied`, `retainedReused`
 near half of presents, and the Kotlin `actualIntervalP50Ms/actualIntervalP95Ms` near `16.7 ms`.
-These are acceptance targets, not measured results: the exact APK has not yet run on SM-G990B.
+The 2026-08-21 SM-G990B warm gate reached `cameraCopied=4800`, `retainedPresents=9574`,
+`retainedReused=4775`, `cameraDropped=0`, and actual interval `16.695/16.754 ms` p50/p95.
+`ff1-native-retained-60hz-warm.csv` contains `1181` frames with desired→actual `30.13/30.89 ms`,
+ready→actual `29.27/30.23 ms`, and interval `16.695/16.768 ms`. Same-session Filament control
+`ff1-filament-control-warm.csv` contains `1174` frames with desired→actual `44.01/45.56 ms`,
+ready→actual `40.08/41.62 ms`, and interval `16.692/16.770 ms`. Thermal status was `2`, so these
+measurements accept cadence/lifecycle only; repeat telemetry-on head/phone motion after cooling for
+the motion-lag decision.
 
 ## FF1 Filament presentation-hints negative control
 

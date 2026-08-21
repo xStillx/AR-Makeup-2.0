@@ -2,7 +2,7 @@
 
 Статус: принят 2026-08-17.
 
-Текущий прогресс 2026-08-18:
+Текущий прогресс 2026-08-21:
 
 - FF0 выполнен: V6.3 сохранён commit `dd095f7` и тегом `tracking-v6.3-gyro-experimental-2026-08-17` после полного unit/lint/assemble gate. Это experimental, не stable.
 - Первый shadow slice FF1/FF2 реализован поверх checkpoint: `.arv6` v6 разделяет tracker latency на camera→analysis, analysis→submit, MediaPipe inference и callback queue, отдельно пишет RGBA/quality/result-processing CPU duration.
@@ -18,8 +18,9 @@
 - По ADR `docs/adr/001-native-vulkan-visible-proof.md` добавлен debug-only exclusive-surface A/B: обычный запуск не меняется, а extra `ENABLE_NATIVE_VULKAN_VISIBLE=true` вообще не создаёт Filament и передаёт единственный `SurfaceView` native swapchain. Existing camera AHB/import/fences/transform используются повторно; после fullscreen camera pass Vulkan рисует текущую bright tracking-test lip geometry. `VK_GOOGLE_display_timing` связывает native `presentID` с camera sensor timestamp.
 - Device proof на SM-G990B прошёл orientation/mirror/crop/lip alignment, lifecycle и более `1020` camera frames при `cameraDropped=0`; direct sensor→actual rolling p50/p95 около `127.1/135.2 ms`. Native sidecar `583` frames: desired→actual `30.78/31.37 ms`, interval `33.38/33.60 ms`; same-APK Filament `1186` frames: desired→actual `29.10/46.04 ms`, interval `16.689/16.788 ms`. Native p95 очереди ровнее, но cadence ограничен camera arrival 30 FPS и поэтому cutover отклонён до независимого 60-Hz present.
 - Актуальный локальный gate после proof: `133` unit tests, `0` failures/errors, lint, debug APK и native build четырёх ABI успешны; exact APK установлен и проверен на устройстве. Predictor, MediaPipe, camera transforms, product materials, зависимости и модели не менялись.
-- До завершения FF1 нужен device gate независимого 60-Hz display cadence, затем controlled telemetry-on A/B против Filament. До завершения FF2 — face-visible yaw/pitch, stop/dropout/light/thermal matrix runs и controlled continuity/overhead acceptance.
-- Commit `2fb7cd7` реализует этот slice как persistent device-local camera texture: каждый свежий latest AHB один раз копируется на GPU и возвращается CameraX по sync-fd, а texture + новая lip geometry представляются независимо на каждом vsync. Добавлены counters copy/present/reuse и actual-interval telemetry. Локально пройдены `134` tests, lint, APK и четыре ABI; устройство 2026-08-21 не подключено, поэтому candidate ещё не принят и default не меняется.
+- Commit `2fb7cd7` реализует независимый display slice как persistent device-local camera texture: каждый свежий latest AHB один раз копируется на GPU и возвращается CameraX по sync-fd, а texture + новая lip geometry представляются независимо на каждом vsync. Добавлены counters copy/present/reuse и actual-interval telemetry. Локально пройдены `134` tests, lint, APK и четыре ABI.
+- Device cadence/lifecycle gate этого slice пройден на SM-G990B: `4800` camera copies, `9574` presents, `4775` reused, `cameraDropped=0`, actual interval около `16.695/16.754 ms` p50/p95; orientation/mirror/crop/lip alignment и Home/resume/Back корректны. Warm SurfaceFlinger run дал native desired→actual `30.13/30.89 ms` против Filament `44.01/45.56 ms`, при одинаковом interval около `16.7 ms`. Thermal status был `2`, поэтому это acceptance 60-Гц cadence и lifecycle, но не окончательный motion-lag/performance A/B. Default остаётся Filament.
+- До завершения FF1 нужны холодный telemetry-on stationary/head-motion/phone-motion A/B, пользовательская visual acceptance резких движений и затем перенос production matte/satin/gloss в native compositor. До завершения FF2 — face-visible yaw/pitch, stop/dropout/light/thermal matrix runs и controlled continuity/overhead acceptance.
 
 Этот файл задаёт порядок дальнейшей разработки после V6.3. Полный исторический и технический контекст находится в `PROJECT_CONTEXT.md`; компактный перенос между чатами — в `CHAT_HANDOFF.md`.
 

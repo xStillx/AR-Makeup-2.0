@@ -1,6 +1,6 @@
 # ARMakeup — компактный контекст для нового чата
 
-Актуально на 2026-08-18. Полный источник истины — `PROJECT_CONTEXT.md`; правила репозитория — `AGENTS.md`.
+Актуально на 2026-08-21. Полный источник истины — `PROJECT_CONTEXT.md`; правила репозитория — `AGENTS.md`.
 
 ## Цель и приоритет
 
@@ -16,7 +16,7 @@ Native Android-приложение виртуальной примерки ма
 - Ветка: `master`; актуальный локальный FF1 candidate — `2fb7cd7`, его device-проверенный rollback — `9bc3efb`. Точки отката: `cc82370` / `tracking-v6.2-stable-2026-08-17`, `d4636ac` / `tracking-v6.2-fast-motion-2026-08-17`, `ab8796a` / `material-temporal-v1-candidate-2026-08-17`, `dd095f7` / `tracking-v6.3-gyro-experimental-2026-08-17`. FF1/FF2 commits: `0554924`, `d083af2`, `19a2280`, `3419063`, `7bd498f`, `1e02424`, `6be330f`, native visible proof `9bc3efb`, retained-texture candidate `2fb7cd7`. Default остаётся Filament, native включается только debug-extra.
 - Основные коммиты: `cc82370 [V6.2]`, `cd1a560 [UpdateContext]`, `8d48b46 [V6]`, `4f8039b [V5]`, `3d3572e [V4]`, `395d3f3 [V3]`.
 - Kotlin, XML/View UI, один модуль `:app`; `minSdk 24`, `targetSdk/compileSdk 37`.
-- Последняя локальная проверка: 134 unit-теста, 0 failures/errors, lint и debug APK успешно; native код/SPIR-V собираются для `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`. Exact APK `2fb7cd7` ещё не проверен на устройстве: `adb` не видел подключённых устройств.
+- Последняя локальная проверка: 134 unit-теста, 0 failures/errors, lint и debug APK успешно; native код/SPIR-V собираются для `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`. Exact APK `2fb7cd7` проверен на SM-G990B; 60-Гц cadence/lifecycle gate пройден, но холодный motion-lag A/B и production-material cutover ещё не пройдены.
 
 ## Текущий pipeline
 
@@ -95,10 +95,10 @@ adb shell am start -n com.example.armakeup/.MainActivity `
 
 Device proof: visible swapchain `1080×2340`, 5 images, camera `1440×1080`, orientation/mirror/crop/lip alignment правильные; более 1020 camera frames, `cameraDropped=0`, lifecycle Home/resume/Back без crash. Direct native sensor→actual rolling p50/p95 около `127.1/135.2 ms`. SurfaceFlinger 20 s: native `583` frames, desired→actual `30.78/31.37 ms`, interval `33.38/33.60 ms`, `578/582 >25 ms`; same-APK Filament `1186` frames, desired→actual `29.10/46.04 ms`, interval `16.689/16.788 ms`, `1/1185 >25 ms`. Native actual feedback и p95 стабильны, но present выполняется только при новом 30-FPS camera buffer, поэтому production cutover отклонён. Default остаётся Filament.
 
-Commit `2fb7cd7` добавляет следующий candidate: latest camera AHB один раз семплируется GPU→GPU в постоянную device-local RGBA texture и сразу возвращается CameraX по export sync-fd; swapchain pass переиспользует texture, но обновляет predicted lip geometry на каждом vsync. Диагностика разделяет `cameraCopied`, `retainedPresents`, `retainedReused`, actual interval и reuse fraction. Локальный gate пройден, device gate отсутствует; не считать candidate 60-Гц или визуально корректным до exact-APK прогона.
+Commit `2fb7cd7` добавляет retained-camera candidate: latest camera AHB один раз семплируется GPU→GPU в постоянную device-local RGBA texture и сразу возвращается CameraX по export sync-fd; swapchain pass переиспользует texture, но обновляет predicted lip geometry на каждом vsync. Device gate: `4800` copies, `9574` presents, `4775` reused, `cameraDropped=0`, actual interval `16.695/16.754 ms` p50/p95, правильные orientation/mirror/crop/lip alignment и корректный Home/resume/Back. Warm SurfaceFlinger native/Filament desired→actual: `30.13/30.89` против `44.01/45.56 ms`; thermal status `2`, поэтому это cadence/lifecycle acceptance, не финальный motion-lag verdict. После теста обычный Filament default восстановлен.
 
-1. Подключить SM-G990B, установить exact APK `2fb7cd7` и проверить first frame/orientation/mirror/crop/lip alignment, минимум 1000 camera copies, `cameraDropped=0`, copy:present примерно 1:2, reuse около 0.5 и Home/resume/Back.
-2. Затем controlled telemetry-on Filament/Vulkan A/B по direct sensor→actual, interval/jank около 16.7 ms, camera drops, CPU/GPU/thermal и visual head/phone motion. При regression откатиться к `9bc3efb`; predictor/full-face/material path одновременно не менять.
+1. На охлаждённом SM-G990B выполнить telemetry-on stationary/head-motion/phone-motion A/B native retained против Filament по direct sensor→actual, SurfaceFlinger interval/queue, camera drops, CPU/GPU/thermal и визуальному слёту/отставанию.
+2. Если motion acceptance пройдена, перенести production matte/satin/gloss и единый color/HDR contract в native compositor отдельным slice. При regression откатиться к `9bc3efb`; predictor/full-face/material path одновременно не менять.
 3. После 60-Hz gate вернуться к iOS-наблюдению «ARKit + точка на губах»: запросить точный код и проверить, наследует ли точка `ARFaceAnchor`/face geometry. Android-вариант — local 3D lip anchor по нескольким landmarks; shadow A/B MediaPipe face matrix против ARCore Augmented Faces pose/mesh. Одиночная 2D-точка не считается достаточной; ARCore требует предварительного license review.
 4. Записать face-visible yaw/pitch, stop/dropout/weak-light/thermal; после FF1/FF2 перейти к FF3 model-independent `FaceObservation` / `FullFaceRenderState`.
 5. V6.3 strong phone-motion visual acceptance выполнить отдельно; matrix/ARCore не подключать в production renderer до численного и visual acceptance.
@@ -140,4 +140,4 @@ V5 реализует reconstructed lip normals, camera-conditioned lighting и 
 - `app/src/main/java/com/example/armakeup/render/FilamentMaterialFactory.kt` — lipstick shader, включая диагностические coverage/luminance uniforms.
 - `app/src/test/java/com/example/armakeup/tracking/` — tracking regression tests.
 
-Начни новый чат с изучения `AGENTS.md`, `PROJECT_CONTEXT.md`, `FULL_FACE_ROADMAP.md`, ADR 001 и перечисленных tracking/render-файлов. Точки отката: baseline `cc82370`, fast-motion `d4636ac`, material candidate `ab8796a`, V6.3 experimental `dd095f7`; FF1/FF2 checkpoints `0554924`, `19a2280`, `3419063`, `7bd498f`, Filament validation `6be330f`, native visible proof `9bc3efb`. Следующий шаг — retained latest camera image + независимый native 60-Hz present, затем controlled A/B; matrix не подключать в renderer и predictor не расширять до acceptance.
+Начни новый чат с изучения `AGENTS.md`, `PROJECT_CONTEXT.md`, `FULL_FACE_ROADMAP.md`, ADR 001 и перечисленных tracking/render-файлов. Точки отката: baseline `cc82370`, fast-motion `d4636ac`, material candidate `ab8796a`, V6.3 experimental `dd095f7`; FF1/FF2 checkpoints `0554924`, `19a2280`, `3419063`, `7bd498f`, Filament validation `6be330f`, native visible proof `9bc3efb`, retained 60-Hz candidate `2fb7cd7`. Следующий шаг — холодный controlled telemetry/visual A/B retained native против Filament; matrix не подключать в renderer и predictor не расширять до acceptance.

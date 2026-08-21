@@ -7,7 +7,11 @@ Each latest AHB is sampled once into one device-local RGBA image, then returned 
 the existing exported sync-fd. Display passes retain and reuse the GPU-owned RGBA image while lip
 geometry can change every vsync. This adds one fullscreen GPU copy per camera frame, but keeps the
 camera queue latest-only and avoids ambiguous repeated FOREIGN queue-family ownership transfers.
-Commit `2fb7cd7` is locally built but not device-accepted; `9bc3efb` remains the verified rollback.
+Commit `2fb7cd7` passed the SM-G990B cadence, visual-transform, and lifecycle gate on 2026-08-21:
+4800 camera copies produced 9574 presents with 4775 retained-image reuses, no camera drops, and
+16.695/16.754 ms actual-present interval p50/p95. The candidate remains debug-only until a cold,
+telemetry-on head/phone-motion A/B and production-material migration pass; `9bc3efb` remains the
+minimal verified rollback.
 
 ## Context
 
@@ -38,8 +42,9 @@ existing full-screen `SurfaceView`:
 - destroying or invalidating the renderer waits for CameraX to return its provided camera surface
   before native resources are released.
 
-The mode is an A/B candidate, not a new default. Filament stays the rollback baseline until
-orientation, mirror, crop, lip alignment, timing, jank, and thermal gates pass on device.
+The mode is an A/B candidate, not a new default. Orientation, mirror, crop, lip alignment, 60-Hz
+cadence, and lifecycle gates now pass on the target device. Filament stays the default and rollback
+baseline until cold motion-lag/thermal acceptance and the production material path also pass.
 
 ## Options considered
 
@@ -65,9 +70,8 @@ changing the normal Filament launch.
 - Surface loss or size change recreates the debug renderer rather than introducing a second owner.
 - Presentation timing is capability-dependent; absence of the Vulkan extension is not disguised as
   actual display feedback.
-- The proof may initially present only when a fresh 30 FPS camera buffer is available. A retained
-  camera image and independent 60 Hz geometry present loop are a follow-up only if measurements
-  show that it is required.
+- The initial proof presented only when a fresh 30 FPS camera buffer was available. The accepted
+  follow-up retains a GPU-owned camera image and presents new geometry independently at 60 Hz.
 
 ## Consequences
 
@@ -84,6 +88,8 @@ changing the normal Filament launch.
 1. Introduce a renderer delegate boundary in `FilamentMakeupView`.
 2. Add the debug-only native visible renderer and lifecycle/surface ownership.
 3. Add the Vulkan tracking-test lip pipeline and optional display-timing feedback.
-4. Run local tests/lint/assemble, then install the exact APK on SM-G990B.
-5. Compare native Vulkan and unchanged Filament with the same device scenarios and record the
-   accepted/rejected result in `PROJECT_CONTEXT.md`, `FULL_FACE_ROADMAP.md`, and `CHAT_HANDOFF.md`.
+4. Run local tests/lint/assemble, then install the exact APK on SM-G990B. Completed.
+5. Verify retained-camera 60-Hz cadence, transforms, and lifecycle on device. Completed warm gate.
+6. Run a cold telemetry-on native/Filament head-motion and phone-motion A/B before changing the
+   default compositor.
+7. Migrate and accept production materials as a separate slice if the motion gate passes.
