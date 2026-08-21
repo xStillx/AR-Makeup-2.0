@@ -30,6 +30,18 @@ fell to 46.80/47.73 ms, actual cadence stayed 16.688/16.763 ms, coverage was 0.9
 or telemetry events were dropped. FIFO remains the capability fallback; Filament remains the
 product default until visual acceptance and production-material migration.
 
+Amendment 2026-08-21, residual motion candidate: the user rejected the first MAILBOX visual gate.
+Sharp head motion still showed a mask lag only while moving, with near-immediate recovery at stop;
+small device motion exposed visible contour jitter. Stable 60 Hz actual-present and the immediate
+stop recovery make another queue or reacquisition change the wrong layer. Commit `1406c24` keeps
+the tracker unchanged and adds two native-only, reversible render stages: a maximum 32 ms residual
+lead gated by rigid-anchor velocity, predictor coverage, and inverse gyro magnitude; and a
+face-anchored contour filter that transports the lip through the current eye/nose/cheek similarity
+pose before smoothing only the lip-local residual at 8 Hz. Offline cold replay improved head-motion
+alignment while keeping stationary and phone-motion errors approximately neutral. The candidate
+passed 147 unit tests, lint, APK, and all four native ABIs, but is not accepted until exact device
+visual A/B against `be35764`.
+
 ## Context
 
 The current production-visible path imports each latest camera `AHardwareBuffer` into the native
@@ -112,5 +124,7 @@ changing the normal Filament launch.
 5. Verify retained-camera 60-Hz cadence, transforms, and lifecycle on device. Completed warm gate.
 6. Add exact native geometry-to-present telemetry. Completed in `.arv6` v11.
 7. Run a cold telemetry-on native/Filament stationary, head-motion, and phone-motion A/B before
-   changing the default compositor. Numerical gate completed at `be35764`; visual verdict pending.
-8. Migrate and accept production materials as a separate slice if the visual motion gate passes.
+   changing the default compositor. Numerical gate completed at `be35764`; first visual gate failed.
+8. Install and visually compare the gated residual motion/local-contour candidate `1406c24` against
+   `be35764`, separating global attachment jitter from local contour boiling. Pending device.
+9. Migrate and accept production materials as a separate slice if the visual motion gate passes.
