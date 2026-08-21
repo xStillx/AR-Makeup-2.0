@@ -255,6 +255,9 @@ public:
                << " api=" << versionName(deviceApiVersion_)
                << " format=" << formatName(surfaceFormat_.format)
                << " extent=" << extent_.width << 'x' << extent_.height
+               << " presentMode=" << presentModeName(presentMode_)
+               << " surfaceMinImages=" << surfaceMinimumImageCount_
+               << " surfaceMaxImages=" << surfaceMaximumImageCount_
                << " images=" << swapchainImages_.size()
                << " frames=" << presentedFrames_.load()
                << " cameraImported=" << cameraImportedFrames_.load()
@@ -1216,7 +1219,37 @@ private:
         surfaceFormat_ = chooseSurfaceFormat(formats);
         extent_ = chooseExtent(capabilities);
 
-        std::uint32_t imageCount = capabilities.minImageCount + 1;
+        std::uint32_t presentModeCount = 0;
+        result = getPhysicalDeviceSurfacePresentModes_(
+            physicalDevice_,
+            surface_,
+            &presentModeCount,
+            nullptr
+        );
+        if (result != VK_SUCCESS || presentModeCount == 0U) {
+            setVulkanError("surface_present_modes", result);
+            return false;
+        }
+        std::vector<VkPresentModeKHR> presentModes(presentModeCount);
+        result = getPhysicalDeviceSurfacePresentModes_(
+            physicalDevice_,
+            surface_,
+            &presentModeCount,
+            presentModes.data()
+        );
+        if (result != VK_SUCCESS) {
+            setVulkanError("read_surface_present_modes", result);
+            return false;
+        }
+        presentMode_ = choosePresentMode(presentModes);
+        surfaceMinimumImageCount_ = capabilities.minImageCount;
+        surfaceMaximumImageCount_ = capabilities.maxImageCount;
+
+        // This renderer is driven at display cadence and prioritizes freshness over throughput.
+        // Requesting min+1 produced a five-buffer FIFO on the reference device and four-vsync
+        // presentation age. Request the surface minimum so the app does not voluntarily add
+        // another image; an implementation may still allocate more images than requested.
+        std::uint32_t imageCount = capabilities.minImageCount;
         if (capabilities.maxImageCount > 0 && imageCount > capabilities.maxImageCount) {
             imageCount = capabilities.maxImageCount;
         }
@@ -1237,7 +1270,7 @@ private:
             .pQueueFamilyIndices = nullptr,
             .preTransform = capabilities.currentTransform,
             .compositeAlpha = compositeAlpha,
-            .presentMode = VK_PRESENT_MODE_FIFO_KHR,
+            .presentMode = presentMode_,
             .clipped = VK_TRUE,
             .oldSwapchain = VK_NULL_HANDLE,
         };
@@ -1296,6 +1329,32 @@ private:
             return *preferred;
         }
         return formats.front();
+    }
+
+    [[nodiscard]] static VkPresentModeKHR choosePresentMode(
+        const std::vector<VkPresentModeKHR>& modes
+    ) {
+        const auto mailbox = std::find(
+            modes.begin(),
+            modes.end(),
+            VK_PRESENT_MODE_MAILBOX_KHR
+        );
+        return mailbox != modes.end() ? VK_PRESENT_MODE_MAILBOX_KHR : VK_PRESENT_MODE_FIFO_KHR;
+    }
+
+    [[nodiscard]] static const char* presentModeName(VkPresentModeKHR mode) {
+        switch (mode) {
+            case VK_PRESENT_MODE_MAILBOX_KHR:
+                return "MAILBOX";
+            case VK_PRESENT_MODE_FIFO_KHR:
+                return "FIFO";
+            case VK_PRESENT_MODE_FIFO_RELAXED_KHR:
+                return "FIFO_RELAXED";
+            case VK_PRESENT_MODE_IMMEDIATE_KHR:
+                return "IMMEDIATE";
+            default:
+                return "UNKNOWN";
+        }
     }
 
     [[nodiscard]] VkExtent2D chooseExtent(
@@ -5206,6 +5265,9 @@ private:
     std::uint32_t queueFamilyIndex_ = 0;
     VkSwapchainKHR swapchain_ = VK_NULL_HANDLE;
     VkSurfaceFormatKHR surfaceFormat_{};
+    VkPresentModeKHR presentMode_ = VK_PRESENT_MODE_FIFO_KHR;
+    std::uint32_t surfaceMinimumImageCount_ = 0;
+    std::uint32_t surfaceMaximumImageCount_ = 0;
     VkExtent2D extent_{};
     VkRenderPass renderPass_ = VK_NULL_HANDLE;
     VkCommandPool commandPool_ = VK_NULL_HANDLE;

@@ -109,6 +109,16 @@ data class TrackingRenderTimelineMetrics(
     val p95RenderStartToSubmitMs: Float,
     val medianVsyncToExpectedPresentationMs: Float,
     val p95VsyncToExpectedPresentationMs: Float,
+    val medianCameraSensorToPresentationMs: Float,
+    val p95CameraSensorToPresentationMs: Float,
+    val medianVsyncToPresentationMs: Float,
+    val p95VsyncToPresentationMs: Float,
+    val medianRenderSubmitToPresentationMs: Float,
+    val p95RenderSubmitToPresentationMs: Float,
+    val medianExpectedToActualPresentationMs: Float,
+    val p95ExpectedToActualPresentationMs: Float,
+    val medianActualPresentationIntervalMs: Float,
+    val p95ActualPresentationIntervalMs: Float,
     val p05RenderSubmitDeadlineMarginMs: Float,
     val medianRenderSubmitDeadlineMarginMs: Float,
 )
@@ -328,6 +338,26 @@ data class TrackingTelemetryMetrics(
             .append(renderTimeline.medianVsyncToExpectedPresentationMs.formatMetric())
         append(" vsyncToExpectedPresentationP95Ms=")
             .append(renderTimeline.p95VsyncToExpectedPresentationMs.formatMetric())
+        append(" cameraSensorToPresentationMedianMs=")
+            .append(renderTimeline.medianCameraSensorToPresentationMs.formatMetric())
+        append(" cameraSensorToPresentationP95Ms=")
+            .append(renderTimeline.p95CameraSensorToPresentationMs.formatMetric())
+        append(" vsyncToPresentationMedianMs=")
+            .append(renderTimeline.medianVsyncToPresentationMs.formatMetric())
+        append(" vsyncToPresentationP95Ms=")
+            .append(renderTimeline.p95VsyncToPresentationMs.formatMetric())
+        append(" renderSubmitToPresentationMedianMs=")
+            .append(renderTimeline.medianRenderSubmitToPresentationMs.formatMetric())
+        append(" renderSubmitToPresentationP95Ms=")
+            .append(renderTimeline.p95RenderSubmitToPresentationMs.formatMetric())
+        append(" expectedToActualPresentationMedianMs=")
+            .append(renderTimeline.medianExpectedToActualPresentationMs.formatMetric())
+        append(" expectedToActualPresentationP95Ms=")
+            .append(renderTimeline.p95ExpectedToActualPresentationMs.formatMetric())
+        append(" actualPresentationIntervalMedianMs=")
+            .append(renderTimeline.medianActualPresentationIntervalMs.formatMetric())
+        append(" actualPresentationIntervalP95Ms=")
+            .append(renderTimeline.p95ActualPresentationIntervalMs.formatMetric())
         append(" renderSubmitDeadlineMarginP05Ms=")
             .append(renderTimeline.p05RenderSubmitDeadlineMarginMs.formatMetric())
         append(" renderSubmitDeadlineMarginMedianMs=")
@@ -748,6 +778,37 @@ object TrackingTelemetryAnalyzer {
                 sample.renderTiming.expectedPresentationTimestampNs,
             )
         }
+        val cameraSensorToPresentation = allRenders.mapNotNull { sample ->
+            orderedDurationNs(
+                sample.renderTiming.cameraFrameSensorTimestampNs,
+                sample.renderTiming.presentationTimestampNs,
+            )
+        }
+        val vsyncToPresentation = allRenders.mapNotNull { sample ->
+            orderedDurationNs(
+                sample.renderTiming.vsyncTimestampNs,
+                sample.renderTiming.presentationTimestampNs,
+            )
+        }
+        val renderSubmitToPresentation = allRenders.mapNotNull { sample ->
+            orderedDurationNs(
+                sample.renderTiming.renderSubmitTimestampNs,
+                sample.renderTiming.presentationTimestampNs,
+            )
+        }
+        val expectedToActualPresentation = allRenders.mapNotNull { sample ->
+            signedDurationNs(
+                sample.renderTiming.expectedPresentationTimestampNs,
+                sample.renderTiming.presentationTimestampNs,
+            )
+        }
+        val actualPresentationIntervals = allRenders
+            .map { it.renderTiming.presentationTimestampNs }
+            .filter { it >= 0L }
+            .distinct()
+            .sorted()
+            .zipWithNext { previous, current -> orderedDurationNs(previous, current) }
+            .filterNotNull()
         val renderSubmitDeadlineMargin = allRenders.mapNotNull { sample ->
             signedDurationNs(
                 sample.renderTiming.renderSubmitTimestampNs,
@@ -796,6 +857,40 @@ object TrackingTelemetryAnalyzer {
             ),
             p95VsyncToExpectedPresentationMs = percentile(
                 vsyncToExpectedPresentation,
+                0.95f,
+            ),
+            medianCameraSensorToPresentationMs = percentile(
+                cameraSensorToPresentation,
+                0.5f,
+            ),
+            p95CameraSensorToPresentationMs = percentile(
+                cameraSensorToPresentation,
+                0.95f,
+            ),
+            medianVsyncToPresentationMs = percentile(vsyncToPresentation, 0.5f),
+            p95VsyncToPresentationMs = percentile(vsyncToPresentation, 0.95f),
+            medianRenderSubmitToPresentationMs = percentile(
+                renderSubmitToPresentation,
+                0.5f,
+            ),
+            p95RenderSubmitToPresentationMs = percentile(
+                renderSubmitToPresentation,
+                0.95f,
+            ),
+            medianExpectedToActualPresentationMs = percentile(
+                expectedToActualPresentation,
+                0.5f,
+            ),
+            p95ExpectedToActualPresentationMs = percentile(
+                expectedToActualPresentation,
+                0.95f,
+            ),
+            medianActualPresentationIntervalMs = percentile(
+                actualPresentationIntervals,
+                0.5f,
+            ),
+            p95ActualPresentationIntervalMs = percentile(
+                actualPresentationIntervals,
                 0.95f,
             ),
             p05RenderSubmitDeadlineMarginMs = percentile(renderSubmitDeadlineMargin, 0.05f),

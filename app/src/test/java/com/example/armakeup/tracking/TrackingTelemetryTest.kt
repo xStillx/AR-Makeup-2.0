@@ -794,8 +794,37 @@ class TrackingTelemetryTest {
         assertEquals(5f, timeline.medianGeometryUploadToSubmitMs, EPSILON)
         assertEquals(6f, timeline.medianRenderStartToSubmitMs, EPSILON)
         assertEquals(16f, timeline.medianVsyncToExpectedPresentationMs, EPSILON)
+        assertEquals(55f, timeline.medianCameraSensorToPresentationMs, EPSILON)
+        assertEquals(15f, timeline.medianVsyncToPresentationMs, EPSILON)
+        assertEquals(3f, timeline.medianRenderSubmitToPresentationMs, EPSILON)
+        assertEquals(-1f, timeline.medianExpectedToActualPresentationMs, EPSILON)
         assertEquals(-2f, timeline.p05RenderSubmitDeadlineMarginMs, EPSILON)
         assertEquals(2f, timeline.medianRenderSubmitDeadlineMarginMs, EPSILON)
+    }
+
+    @Test
+    fun analyzerReportsActualPresentationCadenceFromResolvedFeedback() {
+        val renders = listOf(1_030_000_000L, 1_047_000_000L, 1_064_000_000L).mapIndexed {
+                index,
+                presentationTimestampNs,
+            ->
+            renderSample(1_100L + index * 17L, index * 0.01f).copy(
+                renderTiming = TrackingRenderTiming.UNKNOWN.copy(
+                    presentationTimestampNs = presentationTimestampNs,
+                ),
+            )
+        }
+
+        val timeline = TrackingTelemetryAnalyzer.analyze(
+            TrackingTelemetrySession(
+                TrackingTelemetryHeader("presentation_cadence", 0L),
+                renders,
+                droppedEventCount = 0L,
+            ),
+        ).renderTimeline
+
+        assertEquals(17f, timeline.medianActualPresentationIntervalMs, EPSILON)
+        assertEquals(17f, timeline.p95ActualPresentationIntervalMs, EPSILON)
     }
 
     @Test

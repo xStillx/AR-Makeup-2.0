@@ -65,3 +65,21 @@ dependencies {
     androidTestImplementation(libs.androidx.espresso.core)
     androidTestImplementation(libs.androidx.junit)
 }
+
+val debugUnitTestRuntimeClasspath = objects.fileCollection()
+afterEvaluate {
+    debugUnitTestRuntimeClasspath.from(
+        tasks.named<org.gradle.api.tasks.testing.Test>("testDebugUnitTest").get().classpath,
+    )
+}
+
+tasks.register<org.gradle.api.tasks.JavaExec>("analyzeTrackingTelemetry") {
+    group = "verification"
+    description = "Analyzes an existing .arv6 recording without rebuilding or replaying it on-device."
+    dependsOn("testDebugUnitTest")
+    classpath = debugUnitTestRuntimeClasspath
+    mainClass.set("com.example.armakeup.tracking.TrackingTelemetryAnalysisCli")
+    val telemetryFile = providers.gradleProperty("telemetryFile").orNull
+        ?: error("Pass -PtelemetryFile=<absolute-or-app-relative-path-to-.arv6>")
+    args(telemetryFile)
+}
