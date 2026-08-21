@@ -29,6 +29,7 @@ import com.example.armakeup.tracking.TrackingTelemetrySink
 import com.example.armakeup.tracking.TrackingRenderBackend
 import com.example.armakeup.tracking.TrackingRenderSample
 import com.example.armakeup.tracking.TrackingRenderTiming
+import com.example.armakeup.tracking.TrackingGeometryExtractor
 
 /** Debug-only visible swapchain proof. Filament is not constructed while this renderer is active. */
 internal class NativeVulkanVisibleRenderer(
@@ -46,9 +47,13 @@ internal class NativeVulkanVisibleRenderer(
     private val lipTessellator = LipMeshTessellator()
     private val outerPoints = FloatArray(LipLandmarkTopology.outerContour.size * POINT_SIZE)
     private val innerPoints = FloatArray(LipLandmarkTopology.innerContour.size * POINT_SIZE)
+    private val faceAnchorPoints =
+        FloatArray(TrackingGeometryExtractor.stableAnchorIndices.size * POINT_SIZE)
     private val nativeLipVertices = FloatArray(lipTessellator.vertexCount * NATIVE_VERTEX_COMPONENTS)
+    private val lipContourStabilizer = FaceAnchoredLipContourStabilizer()
     private val gyroscopeHistory = GyroscopeRotationHistory()
     private val gyroscopeCompensator = GyroscopeLipCompensator(gyroscopeHistory)
+    private val renderMotionCompensator = NativeVulkanRenderMotionCompensator()
     private val gyroscopeSource = AndroidGyroscopeSource(
         context = context.applicationContext,
         history = gyroscopeHistory,
@@ -255,6 +260,7 @@ internal class NativeVulkanVisibleRenderer(
         ensureMainThread()
         latestLandmarks = null
         gyroscopeHistory.clear()
+        lipContourStabilizer.reset()
         runtime?.updateTrackingTestLip(EMPTY_FLOATS, EMPTY_SHORTS, visible = false)
     }
 
@@ -392,6 +398,7 @@ internal class NativeVulkanVisibleRenderer(
             state.sourceHeight <= 0 ||
             state.landmarks.size <= MAX_REQUIRED_LANDMARK_INDEX
         ) {
+            lipContourStabilizer.reset()
             check(activeRuntime.updateTrackingTestLip(EMPTY_FLOATS, EMPTY_SHORTS, visible = false)) {
                 "Native Vulkan hidden tracking-test lip upload failed"
             }
@@ -407,12 +414,32 @@ internal class NativeVulkanVisibleRenderer(
             }
             return
         }
-        val predictionSeconds = state.landmarks.predictionSeconds(renderTimestampMs)
-        val cameraMotionPredictionSeconds =
+        val baseCameraMotionPredictionSeconds =
             state.landmarks.cameraMotionPredictionSeconds(renderTimestampMs)
+        val baseMeshSensorTimestampNs = state.sensorTimestampNs +
+            (baseCameraMotionPredictionSeconds * NANOS_PER_SECOND).toLong()
+        val baseGyroscopeCorrection = if (gyroscopeCorrectionEnabled) {
+            gyroscopeCompensator.correctionFor(
+                meshSensorTimestampNs = baseMeshSensorTimestampNs,
+                cameraSensorTimestampNs = latestCameraSensorTimestampNs,
+                cameraRotationDegrees = state.rotationDegrees,
+                mirrorHorizontal = state.mirrorHorizontal,
+                displayRotation = surfaceView.display?.rotation ?: Surface.ROTATION_0,
+                calibration = cameraCalibration,
+            )
+        } else {
+            GyroscopeLipCompensator.Correction.NONE
+        }
+        val renderPrediction = renderMotionCompensator.predictionFor(
+            landmarks = state.landmarks,
+            renderTimestampMs = renderTimestampMs,
+            baseGyroscopeCorrection = baseGyroscopeCorrection,
+        )
         val meshSensorTimestampNs = state.sensorTimestampNs +
-            (cameraMotionPredictionSeconds * NANOS_PER_SECOND).toLong()
-        val gyroscopeCorrection = if (gyroscopeCorrectionEnabled) {
+            (renderPrediction.cameraMotionSeconds * NANOS_PER_SECOND).toLong()
+        val gyroscopeCorrection = if (
+            gyroscopeCorrectionEnabled && renderPrediction.additionalSeconds > 0f
+        ) {
             gyroscopeCompensator.correctionFor(
                 meshSensorTimestampNs = meshSensorTimestampNs,
                 cameraSensorTimestampNs = latestCameraSensorTimestampNs,
@@ -422,7 +449,7 @@ internal class NativeVulkanVisibleRenderer(
                 calibration = cameraCalibration,
             )
         } else {
-            GyroscopeLipCompensator.Correction.NONE
+            baseGyroscopeCorrection
         }
         val fillTransform = FillCenterTransform.calculate(
             viewWidth = viewportWidth,
@@ -436,7 +463,8 @@ internal class NativeVulkanVisibleRenderer(
         )
         writeContour(
             state,
-            predictionSeconds,
+            renderPrediction.baseSeconds,
+            renderPrediction.additionalSeconds,
             fillTransform,
             imageTransform,
             LipLandmarkTopology.outerContour,
@@ -445,12 +473,29 @@ internal class NativeVulkanVisibleRenderer(
         )
         writeContour(
             state,
-            predictionSeconds,
+            renderPrediction.baseSeconds,
+            renderPrediction.additionalSeconds,
             fillTransform,
             imageTransform,
             LipLandmarkTopology.innerContour,
             innerPoints,
             gyroscopeCorrection,
+        )
+        writeContour(
+            state,
+            renderPrediction.baseSeconds,
+            renderPrediction.additionalSeconds,
+            fillTransform,
+            imageTransform,
+            TrackingGeometryExtractor.stableAnchorIndices,
+            faceAnchorPoints,
+            gyroscopeCorrection,
+        )
+        lipContourStabilizer.stabilize(
+            anchors = faceAnchorPoints,
+            outerContour = outerPoints,
+            innerContour = innerPoints,
+            timestampMs = renderTimestampMs,
         )
         val tessellated = lipTessellator.tessellate(
             outerContour = outerPoints,
@@ -480,8 +525,8 @@ internal class NativeVulkanVisibleRenderer(
         if (trackingTelemetrySink != null) {
             displayedMeasurementTimestampMs = state.landmarks.measurementTimestampMs
             displayedSensorTimestampNs = state.sensorTimestampNs
-            displayedPredictionSeconds = predictionSeconds
-            displayedCameraMotionPredictionSeconds = cameraMotionPredictionSeconds
+            displayedPredictionSeconds = renderPrediction.totalSeconds
+            displayedCameraMotionPredictionSeconds = renderPrediction.cameraMotionSeconds
             displayedGlobalPredictionCoverage = state.landmarks.globalPredictionCoverage()
             displayedGyroscopeCorrection = gyroscopeCorrection
             displayedGeometryUploadAcceptedTimestampNs = SystemClock.elapsedRealtimeNanos()
@@ -492,6 +537,7 @@ internal class NativeVulkanVisibleRenderer(
     private fun writeContour(
         state: LandmarkState,
         predictionSeconds: Float,
+        additionalPredictionSeconds: Float,
         fillTransform: FillCenterTransform,
         imageTransform: NormalizedImageTransform,
         topology: IntArray,
@@ -499,8 +545,16 @@ internal class NativeVulkanVisibleRenderer(
         gyroscopeCorrection: GyroscopeLipCompensator.Correction,
     ) {
         topology.forEachIndexed { pointIndex, landmarkIndex ->
-            val rawX = state.landmarks.x(landmarkIndex, predictionSeconds)
-            val rawY = state.landmarks.y(landmarkIndex, predictionSeconds)
+            val rawX = state.landmarks.xWithAdditionalPrediction(
+                landmarkIndex,
+                predictionSeconds,
+                additionalPredictionSeconds,
+            )
+            val rawY = state.landmarks.yWithAdditionalPrediction(
+                landmarkIndex,
+                predictionSeconds,
+                additionalPredictionSeconds,
+            )
             val displayX = imageTransform.mapX(rawX, rawY)
             val displayY = imageTransform.mapY(rawX, rawY)
             val correctedX = gyroscopeCorrection.mapX(displayX, displayY)
@@ -681,6 +735,7 @@ internal class NativeVulkanVisibleRenderer(
         private val MAX_REQUIRED_LANDMARK_INDEX = maxOf(
             LipLandmarkTopology.outerContour.maxOrNull() ?: 0,
             LipLandmarkTopology.innerContour.maxOrNull() ?: 0,
+            TrackingGeometryExtractor.stableAnchorIndices.maxOrNull() ?: 0,
         )
 
         private fun normalizeRotation(rotationDegrees: Int): Int =

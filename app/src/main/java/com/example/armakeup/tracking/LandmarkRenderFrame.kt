@@ -1,5 +1,7 @@
 package com.example.armakeup.tracking
 
+import kotlin.math.sqrt
+
 /** Immutable landmark state that can be extrapolated at the actual render timestamp. */
 class LandmarkRenderFrame internal constructor(
     private val positions: FloatArray,
@@ -67,6 +69,61 @@ class LandmarkRenderFrame internal constructor(
 
     fun z(index: Int, predictionSeconds: Float): Float =
         predictedCoordinate(index, Z_OFFSET, predictionSeconds)
+
+    /**
+     * Applies a renderer-owned residual lead without advancing the visual hand-off correction.
+     *
+     * The predictor still owns [predictionSeconds]. Keeping [additionalPredictionSeconds]
+     * separate prevents a late render correction from prematurely consuming the 16 ms
+     * continuity blend between consecutive ML results.
+     */
+    internal fun xWithAdditionalPrediction(
+        index: Int,
+        predictionSeconds: Float,
+        additionalPredictionSeconds: Float,
+    ): Float = predictedCoordinate(
+        index,
+        X_OFFSET,
+        predictionSeconds,
+        additionalPredictionSeconds,
+    ).coerceIn(-DISPLAY_MARGIN, 1f + DISPLAY_MARGIN)
+
+    internal fun yWithAdditionalPrediction(
+        index: Int,
+        predictionSeconds: Float,
+        additionalPredictionSeconds: Float,
+    ): Float = predictedCoordinate(
+        index,
+        Y_OFFSET,
+        predictionSeconds,
+        additionalPredictionSeconds,
+    ).coerceIn(-DISPLAY_MARGIN, 1f + DISPLAY_MARGIN)
+
+    /** RMS screen-plane speed over the same rigid anchors used by the global predictor. */
+    internal fun globalVelocityMagnitude(): Float {
+        var squaredSpeed = 0f
+        var count = 0
+        val stableAnchors = TrackingGeometryExtractor.stableAnchorIndices
+        if (size > (stableAnchors.maxOrNull() ?: Int.MAX_VALUE)) {
+            stableAnchors.forEach { landmarkIndex ->
+                val coordinateIndex = landmarkIndex * COORDINATE_COUNT
+                val x = velocities[coordinateIndex]
+                val y = velocities[coordinateIndex + 1]
+                squaredSpeed += x * x + y * y
+                count++
+            }
+        } else {
+            var coordinateIndex = 0
+            while (coordinateIndex < velocities.size) {
+                val x = velocities[coordinateIndex]
+                val y = velocities[coordinateIndex + 1]
+                squaredSpeed += x * x + y * y
+                count++
+                coordinateIndex += COORDINATE_COUNT
+            }
+        }
+        return if (count == 0) 0f else sqrt(squaredSpeed / count)
+    }
 
     fun shouldAnimate(renderTimestampMs: Long): Boolean {
         val deliveryTimestampMs = renderDeliveryTimestampMs
@@ -168,10 +225,13 @@ class LandmarkRenderFrame internal constructor(
         index: Int,
         coordinateOffset: Int,
         predictionSeconds: Float,
+        additionalPredictionSeconds: Float = 0f,
     ): Float {
         require(index in 0 until size)
+        require(additionalPredictionSeconds.isFinite() && additionalPredictionSeconds >= 0f)
         val coordinateIndex = index * COORDINATE_COUNT + coordinateOffset
-        val predicted = positions[coordinateIndex] + velocities[coordinateIndex] * predictionSeconds
+        val predicted = positions[coordinateIndex] + velocities[coordinateIndex] *
+            (predictionSeconds + additionalPredictionSeconds)
         val correctionOffsets = renderCorrectionOffsets ?: return predicted
         val deliveryTimestampMs = renderDeliveryTimestampMs ?: return predicted
         val alignmentPredictionSeconds = (

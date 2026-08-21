@@ -72,6 +72,32 @@ class LandmarkRenderFrameTest {
     }
 
     @Test
+    fun additionalRenderPredictionDoesNotConsumeDeliveryCorrection() {
+        val previous = movingFrame(measurementTimestampMs = 1_000L)
+            .deliveredAt(timestampMs = 1_000L)
+        val corrected = LandmarkRenderFrame(
+            positions = floatArrayOf(0.3f, 0.4f, 0f),
+            velocities = floatArrayOf(1f, 0f, 0f),
+            measurementTimestampMs = 1_033L,
+            predictedOnly = false,
+            renderLeadMs = 0L,
+            maxPredictionMs = 45L,
+        ).deliveredAt(timestampMs = 1_033L)
+            .smoothCorrectionFrom(previous, timestampMs = 1_033L)
+
+        val basePrediction = corrected.predictionSeconds(1_033L)
+        val withoutAdditionalLead = corrected.x(0, basePrediction)
+        val withAdditionalLead = corrected.xWithAdditionalPrediction(
+            index = 0,
+            predictionSeconds = basePrediction,
+            additionalPredictionSeconds = 0.02f,
+        )
+
+        assertEquals(0.22f, withoutAdditionalLead, EPSILON)
+        assertEquals(0.24f, withAdditionalLead, EPSILON)
+    }
+
+    @Test
     fun faceReacquisitionIsNotBlendedAcrossLargeJump() {
         val previous = stationaryFrame(positionX = 0.1f, measurementTimestampMs = 1_000L)
             .deliveredAt(timestampMs = 1_000L)
