@@ -15,6 +15,7 @@ find_program(
 set(generated_shader_directory "${CMAKE_CURRENT_BINARY_DIR}/generated")
 set(camera_vertex_spirv "${generated_shader_directory}/camera_frame.vert.spv")
 set(camera_fragment_spirv "${generated_shader_directory}/camera_frame.frag.spv")
+set(retained_camera_fragment_spirv "${generated_shader_directory}/retained_camera.frag.spv")
 set(camera_shader_header "${generated_shader_directory}/CameraShaders.generated.h")
 set(tracking_test_lip_vertex_spirv "${generated_shader_directory}/tracking_test_lip.vert.spv")
 set(tracking_test_lip_fragment_spirv "${generated_shader_directory}/tracking_test_lip.frag.spv")
@@ -39,6 +40,14 @@ add_custom_command(
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/camera_frame.frag"
         -o "${camera_fragment_spirv}"
     DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/camera_frame.frag"
+    VERBATIM
+)
+add_custom_command(
+    OUTPUT "${retained_camera_fragment_spirv}"
+    COMMAND "${GLSLC_EXECUTABLE}" -O -fshader-stage=fragment
+        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/retained_camera.frag"
+        -o "${retained_camera_fragment_spirv}"
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/retained_camera.frag"
     VERBATIM
 )
 add_custom_command(
@@ -94,6 +103,7 @@ add_custom_command(
     COMMAND "${CMAKE_COMMAND}"
         -DVERTEX_SHADER=${camera_vertex_spirv}
         -DFRAGMENT_SHADER=${camera_fragment_spirv}
+        -DRETAINED_CAMERA_FRAGMENT_SHADER=${retained_camera_fragment_spirv}
         -DTRACKING_TEST_LIP_VERTEX_SHADER=${tracking_test_lip_vertex_spirv}
         -DTRACKING_TEST_LIP_FRAGMENT_SHADER=${tracking_test_lip_fragment_spirv}
         -DTEMPORAL_LUMA_SHADER=${temporal_luma_spirv}
@@ -105,6 +115,7 @@ add_custom_command(
     DEPENDS
         "${camera_vertex_spirv}"
         "${camera_fragment_spirv}"
+        "${retained_camera_fragment_spirv}"
         "${tracking_test_lip_vertex_spirv}"
         "${tracking_test_lip_fragment_spirv}"
         "${temporal_luma_spirv}"

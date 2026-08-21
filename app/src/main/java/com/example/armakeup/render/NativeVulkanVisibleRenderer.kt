@@ -4,7 +4,6 @@ import android.content.Context
 import android.os.Handler
 import android.os.Build
 import android.os.Looper
-import android.os.SystemClock
 import android.util.Log
 import android.view.Choreographer
 import android.view.Surface
@@ -66,8 +65,12 @@ internal class NativeVulkanVisibleRenderer(
     private var viewportWidth = 0
     private var viewportHeight = 0
     private var lastPresentationId = 0L
+    private var lastActualPresentationTimestampNs = 0L
+    private var lastPresentedCameraTimestampNs = NO_TIMESTAMP
     private var presentationSampleCount = 0L
+    private var reusedCameraPresentationCount = 0L
     private val sensorToActualSamplesMs = ArrayList<Float>(MAX_TIMING_SAMPLES)
+    private val actualIntervalSamplesMs = ArrayList<Float>(MAX_TIMING_SAMPLES)
 
     override val renderBackendLabelRes: Int
         get() = R.string.render_backend_native_vulkan_visible
@@ -269,15 +272,16 @@ internal class NativeVulkanVisibleRenderer(
         val transform = latestCameraTransform
         try {
             if (activeRuntime != null && transform != null) {
-                updateTrackingTestLip(activeRuntime, SystemClock.uptimeMillis())
-                val frame = activeRuntime.acquireCameraFrame(
-                    transform = transform,
-                    landmarkSensorTimestampNs = latestLandmarks?.sensorTimestampNs,
-                    trackingRoi = VulkanTemporalTrackingRoi.INVALID,
-                )
-                if (frame != null) {
-                    latestCameraSensorTimestampNs = frame.sensorTimestampNs
-                    activeRuntime.releaseCameraFrame(frame)
+                val retainedCameraTimestampNs = activeRuntime.updateVisibleCamera(transform)
+                if (retainedCameraTimestampNs > 0L) {
+                    latestCameraSensorTimestampNs = retainedCameraTimestampNs
+                    updateTrackingTestLip(
+                        activeRuntime,
+                        frameTimeNanos / NANOS_PER_MILLISECOND,
+                    )
+                    check(activeRuntime.presentVisibleFrame()) {
+                        "Native Vulkan retained-camera present failed"
+                    }
                 }
                 reportPresentationTiming(activeRuntime)
             }
@@ -405,25 +409,47 @@ internal class NativeVulkanVisibleRenderer(
         if (sample.presentationId <= lastPresentationId) return
         lastPresentationId = sample.presentationId
         presentationSampleCount++
+        if (sample.cameraSensorTimestampNs == lastPresentedCameraTimestampNs) {
+            reusedCameraPresentationCount++
+        }
+        lastPresentedCameraTimestampNs = sample.cameraSensorTimestampNs
+        if (
+            lastActualPresentationTimestampNs > 0L &&
+            sample.actualPresentationTimestampNs > lastActualPresentationTimestampNs
+        ) {
+            appendTimingSample(
+                actualIntervalSamplesMs,
+                (sample.actualPresentationTimestampNs - lastActualPresentationTimestampNs) /
+                    NANOS_PER_MILLISECOND.toFloat(),
+            )
+        }
+        lastActualPresentationTimestampNs = sample.actualPresentationTimestampNs
         if (sample.sensorToActualMs.isFinite()) {
-            if (sensorToActualSamplesMs.size == MAX_TIMING_SAMPLES) {
-                sensorToActualSamplesMs.removeAt(0)
-            }
-            sensorToActualSamplesMs += sample.sensorToActualMs
+            appendTimingSample(sensorToActualSamplesMs, sample.sensorToActualMs)
         }
         if (presentationSampleCount == 1L || presentationSampleCount % TIMING_LOG_INTERVAL == 0L) {
             val sortedLatency = sensorToActualSamplesMs.sorted()
+            val sortedIntervals = actualIntervalSamplesMs.sorted()
             Log.i(
                 LOG_TAG,
                 "actualPresent id=${sample.presentationId} " +
                     "sensorToActualMs=${sample.sensorToActualMs} " +
                     "sensorToActualP50Ms=${percentile(sortedLatency, 0.50f)} " +
                     "sensorToActualP95Ms=${percentile(sortedLatency, 0.95f)} " +
+                    "actualIntervalP50Ms=${percentile(sortedIntervals, 0.50f)} " +
+                    "actualIntervalP95Ms=${percentile(sortedIntervals, 0.95f)} " +
+                    "reusedCameraFraction=" +
+                    "${reusedCameraPresentationCount / presentationSampleCount.toFloat()} " +
                     "presentMarginMs=${sample.presentMarginNs / NANOS_PER_MILLISECOND.toFloat()} " +
                     "refreshMs=${sample.refreshDurationNs / NANOS_PER_MILLISECOND.toFloat()} " +
                     "telemetry=${trackingTelemetrySink != null}",
             )
         }
+    }
+
+    private fun appendTimingSample(samples: ArrayList<Float>, value: Float) {
+        if (samples.size == MAX_TIMING_SAMPLES) samples.removeAt(0)
+        samples += value
     }
 
     private fun postFrameCallback() {

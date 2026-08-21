@@ -23,6 +23,11 @@ internal class VulkanCameraTransform(
 
     fun matrixCopy(): FloatArray = uvTransform.copyOf()
 
+    fun copyMatrixTo(destination: FloatArray) {
+        require(destination.size == MATRIX_ELEMENT_COUNT)
+        uvTransform.copyInto(destination)
+    }
+
     companion object {
         private const val MATRIX_ELEMENT_COUNT = 16
         private val SUPPORTED_ROTATIONS = setOf(0, 90, 180, 270)

@@ -37,6 +37,9 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
     private val cameraFrameCount = AtomicLong(0L)
     private val firstFrameReported = AtomicBoolean(false)
     private val cameraFrameReported = AtomicBoolean(false)
+    private val visibleCameraTransform = FloatArray(VISIBLE_TRANSFORM_ELEMENT_COUNT)
+    private val visibleTrackingRoi = FloatArray(VISIBLE_TRACKING_ROI_ELEMENT_COUNT) { Float.NaN }
+    private var lastVisibleCameraTimestampNs = 0L
     private var nativeHandle = nativeCreate(
         outputSurface,
         outputWidth,
@@ -125,7 +128,7 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
             temporalTracking = temporalTracking,
         ).also { frame ->
             val count = cameraFrameCount.incrementAndGet()
-            if (count % CAMERA_PROGRESS_INTERVAL == 0L) {
+            if (count == 1L || count % CAMERA_PROGRESS_INTERVAL == 0L) {
                 val temporalRaw = temporalValues.joinToString(",", prefix = "[", postfix = "]") {
                     "%.4f".format(java.util.Locale.US, it)
                 }
@@ -138,6 +141,39 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
                 )
             }
         }
+    }
+
+    /**
+     * Copies at most one latest camera AHB into the persistent GPU-only visible texture.
+     *
+     * The returned timestamp remains stable while the display reuses the retained texture. A zero
+     * value means that the first camera frame has not completed acquisition yet.
+     */
+    fun updateVisibleCamera(transform: VulkanCameraTransform): Long {
+        val handle = nativeHandle
+        if (handle == 0L) return 0L
+        transform.copyMatrixTo(visibleCameraTransform)
+        val timestampNs = nativeUpdateVisibleCamera(
+            handle,
+            visibleCameraTransform,
+            visibleTrackingRoi,
+        )
+        if (timestampNs > 0L && timestampNs != lastVisibleCameraTimestampNs) {
+            lastVisibleCameraTimestampNs = timestampNs
+            val count = cameraFrameCount.incrementAndGet()
+            if (count == 1L || count % CAMERA_PROGRESS_INTERVAL == 0L) {
+                Log.i(
+                    LOG_TAG,
+                    "visibleCameraProgress copied=$count timestampNs=$timestampNs $diagnostic",
+                )
+            }
+        }
+        return timestampNs
+    }
+
+    fun presentVisibleFrame(): Boolean {
+        val handle = nativeHandle
+        return handle != 0L && nativePresentVisibleFrame(handle)
     }
 
     @RequiresApi(Build.VERSION_CODES.Q)
@@ -280,6 +316,12 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
         temporalValues: FloatArray,
     ): HardwareBuffer?
     private external fun nativeReleaseCameraFrame(handle: Long, token: Long)
+    private external fun nativeUpdateVisibleCamera(
+        handle: Long,
+        uvTransform: FloatArray,
+        trackingRoi: FloatArray,
+    ): Long
+    private external fun nativePresentVisibleFrame(handle: Long): Boolean
     private external fun nativeCloseCamera(handle: Long)
     private external fun nativeUpdateTrackingTestLip(
         handle: Long,
@@ -318,6 +360,8 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
         private const val CAMERA_RELEASE_FENCE_INDEX = 7
         private const val CAMERA_TEMPORAL_FROM_TIMESTAMP_INDEX = 8
         private const val CAMERA_PROGRESS_INTERVAL = 60L
+        private const val VISIBLE_TRANSFORM_ELEMENT_COUNT = 16
+        private const val VISIBLE_TRACKING_ROI_ELEMENT_COUNT = 4
         private const val NANOS_PER_MILLISECOND = 1_000_000L
         private const val PRESENTATION_METADATA_COUNT = 7
         private const val PRESENTATION_ID_INDEX = 0
