@@ -187,9 +187,18 @@ data class TrackingRenderSample(
     /** True when Android expected-presentation and render-deadline hints are sent to Filament. */
     val filamentPresentationHintsEnabled: Boolean = true,
     val renderTiming: TrackingRenderTiming = TrackingRenderTiming.UNKNOWN,
+    /** Renderer that submitted this visible frame; legacy recordings decode as Filament. */
+    val renderBackend: String = TrackingRenderBackend.FILAMENT,
+    /** Native present id used to correlate delayed display feedback, or -1 when unavailable. */
+    val presentationId: Long = TrackingRenderTiming.UNKNOWN_TIMESTAMP_NS,
 ) : TrackingTelemetryEvent
 
 private const val UNKNOWN_LIPSTICK_FINISH = "UNKNOWN"
+
+object TrackingRenderBackend {
+    const val FILAMENT = "FILAMENT"
+    const val NATIVE_VULKAN = "NATIVE_VULKAN"
+}
 
 data class TrackingGeometry(
     val pose: TrackingPose,

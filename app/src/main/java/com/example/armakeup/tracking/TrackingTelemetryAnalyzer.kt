@@ -68,6 +68,7 @@ data class TrackingShadow3dMetrics(
 
 data class TrackingRenderPerformanceMetrics(
     val lipstickFinishes: List<String>,
+    val renderBackends: List<String>,
     val medianFrameSubmissionCpuMs: Float,
     val p95FrameSubmissionCpuMs: Float,
     val filamentRenderedFrameFraction: Float,
@@ -240,6 +241,9 @@ data class TrackingTelemetryMetrics(
             .append(inputQuality.medianBatteryTemperatureCelsius.formatMetric())
         append(" finishes=").append(
             renderPerformance.lipstickFinishes.ifEmpty { listOf("UNKNOWN") }.joinToString("|")
+        )
+        append(" renderBackends=").append(
+            renderPerformance.renderBackends.ifEmpty { listOf("UNKNOWN") }.joinToString("|")
         )
         append(" frameCpuMedianMs=")
             .append(renderPerformance.medianFrameSubmissionCpuMs.formatMetric())
@@ -652,6 +656,10 @@ object TrackingTelemetryAnalyzer {
         return TrackingRenderPerformanceMetrics(
             lipstickFinishes = renders.map { it.lipstickFinish }
                 .filter { it.isNotBlank() && it != "UNKNOWN" }
+                .distinct()
+                .sorted(),
+            renderBackends = renders.map { it.renderBackend }
+                .filter { it.isNotBlank() }
                 .distinct()
                 .sorted(),
             medianFrameSubmissionCpuMs = percentile(cpuTimes, 0.5f),

@@ -74,6 +74,8 @@ class TrackingTelemetryTest {
             globalPredictionCoverage = 0.25f,
             displayQueueProtectionEnabled = true,
             filamentPresentationHintsEnabled = false,
+            renderBackend = TrackingRenderBackend.NATIVE_VULKAN,
+            presentationId = 91L,
             renderTiming = TrackingRenderTiming(
                 vsyncTimestampNs = 1_100_000_000L,
                 renderStartTimestampNs = 1_102_000_000L,
@@ -148,6 +150,8 @@ class TrackingTelemetryTest {
         )
         assertTrue(decodedRender.displayQueueProtectionEnabled)
         assertFalse(decodedRender.filamentPresentationHintsEnabled)
+        assertEquals(TrackingRenderBackend.NATIVE_VULKAN, decodedRender.renderBackend)
+        assertEquals(91L, decodedRender.presentationId)
         assertEquals(render.renderTiming, decodedRender.renderTiming)
     }
 
@@ -477,6 +481,44 @@ class TrackingTelemetryTest {
 
         assertTrue(render.displayQueueProtectionEnabled)
         assertTrue(render.filamentPresentationHintsEnabled)
+    }
+
+    @Test
+    fun codecReadsLegacyV10RenderAsFilamentWithoutPresentationId() {
+        val bytes = ByteArrayOutputStream().also { output ->
+            DataOutputStream(output).apply {
+                writeInt(0x41525636)
+                writeInt(10)
+                writeUTF("legacy_v10_render")
+                writeLong(42L)
+                writeByte(2)
+                writeLong(1_100L)
+                writeLong(1_000L)
+                writeLong(999_000_000L)
+                writeFloat(0.04f)
+                writeInt(1080)
+                writeInt(2400)
+                writeBoolean(true)
+                repeat(2) { writeInt(0) }
+                writeUTF("SATIN")
+                repeat(4) { writeFloat(1f) }
+                writeBoolean(true)
+                writeBoolean(true)
+                repeat(7) { writeFloat(0.01f) }
+                repeat(2) { writeFloat(0.02f) }
+                repeat(10) { writeLong(1_000_000_000L + it * 1_000_000L) }
+                writeBoolean(true)
+                writeBoolean(false)
+                writeByte(0x7f)
+                writeLong(0L)
+            }
+        }.toByteArray()
+
+        val render = TrackingTelemetryCodec.read(ByteArrayInputStream(bytes)).renders.single()
+
+        assertEquals(TrackingRenderBackend.FILAMENT, render.renderBackend)
+        assertEquals(TrackingRenderTiming.UNKNOWN_TIMESTAMP_NS, render.presentationId)
+        assertFalse(render.filamentPresentationHintsEnabled)
     }
 
     @Test

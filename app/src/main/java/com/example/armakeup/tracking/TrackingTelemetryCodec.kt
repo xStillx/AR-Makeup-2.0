@@ -171,6 +171,8 @@ object TrackingTelemetryCodec {
         data.writeRenderTiming(sample.renderTiming)
         data.writeBoolean(sample.displayQueueProtectionEnabled)
         data.writeBoolean(sample.filamentPresentationHintsEnabled)
+        data.writeUTF(sample.renderBackend)
+        data.writeLong(sample.presentationId)
     }
 
     private fun readRender(data: DataInputStream, version: Int): TrackingRenderSample {
@@ -229,12 +231,22 @@ object TrackingTelemetryCodec {
         } else {
             withRenderTimeline
         }
-        return if (version >= VERSION_WITH_FILAMENT_PRESENTATION_HINTS) {
+        val withFilamentPresentationHints = if (
+            version >= VERSION_WITH_FILAMENT_PRESENTATION_HINTS
+        ) {
             withDisplayQueueProtection.copy(
                 filamentPresentationHintsEnabled = data.readBoolean(),
             )
         } else {
             withDisplayQueueProtection
+        }
+        return if (version >= VERSION_WITH_RENDER_BACKEND_AND_PRESENT_ID) {
+            withFilamentPresentationHints.copy(
+                renderBackend = data.readUTF(),
+                presentationId = data.readLong(),
+            )
+        } else {
+            withFilamentPresentationHints
         }
     }
 
@@ -379,7 +391,7 @@ object TrackingTelemetryCodec {
         this as? DataInputStream ?: DataInputStream(this)
 
     private const val MAGIC = 0x41525636 // "ARV6"
-    private const val VERSION = 10
+    private const val VERSION = 11
     private const val MINIMUM_SUPPORTED_VERSION = 1
     private const val VERSION_WITH_INPUT_QUALITY = 2
     private const val VERSION_WITH_MATERIAL_TEMPORAL_STATE = 3
@@ -390,6 +402,7 @@ object TrackingTelemetryCodec {
     private const val VERSION_WITH_FRAME_TIMELINE_CORRELATION = 8
     private const val VERSION_WITH_DISPLAY_QUEUE_PROTECTION = 9
     private const val VERSION_WITH_FILAMENT_PRESENTATION_HINTS = 10
+    private const val VERSION_WITH_RENDER_BACKEND_AND_PRESENT_ID = 11
     private const val EVENT_MEASUREMENT = 1
     private const val EVENT_RENDER = 2
     private const val EVENT_FOOTER = 0x7f

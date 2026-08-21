@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Handler
 import android.os.Build
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import android.view.Choreographer
 import android.view.Surface
@@ -25,6 +26,9 @@ import com.example.armakeup.tracking.GyroscopeRotationHistory
 import com.example.armakeup.tracking.LandmarkRenderFrame
 import com.example.armakeup.tracking.NormalizedImageTransform
 import com.example.armakeup.tracking.TrackingTelemetrySink
+import com.example.armakeup.tracking.TrackingRenderBackend
+import com.example.armakeup.tracking.TrackingRenderSample
+import com.example.armakeup.tracking.TrackingRenderTiming
 
 /** Debug-only visible swapchain proof. Filament is not constructed while this renderer is active. */
 internal class NativeVulkanVisibleRenderer(
@@ -36,6 +40,8 @@ internal class NativeVulkanVisibleRenderer(
     private val mainHandler = Handler(Looper.getMainLooper())
     private val mainExecutor = ContextCompat.getMainExecutor(context)
     private val choreographer = Choreographer.getInstance()
+    private val frameTimelineObserver = createRenderFrameTimelineObserver()
+    private val presentationTelemetry = NativeVulkanPresentationTelemetry()
     private val nativeProbe = NativeVulkanBootstrap.probe()
     private val lipTessellator = LipMeshTessellator()
     private val outerPoints = FloatArray(LipLandmarkTopology.outerContour.size * POINT_SIZE)
@@ -55,6 +61,7 @@ internal class NativeVulkanVisibleRenderer(
     private var latestLandmarks: LandmarkState? = null
     private var cameraCalibration: CameraProjectionCalibration? = null
     private var latestCameraSensorTimestampNs = NO_TIMESTAMP
+    private var latestCameraSelectedTimestampNs = NO_TIMESTAMP
     private var trackingTelemetrySink: TrackingTelemetrySink? = null
     private var gyroscopeCorrectionEnabled = true
     private var resumed = false
@@ -71,6 +78,14 @@ internal class NativeVulkanVisibleRenderer(
     private var reusedCameraPresentationCount = 0L
     private val sensorToActualSamplesMs = ArrayList<Float>(MAX_TIMING_SAMPLES)
     private val actualIntervalSamplesMs = ArrayList<Float>(MAX_TIMING_SAMPLES)
+    private var displayedMeasurementTimestampMs = NO_TIMESTAMP
+    private var displayedSensorTimestampNs = NO_TIMESTAMP
+    private var displayedPredictionSeconds = 0f
+    private var displayedCameraMotionPredictionSeconds = Float.NaN
+    private var displayedGlobalPredictionCoverage = Float.NaN
+    private var displayedGyroscopeCorrection = GyroscopeLipCompensator.Correction.NONE
+    private var displayedGeometryUploadAcceptedTimestampNs = NO_TIMESTAMP
+    private var displayedLipVisible = false
 
     override val renderBackendLabelRes: Int
         get() = R.string.render_backend_native_vulkan_visible
@@ -184,7 +199,22 @@ internal class NativeVulkanVisibleRenderer(
 
     override fun setTrackingTelemetrySink(sink: TrackingTelemetrySink?) {
         ensureMainThread()
+        val previousSink = trackingTelemetrySink
+        if (previousSink != null && previousSink !== sink) {
+            flushPresentationTelemetry(previousSink)
+        }
+        val timelineObservationWasActive = previousSink != null
         trackingTelemetrySink = sink
+        val timelineObservationIsActive = sink != null
+        if (resumed && timelineObservationWasActive != timelineObservationIsActive) {
+            if (timelineObservationIsActive) {
+                removeFrameCallback()
+                frameTimelineObserver.start()
+                postFrameCallback()
+            } else {
+                frameTimelineObserver.stop()
+            }
+        }
     }
 
     override fun setCameraProjectionCalibration(calibration: CameraProjectionCalibration?) {
@@ -239,6 +269,7 @@ internal class NativeVulkanVisibleRenderer(
         if (destroyRequested || destroyed || resumed) return
         resumed = true
         if (gyroscopeCorrectionEnabled) gyroscopeSource.start()
+        if (trackingTelemetrySink != null) frameTimelineObserver.start()
         postFrameCallback()
     }
 
@@ -247,6 +278,7 @@ internal class NativeVulkanVisibleRenderer(
         if (!resumed) return
         resumed = false
         removeFrameCallback()
+        frameTimelineObserver.stop()
         gyroscopeSource.stop()
     }
 
@@ -272,16 +304,71 @@ internal class NativeVulkanVisibleRenderer(
         val transform = latestCameraTransform
         try {
             if (activeRuntime != null && transform != null) {
+                val frameTimeline = frameTimelineObserver.consume(frameTimeNanos)
+                val callbackMonotonicTimestampNs = System.nanoTime()
+                val renderStartTimestampNs = SystemClock.elapsedRealtimeNanos()
+                val vsyncElapsedRealtimeTimestampNs = monotonicToElapsedRealtimeTimestampNs(
+                    monotonicTimestampNs = frameTimeNanos,
+                    callbackMonotonicTimestampNs = callbackMonotonicTimestampNs,
+                    callbackElapsedRealtimeTimestampNs = renderStartTimestampNs,
+                )
+                val expectedPresentationTimestampNs = frameTimeline
+                    ?.expectedPresentationTimeNanos
+                    ?.let { timestampNs ->
+                        monotonicToElapsedRealtimeTimestampNs(
+                            monotonicTimestampNs = timestampNs,
+                            callbackMonotonicTimestampNs = callbackMonotonicTimestampNs,
+                            callbackElapsedRealtimeTimestampNs = renderStartTimestampNs,
+                        )
+                    } ?: NO_TIMESTAMP
+                val renderDeadlineTimestampNs = frameTimeline?.deadlineNanos?.let { timestampNs ->
+                    monotonicToElapsedRealtimeTimestampNs(
+                        monotonicTimestampNs = timestampNs,
+                        callbackMonotonicTimestampNs = callbackMonotonicTimestampNs,
+                        callbackElapsedRealtimeTimestampNs = renderStartTimestampNs,
+                    )
+                } ?: NO_TIMESTAMP
+                // Preserve the pre-telemetry geometry timestamp contract: predictor extrapolation
+                // remains anchored to this vsync, not to the later callback execution time.
+                val renderTimestampMs = frameTimeNanos / NANOS_PER_MILLISECOND
                 val retainedCameraTimestampNs = activeRuntime.updateVisibleCamera(transform)
                 if (retainedCameraTimestampNs > 0L) {
+                    if (retainedCameraTimestampNs != latestCameraSensorTimestampNs) {
+                        latestCameraSelectedTimestampNs = renderStartTimestampNs
+                    }
                     latestCameraSensorTimestampNs = retainedCameraTimestampNs
                     updateTrackingTestLip(
                         activeRuntime,
-                        frameTimeNanos / NANOS_PER_MILLISECOND,
+                        renderTimestampMs,
                     )
-                    check(activeRuntime.presentVisibleFrame()) {
+                    val presentationId = activeRuntime.presentVisibleFrame()
+                    check(presentationId >= 0L) {
                         "Native Vulkan retained-camera present failed"
                     }
+                    val renderSubmitTimestampNs = SystemClock.elapsedRealtimeNanos()
+                    recordSubmittedFrame(
+                        presentationId = presentationId,
+                        renderTimestampMs = renderTimestampMs,
+                        frameSubmissionCpuMs = (
+                            renderSubmitTimestampNs - renderStartTimestampNs
+                        ) / NANOS_PER_MILLISECOND.toFloat(),
+                        renderTiming = TrackingRenderTiming(
+                            vsyncTimestampNs = vsyncElapsedRealtimeTimestampNs,
+                            renderStartTimestampNs = renderStartTimestampNs,
+                            cameraFrameSelectedTimestampNs = latestCameraSelectedTimestampNs,
+                            cameraFrameSensorTimestampNs = latestCameraSensorTimestampNs,
+                            geometryUploadAcceptedTimestampNs =
+                                displayedGeometryUploadAcceptedTimestampNs,
+                            renderSubmitTimestampNs = renderSubmitTimestampNs,
+                            presentationTimestampNs = NO_TIMESTAMP,
+                            frameTimelineVsyncId = frameTimeline?.vsyncId ?: NO_TIMESTAMP,
+                            expectedPresentationTimestampNs = expectedPresentationTimestampNs,
+                            renderDeadlineTimestampNs = renderDeadlineTimestampNs,
+                        ),
+                    )
+                }
+                trackingTelemetrySink?.let { sink ->
+                    drainPresentationTelemetry(activeRuntime, sink)
                 }
                 reportPresentationTiming(activeRuntime)
             }
@@ -305,7 +392,19 @@ internal class NativeVulkanVisibleRenderer(
             state.sourceHeight <= 0 ||
             state.landmarks.size <= MAX_REQUIRED_LANDMARK_INDEX
         ) {
-            activeRuntime.updateTrackingTestLip(EMPTY_FLOATS, EMPTY_SHORTS, visible = false)
+            check(activeRuntime.updateTrackingTestLip(EMPTY_FLOATS, EMPTY_SHORTS, visible = false)) {
+                "Native Vulkan hidden tracking-test lip upload failed"
+            }
+            if (trackingTelemetrySink != null) {
+                displayedMeasurementTimestampMs = NO_TIMESTAMP
+                displayedSensorTimestampNs = NO_TIMESTAMP
+                displayedPredictionSeconds = 0f
+                displayedCameraMotionPredictionSeconds = Float.NaN
+                displayedGlobalPredictionCoverage = Float.NaN
+                displayedGyroscopeCorrection = GyroscopeLipCompensator.Correction.NONE
+                displayedGeometryUploadAcceptedTimestampNs = NO_TIMESTAMP
+                displayedLipVisible = false
+            }
             return
         }
         val predictionSeconds = state.landmarks.predictionSeconds(renderTimestampMs)
@@ -378,6 +477,16 @@ internal class NativeVulkanVisibleRenderer(
                 visible = true,
             ),
         ) { "Native Vulkan tracking-test lip upload failed" }
+        if (trackingTelemetrySink != null) {
+            displayedMeasurementTimestampMs = state.landmarks.measurementTimestampMs
+            displayedSensorTimestampNs = state.sensorTimestampNs
+            displayedPredictionSeconds = predictionSeconds
+            displayedCameraMotionPredictionSeconds = cameraMotionPredictionSeconds
+            displayedGlobalPredictionCoverage = state.landmarks.globalPredictionCoverage()
+            displayedGyroscopeCorrection = gyroscopeCorrection
+            displayedGeometryUploadAcceptedTimestampNs = SystemClock.elapsedRealtimeNanos()
+            displayedLipVisible = true
+        }
     }
 
     private fun writeContour(
@@ -402,6 +511,64 @@ internal class NativeVulkanVisibleRenderer(
             output[outputIndex + 1] =
                 fillTransform.mapY(correctedY, state.sourceHeight) / viewportHeight
         }
+    }
+
+    private fun recordSubmittedFrame(
+        presentationId: Long,
+        renderTimestampMs: Long,
+        frameSubmissionCpuMs: Float,
+        renderTiming: TrackingRenderTiming,
+    ) {
+        val sink = trackingTelemetrySink ?: return
+        val sample = TrackingRenderSample(
+            renderTimestampMs = renderTimestampMs,
+            measurementTimestampMs = displayedMeasurementTimestampMs,
+            sensorTimestampNs = displayedSensorTimestampNs,
+            predictionSeconds = displayedPredictionSeconds,
+            viewportWidth = viewportWidth,
+            viewportHeight = viewportHeight,
+            lipVisible = displayedLipVisible,
+            outerLipPoints = if (displayedLipVisible) outerPoints.copyOf() else EMPTY_FLOATS,
+            innerLipPoints = if (displayedLipVisible) innerPoints.copyOf() else EMPTY_FLOATS,
+            lipstickFinish = LipstickFinish.TRACKING_TEST.name,
+            frameSubmissionCpuMs = frameSubmissionCpuMs,
+            filamentFrameRendered = true,
+            gyroscopeApplied = displayedGyroscopeCorrection.applied,
+            gyroscopeIntervalMs = displayedGyroscopeCorrection.intervalMs,
+            gyroscopeRotationX = displayedGyroscopeCorrection.rotationX,
+            gyroscopeRotationY = displayedGyroscopeCorrection.rotationY,
+            gyroscopeRotationZ = displayedGyroscopeCorrection.rotationZ,
+            gyroscopeTranslationX = displayedGyroscopeCorrection.translationX,
+            gyroscopeTranslationY = displayedGyroscopeCorrection.translationY,
+            gyroscopeRollRadians = displayedGyroscopeCorrection.rollRadians,
+            cameraMotionPredictionSeconds = displayedCameraMotionPredictionSeconds,
+            globalPredictionCoverage = displayedGlobalPredictionCoverage,
+            displayQueueProtectionEnabled = false,
+            filamentPresentationHintsEnabled = false,
+            renderTiming = renderTiming,
+            renderBackend = TrackingRenderBackend.NATIVE_VULKAN,
+            presentationId = presentationId,
+        )
+        if (presentationId > 0L) {
+            presentationTelemetry.add(sample)?.let(sink::recordRender)
+        } else {
+            sink.recordRender(sample)
+        }
+    }
+
+    private fun drainPresentationTelemetry(
+        activeRuntime: NativeVulkanDiagnosticRuntime,
+        sink: TrackingTelemetrySink?,
+    ) {
+        activeRuntime.drainPresentationSamples().forEach { presentation ->
+            val resolved = presentationTelemetry.resolve(presentation)
+            if (resolved != null && sink != null) sink.recordRender(resolved)
+        }
+    }
+
+    private fun flushPresentationTelemetry(sink: TrackingTelemetrySink) {
+        runtime?.let { drainPresentationTelemetry(it, sink) }
+        presentationTelemetry.drainUnresolved().forEach(sink::recordRender)
     }
 
     private fun reportPresentationTiming(activeRuntime: NativeVulkanDiagnosticRuntime) {
@@ -467,6 +634,9 @@ internal class NativeVulkanVisibleRenderer(
     private fun finishDestroy() {
         if (destroyed) return
         destroyed = true
+        trackingTelemetrySink?.let(::flushPresentationTelemetry)
+        trackingTelemetrySink = null
+        frameTimelineObserver.stop()
         runtime?.close()
         runtime = null
         latestCameraTransform = null

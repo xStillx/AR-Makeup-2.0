@@ -171,9 +171,10 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
         return timestampNs
     }
 
-    fun presentVisibleFrame(): Boolean {
+    /** Returns -1 on failure, 0 without display-timing feedback, or the submitted present id. */
+    fun presentVisibleFrame(): Long {
         val handle = nativeHandle
-        return handle != 0L && nativePresentVisibleFrame(handle)
+        return if (handle == 0L) PRESENTATION_FAILED else nativePresentVisibleFrame(handle)
     }
 
     @RequiresApi(Build.VERSION_CODES.Q)
@@ -199,20 +200,41 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
         if (handle == 0L) return null
         val values = LongArray(PRESENTATION_METADATA_COUNT)
         if (!nativeReadLatestPresentationTiming(handle, values)) return null
-        val monotonicToElapsedOffsetNs = SystemClock.elapsedRealtimeNanos() - System.nanoTime()
-        return NativeVulkanPresentationSample(
-            presentationId = values[PRESENTATION_ID_INDEX],
-            cameraSensorTimestampNs = values[PRESENTATION_CAMERA_TIMESTAMP_INDEX],
-            actualPresentationTimestampNs =
-                values[PRESENTATION_ACTUAL_TIMESTAMP_INDEX] + monotonicToElapsedOffsetNs,
-            desiredPresentationTimestampNs =
-                values[PRESENTATION_DESIRED_TIMESTAMP_INDEX] + monotonicToElapsedOffsetNs,
-            earliestPresentationTimestampNs =
-                values[PRESENTATION_EARLIEST_TIMESTAMP_INDEX] + monotonicToElapsedOffsetNs,
-            presentMarginNs = values[PRESENTATION_MARGIN_INDEX],
-            refreshDurationNs = values[PRESENTATION_REFRESH_DURATION_INDEX],
+        return presentationSample(
+            values,
+            SystemClock.elapsedRealtimeNanos() - System.nanoTime(),
         )
     }
+
+    /** Drains every completed Vulkan display-timing sample exactly once. */
+    fun drainPresentationSamples(): List<NativeVulkanPresentationSample> {
+        val handle = nativeHandle
+        if (handle == 0L) return emptyList()
+        val samples = ArrayList<NativeVulkanPresentationSample>()
+        val monotonicToElapsedOffsetNs = SystemClock.elapsedRealtimeNanos() - System.nanoTime()
+        while (true) {
+            val values = LongArray(PRESENTATION_METADATA_COUNT)
+            if (!nativeReadNextPresentationTiming(handle, values)) break
+            samples += presentationSample(values, monotonicToElapsedOffsetNs)
+        }
+        return samples
+    }
+
+    private fun presentationSample(
+        values: LongArray,
+        monotonicToElapsedOffsetNs: Long,
+    ): NativeVulkanPresentationSample = NativeVulkanPresentationSample(
+        presentationId = values[PRESENTATION_ID_INDEX],
+        cameraSensorTimestampNs = values[PRESENTATION_CAMERA_TIMESTAMP_INDEX],
+        actualPresentationTimestampNs =
+            values[PRESENTATION_ACTUAL_TIMESTAMP_INDEX] + monotonicToElapsedOffsetNs,
+        desiredPresentationTimestampNs =
+            values[PRESENTATION_DESIRED_TIMESTAMP_INDEX] + monotonicToElapsedOffsetNs,
+        earliestPresentationTimestampNs =
+            values[PRESENTATION_EARLIEST_TIMESTAMP_INDEX] + monotonicToElapsedOffsetNs,
+        presentMarginNs = values[PRESENTATION_MARGIN_INDEX],
+        refreshDurationNs = values[PRESENTATION_REFRESH_DURATION_INDEX],
+    )
 
     override fun close() {
         val handle = nativeHandle
@@ -321,7 +343,7 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
         uvTransform: FloatArray,
         trackingRoi: FloatArray,
     ): Long
-    private external fun nativePresentVisibleFrame(handle: Long): Boolean
+    private external fun nativePresentVisibleFrame(handle: Long): Long
     private external fun nativeCloseCamera(handle: Long)
     private external fun nativeUpdateTrackingTestLip(
         handle: Long,
@@ -330,6 +352,10 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
         visible: Boolean,
     ): Boolean
     private external fun nativeReadLatestPresentationTiming(
+        handle: Long,
+        values: LongArray,
+    ): Boolean
+    private external fun nativeReadNextPresentationTiming(
         handle: Long,
         values: LongArray,
     ): Boolean
@@ -371,6 +397,7 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
         private const val PRESENTATION_EARLIEST_TIMESTAMP_INDEX = 4
         private const val PRESENTATION_MARGIN_INDEX = 5
         private const val PRESENTATION_REFRESH_DURATION_INDEX = 6
+        private const val PRESENTATION_FAILED = -1L
 
         init {
             System.loadLibrary(NATIVE_LIBRARY)

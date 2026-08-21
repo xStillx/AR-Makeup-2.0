@@ -20,6 +20,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstring>
+#include <deque>
 #include <exception>
 #include <limits>
 #include <memory>
@@ -488,10 +489,10 @@ public:
         return retainedCameraTimestampNs_;
     }
 
-    bool presentVisibleFrame() {
+    std::int64_t presentVisibleFrame() {
         std::lock_guard lock(cameraMutex_);
         if (!ready_.load() || !retainedCameraValid_ || retainedCameraTimestampNs_ <= 0) {
-            return false;
+            return -1;
         }
         return renderRetainedCameraFrame(retainedCameraTimestampNs_);
     }
@@ -599,6 +600,38 @@ public:
                 return false;
             }
             sample = latestPresentationSample_;
+        }
+        const std::array<jlong, kPresentationMetadataCount> output{
+            static_cast<jlong>(sample.presentationId),
+            static_cast<jlong>(sample.cameraSensorTimestampNs),
+            static_cast<jlong>(sample.actualPresentationTimestampNs),
+            static_cast<jlong>(sample.desiredPresentationTimestampNs),
+            static_cast<jlong>(sample.earliestPresentationTimestampNs),
+            static_cast<jlong>(sample.presentMarginNs),
+            static_cast<jlong>(sample.refreshDurationNs),
+        };
+        environment->SetLongArrayRegion(
+            values,
+            0,
+            static_cast<jsize>(output.size()),
+            output.data()
+        );
+        return environment->ExceptionCheck() == JNI_FALSE;
+    }
+
+    bool readNextPresentationTiming(JNIEnv* environment, jlongArray values) {
+        if (values == nullptr ||
+            environment->GetArrayLength(values) < static_cast<jsize>(kPresentationMetadataCount)) {
+            return false;
+        }
+        PresentationSample sample{};
+        {
+            std::lock_guard lock(presentationMutex_);
+            if (completedPresentationSamples_.empty()) {
+                return false;
+            }
+            sample = completedPresentationSamples_.front();
+            completedPresentationSamples_.pop_front();
         }
         const std::array<jlong, kPresentationMetadataCount> output{
             static_cast<jlong>(sample.presentationId),
@@ -3628,6 +3661,10 @@ private:
                     latestPresentationSample_ = sample;
                     latestPresentationId_.store(sample.presentationId);
                 }
+                completedPresentationSamples_.push_back(sample);
+                while (completedPresentationSamples_.size() > kMaxPendingPresentationSamples) {
+                    completedPresentationSamples_.pop_front();
+                }
             }
             presentationCameraTimestamps_.erase(source);
         }
@@ -3798,7 +3835,7 @@ private:
         return true;
     }
 
-    bool renderRetainedCameraFrame(std::int64_t cameraSensorTimestampNs) {
+    std::int64_t renderRetainedCameraFrame(std::int64_t cameraSensorTimestampNs) {
         std::lock_guard renderLock(renderMutex_);
         collectPastPresentationTimings();
         const std::uint32_t frameIndex = currentFrame_ % kFramesInFlight;
@@ -3811,7 +3848,7 @@ private:
         );
         if (result != VK_SUCCESS) {
             setCameraVulkanError("wait_retained_frame_fence", result);
-            return false;
+            return -1;
         }
         std::uint32_t imageIndex = 0;
         result = acquireNextImage_(
@@ -3824,11 +3861,11 @@ private:
         );
         if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
             setCameraVulkanError("acquire_retained_swapchain_image", result);
-            return false;
+            return -1;
         }
         if (imageIndex >= commandBuffers_.size()) {
             setCameraError("retained_swapchain_index_out_of_range");
-            return false;
+            return -1;
         }
         if (imageFences_[imageIndex] != VK_NULL_HANDLE) {
             result = waitForFences_(
@@ -3840,25 +3877,25 @@ private:
             );
             if (result != VK_SUCCESS) {
                 setCameraVulkanError("wait_retained_image_fence", result);
-                return false;
+                return -1;
             }
         }
         imageFences_[imageIndex] = frameFences_[frameIndex];
         std::uint32_t trackingTestLipIndexCount = 0;
         if (!prepareTrackingTestLipFrame(frameIndex, &trackingTestLipIndexCount)) {
-            return false;
+            return -1;
         }
         result = resetFences_(device_, 1, &frameFences_[frameIndex]);
         if (result != VK_SUCCESS) {
             setCameraVulkanError("reset_retained_frame_fence", result);
-            return false;
+            return -1;
         }
         if (!recordRetainedCameraCommandBuffer(
                 imageIndex,
                 frameIndex,
                 trackingTestLipIndexCount
             )) {
-            return false;
+            return -1;
         }
         const VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
         const VkSubmitInfo submitInfo{
@@ -3875,7 +3912,7 @@ private:
         result = queueSubmit_(graphicsQueue_, 1, &submitInfo, frameFences_[frameIndex]);
         if (result != VK_SUCCESS) {
             setCameraVulkanError("submit_retained_frame", result);
-            return false;
+            return -1;
         }
         const std::uint32_t presentationId = registerCameraPresentation(cameraSensorTimestampNs);
         const VkPresentTimeGOOGLE presentTime{
@@ -3911,7 +3948,7 @@ private:
                 std::numeric_limits<std::uint64_t>::max()
             );
             setCameraVulkanError("present_retained_frame", result);
-            return false;
+            return -1;
         }
         if (lastPresentedRetainedCameraTimestampNs_ == cameraSensorTimestampNs) {
             retainedCameraReusedPresents_.fetch_add(1);
@@ -3921,7 +3958,7 @@ private:
         retainedCameraPresents_.fetch_add(1);
         currentFrame_ = (currentFrame_ + 1) % kFramesInFlight;
         collectPastPresentationTimings();
-        return true;
+        return static_cast<std::int64_t>(presentationId);
     }
 
     bool recordRetainedCameraCommandBuffer(
@@ -5253,6 +5290,7 @@ private:
     std::uint32_t nextPresentationId_ = 1;
     std::unordered_map<std::uint32_t, std::int64_t> presentationCameraTimestamps_;
     PresentationSample latestPresentationSample_{};
+    std::deque<PresentationSample> completedPresentationSamples_;
 
     std::atomic<bool> ready_{false};
     std::atomic<bool> stopRequested_{false};
@@ -5550,14 +5588,14 @@ Java_com_example_armakeup_render_NativeVulkanDiagnosticRuntime_nativeUpdateVisib
         ));
 }
 
-extern "C" JNIEXPORT jboolean JNICALL
+extern "C" JNIEXPORT jlong JNICALL
 Java_com_example_armakeup_render_NativeVulkanDiagnosticRuntime_nativePresentVisibleFrame(
     JNIEnv* /* environment */,
     jobject /* runtime */,
     jlong handle
 ) {
     VulkanDiagnosticRuntime* runtime = fromHandle(handle);
-    return runtime != nullptr && runtime->presentVisibleFrame() ? JNI_TRUE : JNI_FALSE;
+    return runtime == nullptr ? -1 : static_cast<jlong>(runtime->presentVisibleFrame());
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -5599,6 +5637,19 @@ Java_com_example_armakeup_render_NativeVulkanDiagnosticRuntime_nativeReadLatestP
 ) {
     const VulkanDiagnosticRuntime* runtime = fromHandle(handle);
     return runtime != nullptr && runtime->readLatestPresentationTiming(environment, values)
+        ? JNI_TRUE
+        : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_example_armakeup_render_NativeVulkanDiagnosticRuntime_nativeReadNextPresentationTiming(
+    JNIEnv* environment,
+    jobject /* runtime */,
+    jlong handle,
+    jlongArray values
+) {
+    VulkanDiagnosticRuntime* runtime = fromHandle(handle);
+    return runtime != nullptr && runtime->readNextPresentationTiming(environment, values)
         ? JNI_TRUE
         : JNI_FALSE;
 }
