@@ -120,6 +120,28 @@ ready→actual `40.08/41.62 ms`, and interval `16.692/16.770 ms`. Thermal status
 measurements accept cadence/lifecycle only; repeat telemetry-on head/phone motion after cooling for
 the motion-lag decision.
 
+### `.arv6` v11 native geometry-to-present recording
+
+Для controlled native run одновременно включаются native surface и обычный recorder:
+
+```powershell
+adb shell am force-stop com.example.armakeup
+adb shell am start -n com.example.armakeup/.MainActivity `
+  --ez com.example.armakeup.extra.ENABLE_NATIVE_VULKAN_VISIBLE true `
+  --ez com.example.armakeup.extra.TRACKING_TELEMETRY true `
+  --el com.example.armakeup.extra.TRACKING_WARMUP_MS 5000 `
+  --el com.example.armakeup.extra.TRACKING_DURATION_MS 15000 `
+  --es com.example.armakeup.extra.TRACKING_SCENARIO ff1_native_retained_stationary_v11_cold
+```
+
+Version 11 добавляет `renderBackend` и native `presentationId`. Render event содержит контуры и
+predictor/gyro state конкретного submit; `presentationTimestampNs` заполняется только после
+feedback с тем же ID. Последние unresolved frames сохраняются с `-1`, поэтому acceptance требует
+высокого, но не искусственно `1.0` coverage. Первый functional run получил `907` renders,
+`dropped=0`, backend `NATIVE_VULKAN` и presentation coverage `0.99559`. Его sidecar дал
+desired→actual `46.89/47.56 ms`, что расходится с прошлым warm `30.13/30.89 ms`; до exact cold
+repeat результат queue latency считается вариативным, а не преимуществом native.
+
 ## FF1 Filament presentation-hints negative control
 
 `.arv6` v10 добавляет `filamentPresentationHintsEnabled`. Этот debug-only negative control

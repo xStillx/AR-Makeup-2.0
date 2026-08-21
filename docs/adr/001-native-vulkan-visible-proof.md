@@ -13,6 +13,13 @@ Commit `2fb7cd7` passed the SM-G990B cadence, visual-transform, and lifecycle ga
 telemetry-on head/phone-motion A/B and production-material migration pass; `9bc3efb` remains the
 minimal verified rollback.
 
+Amendment 2026-08-21, telemetry: commit `082d88e` assigns every native submit its Vulkan present
+id and records the exact displayed lip contours plus predictor/gyro state in `.arv6` v11. Native
+code keeps a bounded FIFO of completed `VK_GOOGLE_display_timing` samples; Kotlin resolves delayed
+actual-present feedback to the matching submitted geometry. Unresolved tail frames retain an
+explicit unknown timestamp. The observer and feedback drain run only during explicit debug
+telemetry, and the visible predictor remains anchored to its original vsync timestamp.
+
 ## Context
 
 The current production-visible path imports each latest camera `AHardwareBuffer` into the native
@@ -80,6 +87,8 @@ changing the normal Filament launch.
   device-specific visual offset is allowed in the tracker.
 - Native timing samples must retain the camera sensor timestamp and explicit clock-domain
   conversion before they are reported as sensor-to-actual latency.
+- Actual-present feedback must be correlated by present id to the geometry of that submit; latest
+  geometry at feedback-read time is not an acceptable substitute.
 - Failure to create the debug Vulkan renderer is reported as a renderer error; it does not silently
   claim a successful Vulkan A/B.
 
@@ -90,6 +99,7 @@ changing the normal Filament launch.
 3. Add the Vulkan tracking-test lip pipeline and optional display-timing feedback.
 4. Run local tests/lint/assemble, then install the exact APK on SM-G990B. Completed.
 5. Verify retained-camera 60-Hz cadence, transforms, and lifecycle on device. Completed warm gate.
-6. Run a cold telemetry-on native/Filament head-motion and phone-motion A/B before changing the
+6. Add exact native geometry-to-present telemetry. Completed in `.arv6` v11.
+7. Run a cold telemetry-on native/Filament head-motion and phone-motion A/B before changing the
    default compositor.
-7. Migrate and accept production materials as a separate slice if the motion gate passes.
+8. Migrate and accept production materials as a separate slice if the motion gate passes.
