@@ -48,6 +48,23 @@ class LandmarkRenderFrame internal constructor(
     }
 
     /**
+     * Prediction horizon from the ML source frame to the exact retained camera buffer.
+     *
+     * Both timestamps are CameraX sensor timestamps in the same monotonic clock. This is the
+     * visible native-renderer contract: geometry follows the camera image that will be presented,
+     * never wall time or the current vsync.
+     */
+    internal fun predictionSecondsForCameraFrame(
+        measurementSensorTimestampNs: Long,
+        cameraSensorTimestampNs: Long,
+    ): Float {
+        if (measurementSensorTimestampNs <= 0L || cameraSensorTimestampNs <= 0L) return 0f
+        val deltaNs = (cameraSensorTimestampNs - measurementSensorTimestampNs).coerceAtLeast(0L)
+        val maximumNs = maxPredictionMs * NANOS_PER_MILLISECOND
+        return deltaNs.coerceAtMost(maximumNs) / NANOS_PER_SECOND
+    }
+
+    /**
      * Portion of the global camera-relative motion that the predictor actually extrapolated.
      *
      * [predictionSeconds] is the geometric horizon, but global velocity is deliberately gated
@@ -258,5 +275,7 @@ class LandmarkRenderFrame internal constructor(
         private const val MAX_RENDER_CORRECTION = 0.12f
         private const val MAX_TRANSITION_CENTROID_DISTANCE = 0.15f
         private const val MILLIS_PER_SECOND = 1_000f
+        private const val NANOS_PER_MILLISECOND = 1_000_000L
+        private const val NANOS_PER_SECOND = 1_000_000_000f
     }
 }

@@ -38,7 +38,9 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
     private val firstFrameReported = AtomicBoolean(false)
     private val cameraFrameReported = AtomicBoolean(false)
     private val visibleCameraTransform = FloatArray(VISIBLE_TRANSFORM_ELEMENT_COUNT)
-    private val visibleTrackingRoi = FloatArray(VISIBLE_TRACKING_ROI_ELEMENT_COUNT) { Float.NaN }
+    private val visibleTrackingRoi = FloatArray(VISIBLE_TRACKING_ROI_ELEMENT_COUNT)
+    private val visibleCameraMetadata = LongArray(VISIBLE_CAMERA_METADATA_COUNT)
+    private val visibleTemporalValues = FloatArray(VulkanTemporalTrackingResult.VALUE_COUNT)
     private var lastVisibleCameraTimestampNs = 0L
     private var nativeHandle = nativeCreate(
         outputSurface,
@@ -149,14 +151,29 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
      * The returned timestamp remains stable while the display reuses the retained texture. A zero
      * value means that the first camera frame has not completed acquisition yet.
      */
-    fun updateVisibleCamera(transform: VulkanCameraTransform): Long {
+    fun updateVisibleCamera(
+        transform: VulkanCameraTransform,
+        trackingRoi: VulkanTemporalTrackingRoi,
+    ): VulkanVisibleCameraUpdate {
         val handle = nativeHandle
-        if (handle == 0L) return 0L
+        if (handle == 0L) {
+            return VulkanVisibleCameraUpdate(0L, false, null)
+        }
         transform.copyMatrixTo(visibleCameraTransform)
+        trackingRoi.toFloatArray().copyInto(visibleTrackingRoi)
         val timestampNs = nativeUpdateVisibleCamera(
             handle,
             visibleCameraTransform,
             visibleTrackingRoi,
+            visibleCameraMetadata,
+            visibleTemporalValues,
+        )
+        val temporalFromTimestampNs = visibleCameraMetadata[VISIBLE_TEMPORAL_FROM_TIMESTAMP_INDEX]
+        val temporalToTimestampNs = visibleCameraMetadata[VISIBLE_TEMPORAL_TO_TIMESTAMP_INDEX]
+        val temporalTracking = VulkanTemporalTrackingResult.fromNative(
+            fromSensorTimestampNs = temporalFromTimestampNs,
+            toSensorTimestampNs = temporalToTimestampNs,
+            values = visibleTemporalValues,
         )
         if (timestampNs > 0L && timestampNs != lastVisibleCameraTimestampNs) {
             lastVisibleCameraTimestampNs = timestampNs
@@ -164,11 +181,17 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
             if (count == 1L || count % CAMERA_PROGRESS_INTERVAL == 0L) {
                 Log.i(
                     LOG_TAG,
-                    "visibleCameraProgress copied=$count timestampNs=$timestampNs $diagnostic",
+                    "visibleCameraProgress copied=$count timestampNs=$timestampNs " +
+                        "temporalAttempted=${temporalFromTimestampNs > 0L} " +
+                        "temporalAccepted=${temporalTracking != null} $diagnostic",
                 )
             }
         }
-        return timestampNs
+        return VulkanVisibleCameraUpdate(
+            sensorTimestampNs = timestampNs,
+            temporalTrackingAttempted = temporalFromTimestampNs > 0L,
+            temporalTracking = temporalTracking,
+        )
     }
 
     /** Returns -1 on failure, 0 without display-timing feedback, or the submitted present id. */
@@ -189,10 +212,23 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
         if (handle != 0L) nativeCloseCamera(handle)
     }
 
-    fun updateTrackingTestLip(vertices: FloatArray, indices: ShortArray, visible: Boolean): Boolean {
+    fun updateTrackingTestLip(
+        vertices: FloatArray,
+        indices: ShortArray,
+        displayToScreen: FloatArray = IDENTITY_DISPLAY_TO_SCREEN,
+        temporalFlowEnabled: Boolean = false,
+        visible: Boolean,
+    ): Boolean {
         val handle = nativeHandle
         if (handle == 0L) return false
-        return nativeUpdateTrackingTestLip(handle, vertices, indices, visible)
+        return nativeUpdateTrackingTestLip(
+            handle,
+            vertices,
+            indices,
+            displayToScreen,
+            temporalFlowEnabled,
+            visible,
+        )
     }
 
     fun latestPresentationSample(): NativeVulkanPresentationSample? {
@@ -342,6 +378,8 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
         handle: Long,
         uvTransform: FloatArray,
         trackingRoi: FloatArray,
+        metadata: LongArray,
+        temporalValues: FloatArray,
     ): Long
     private external fun nativePresentVisibleFrame(handle: Long): Long
     private external fun nativeCloseCamera(handle: Long)
@@ -349,6 +387,8 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
         handle: Long,
         vertices: FloatArray,
         indices: ShortArray,
+        displayToScreen: FloatArray,
+        temporalFlowEnabled: Boolean,
         visible: Boolean,
     ): Boolean
     private external fun nativeReadLatestPresentationTiming(
@@ -388,6 +428,9 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
         private const val CAMERA_PROGRESS_INTERVAL = 60L
         private const val VISIBLE_TRANSFORM_ELEMENT_COUNT = 16
         private const val VISIBLE_TRACKING_ROI_ELEMENT_COUNT = 4
+        private const val VISIBLE_CAMERA_METADATA_COUNT = 3
+        private const val VISIBLE_TEMPORAL_FROM_TIMESTAMP_INDEX = 1
+        private const val VISIBLE_TEMPORAL_TO_TIMESTAMP_INDEX = 2
         private const val NANOS_PER_MILLISECOND = 1_000_000L
         private const val PRESENTATION_METADATA_COUNT = 7
         private const val PRESENTATION_ID_INDEX = 0
@@ -398,6 +441,7 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
         private const val PRESENTATION_MARGIN_INDEX = 5
         private const val PRESENTATION_REFRESH_DURATION_INDEX = 6
         private const val PRESENTATION_FAILED = -1L
+        private val IDENTITY_DISPLAY_TO_SCREEN = floatArrayOf(1f, 1f, 0f, 0f)
 
         init {
             System.loadLibrary(NATIVE_LIBRARY)

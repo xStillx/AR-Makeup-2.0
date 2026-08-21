@@ -24,11 +24,12 @@ class FaceLandmarkerTracker(
     private val listener: Listener,
     private val telemetrySink: TrackingTelemetrySink? = null,
     private val cameraCaptureMetadataStore: CameraCaptureMetadataStore,
+    private val landmarkPredictionEnabled: Boolean = true,
 ) : AutoCloseable {
 
     private val applicationContext = context.applicationContext
     private val frameBufferPool = ArrayDeque<RgbaFrameBuffer>(FRAME_BUFFER_POOL_CAPACITY)
-    private val landmarkPredictor = LandmarkMotionPredictor()
+    private val landmarkPredictor = DisplayTimeLandmarkPredictor()
     private val frameTimestampResolver = CameraFrameTimestampResolver()
     private val frameQualityAnalyzer = SparseFrameQualityAnalyzer()
     private val deviceStateMonitor = DeviceStateMonitor(context)
@@ -37,7 +38,6 @@ class FaceLandmarkerTracker(
     private var inFlightFrame: PreparedFrame? = null
     private var inFlightImage: MPImage? = null
     private var pendingFrame: PreparedFrame? = null
-    private var lastDeliveredLandmarks: LandmarkRenderFrame? = null
     private var lastResultDeliveryTimestampMs = 0L
     private var lastMeasurementCaptureTimestampMs = NO_TIMESTAMP
     private var smoothedMlFps = 0f
@@ -246,15 +246,30 @@ class FaceLandmarkerTracker(
         } else {
             FloatArray(0)
         }
-        val trackedLandmarks = if (rawCoordinates.isNotEmpty()) {
-            landmarkPredictor.update(rawCoordinates, frame.timestampMs)
+        val trackedLandmarks = if (landmarkPredictionEnabled) {
+            if (rawCoordinates.isNotEmpty()) {
+                landmarkPredictor.update(rawCoordinates, frame.timestampMs)
+            } else {
+                landmarkPredictor.predictWithoutMeasurement(frame.timestampMs)
+            }
         } else {
-            landmarkPredictor.predictWithoutMeasurement(resultTimestampMs)
+            rawCoordinates.takeIf { it.isNotEmpty() }?.let { coordinates ->
+                LandmarkRenderFrame(
+                    positions = coordinates,
+                    velocities = FloatArray(coordinates.size),
+                    measurementTimestampMs = frame.timestampMs,
+                    predictedOnly = false,
+                    renderLeadMs = 0L,
+                    maxPredictionMs = 0L,
+                    renderDeliveryTimestampMs = resultTimestampMs,
+                    maxRenderExtrapolationMs = 0L,
+                    globalPredictionCoverage = 0f,
+                )
+            }
         }
+        // Display-time alignment is performed against the exact retained camera buffer in the
+        // renderer. Delivery-time blending here would reintroduce an unrelated wall-clock lag.
         val renderLandmarks = trackedLandmarks
-            ?.deliveredAt(resultTimestampMs)
-            ?.smoothCorrectionFrom(lastDeliveredLandmarks, resultTimestampMs)
-        lastDeliveredLandmarks = renderLandmarks
 
         val filteredCoordinates = trackedLandmarks?.copyBasePositions() ?: FloatArray(0)
         val facialTransformationMatrix = result.facialTransformationMatrixes()
@@ -302,7 +317,7 @@ class FaceLandmarkerTracker(
                         rollingShutterSkewNs = cameraMetadata.rollingShutterSkewNs,
                         aeState = cameraMetadata.aeState,
                     ),
-                    poseFitQuality = if (rawCoordinates.isEmpty()) {
+                    poseFitQuality = if (rawCoordinates.isEmpty() || !landmarkPredictionEnabled) {
                         TrackingPoseFitQuality.UNKNOWN
                     } else {
                         landmarkPredictor.latestPoseFitQuality
@@ -455,7 +470,6 @@ class FaceLandmarkerTracker(
         pendingFrame = null
         frameBufferPool.clear()
         landmarkPredictor.reset()
-        lastDeliveredLandmarks = null
         lastResultDeliveryTimestampMs = 0L
         lastMeasurementCaptureTimestampMs = NO_TIMESTAMP
         smoothedMlFps = 0f

@@ -11,6 +11,7 @@ constraintlayout = "2.2.2"
 cameraX = "1.6.1"
 mediaPipe = "1.0.0"
 filament = "1.74.0"
+arCore = "1.54.0"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -28,6 +29,7 @@ androidx-camera-view = { group = "androidx.camera", name = "camera-view", versio
 mediapipe-tasks-vision = { group = "com.google.mediapipe", name = "tasks-vision", version.ref = "mediaPipe" }
 filament-android = { group = "com.google.android.filament", name = "filament-android", version.ref = "filament" }
 filamat-android = { group = "com.google.android.filament", name = "filamat-android", version.ref = "filament" }
+arcore = { group = "com.google.ar", name = "core", version.ref = "arCore" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

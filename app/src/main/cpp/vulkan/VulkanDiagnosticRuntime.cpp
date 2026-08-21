@@ -42,12 +42,13 @@ constexpr std::chrono::milliseconds kDiagnosticFrameInterval{100};
 constexpr std::uint32_t kCameraMaxImages = 4;
 constexpr std::size_t kTransformElementCount = 16;
 constexpr std::size_t kCameraMetadataCount = 9;
+constexpr std::size_t kVisibleCameraMetadataCount = 3;
 constexpr std::size_t kTemporalRoiElementCount = 4;
 constexpr std::size_t kTemporalResultElementCount = 8;
-constexpr std::uint32_t kTemporalPyramidLevels = 3;
-constexpr std::uint32_t kTemporalPyramidSize = 192;
-constexpr std::uint32_t kTemporalFlowPointCount = 48;
-constexpr std::size_t kTrackingTestLipVertexComponentCount = 3;
+constexpr std::uint32_t kTemporalPyramidLevels = 4;
+constexpr std::uint32_t kTemporalPyramidSize = 256;
+constexpr std::uint32_t kTemporalFlowPointCount = 108;
+constexpr std::size_t kTrackingTestLipVertexComponentCount = 5;
 constexpr std::size_t kTrackingTestLipMaxVertexCount = 1024;
 constexpr std::size_t kTrackingTestLipMaxIndexCount = 6000;
 constexpr std::size_t kPresentationMetadataCount = 7;
@@ -70,6 +71,13 @@ struct alignas(16) TemporalPushConstants final {
 };
 
 static_assert(sizeof(TemporalPushConstants) == 96U);
+
+struct alignas(16) TrackingLipPushConstants final {
+    std::array<float, 4> displayToScreen{};
+    std::array<std::int32_t, 4> flags{};
+};
+
+static_assert(sizeof(TrackingLipPushConstants) == 32U);
 
 struct MediaDispatch final {
     using NewWithUsage = media_status_t (*)(
@@ -427,13 +435,20 @@ public:
     std::int64_t updateVisibleCamera(
         JNIEnv* environment,
         jfloatArray uvTransform,
-        jfloatArray trackingRoi
+        jfloatArray trackingRoi,
+        jlongArray metadata,
+        jfloatArray temporalValues
     ) {
-        if (uvTransform == nullptr || trackingRoi == nullptr ||
+        if (uvTransform == nullptr || trackingRoi == nullptr || metadata == nullptr ||
+            temporalValues == nullptr ||
             environment->GetArrayLength(uvTransform) !=
                 static_cast<jsize>(kTransformElementCount) ||
             environment->GetArrayLength(trackingRoi) !=
-                static_cast<jsize>(kTemporalRoiElementCount)) {
+                static_cast<jsize>(kTemporalRoiElementCount) ||
+            environment->GetArrayLength(metadata) <
+                static_cast<jsize>(kVisibleCameraMetadataCount) ||
+            environment->GetArrayLength(temporalValues) <
+                static_cast<jsize>(kTemporalResultElementCount)) {
             return 0;
         }
         std::array<float, kTransformElementCount> transform{};
@@ -454,14 +469,41 @@ public:
             return 0;
         }
 
+        std::int64_t completedTemporalFromTimestampNs = 0;
+        std::int64_t completedTemporalToTimestampNs = 0;
+        std::array<float, kTemporalResultElementCount> completedTemporalResult{};
+        const auto publishResult = [&](std::int64_t timestampNs) {
+            const std::array<jlong, kVisibleCameraMetadataCount> values{
+                static_cast<jlong>(timestampNs),
+                static_cast<jlong>(completedTemporalFromTimestampNs),
+                static_cast<jlong>(completedTemporalToTimestampNs),
+            };
+            environment->SetLongArrayRegion(
+                metadata,
+                0,
+                static_cast<jsize>(values.size()),
+                values.data()
+            );
+            environment->SetFloatArrayRegion(
+                temporalValues,
+                0,
+                static_cast<jsize>(completedTemporalResult.size()),
+                completedTemporalResult.data()
+            );
+            return timestampNs;
+        };
+
         std::lock_guard lock(cameraMutex_);
         if (!ready_.load() || cameraReader_ == nullptr || !cameraPipelineReady_) {
-            return retainedCameraTimestampNs_;
+            return publishResult(retainedCameraTimestampNs_);
         }
         if (pendingCameraFrame_.image != nullptr) {
             if (!finalizePendingCameraFrame()) {
-                return retainedCameraTimestampNs_;
+                return publishResult(retainedCameraTimestampNs_);
             }
+            completedTemporalFromTimestampNs = pendingCameraFrame_.temporalFromTimestampNs;
+            completedTemporalToTimestampNs = pendingCameraFrame_.timestampNs;
+            completedTemporalResult = pendingCameraFrame_.temporalResult;
             if (mediaDispatch_.deleteImage != nullptr) {
                 mediaDispatch_.deleteImage(pendingCameraFrame_.image);
             }
@@ -477,19 +519,19 @@ public:
             &acquireFenceFd
         );
         if (acquireResult != CameraAcquireResult::acquired) {
-            return retainedCameraTimestampNs_;
+            return publishResult(retainedCameraTimestampNs_);
         }
         if (!importAndCopyCameraFrame(acquireFenceFd)) {
             closeFileDescriptor(acquireFenceFd);
             destroyPendingCameraFrame(/* deleteImage = */ true);
             cameraDroppedFrames_.fetch_add(1);
-            return retainedCameraTimestampNs_;
+            return publishResult(retainedCameraTimestampNs_);
         }
         retainedCameraTimestampNs_ = pendingCameraFrame_.timestampNs;
         retainedCameraValid_ = true;
         retainedCameraCopies_.fetch_add(1);
         cameraRenderedFrames_.fetch_add(1);
-        return retainedCameraTimestampNs_;
+        return publishResult(retainedCameraTimestampNs_);
     }
 
     std::int64_t presentVisibleFrame() {
@@ -527,6 +569,7 @@ public:
         retainedCameraValid_ = false;
         retainedCameraTimestampNs_ = 0;
         lastPresentedRetainedCameraTimestampNs_ = 0;
+        retainedTemporalFlowAvailable_ = false;
         mediaDispatch_.close();
     }
 
@@ -534,6 +577,8 @@ public:
         JNIEnv* environment,
         jfloatArray vertices,
         jshortArray indices,
+        jfloatArray displayToScreen,
+        bool temporalFlowEnabled,
         bool visible
     ) {
         if (!ready_.load()) {
@@ -546,7 +591,8 @@ public:
             trackingTestLipIndices_.clear();
             return true;
         }
-        if (vertices == nullptr || indices == nullptr) {
+        if (vertices == nullptr || indices == nullptr || displayToScreen == nullptr ||
+            environment->GetArrayLength(displayToScreen) < 4) {
             return false;
         }
         const jsize vertexValueCount = environment->GetArrayLength(vertices);
@@ -570,10 +616,21 @@ public:
             copiedVertices.data()
         );
         environment->GetShortArrayRegion(indices, 0, indexCount, copiedIndices.data());
+        std::array<float, 4> copiedDisplayToScreen{};
+        environment->GetFloatArrayRegion(
+            displayToScreen,
+            0,
+            static_cast<jsize>(copiedDisplayToScreen.size()),
+            copiedDisplayToScreen.data()
+        );
         if (environment->ExceptionCheck() == JNI_TRUE ||
             !std::all_of(copiedVertices.begin(), copiedVertices.end(), [](float value) {
                 return std::isfinite(value);
-            })) {
+            }) || !std::all_of(
+                copiedDisplayToScreen.begin(),
+                copiedDisplayToScreen.end(),
+                [](float value) { return std::isfinite(value); }
+            )) {
             return false;
         }
         std::vector<std::uint16_t> unsignedIndices(copiedIndices.size());
@@ -587,6 +644,8 @@ public:
         std::lock_guard lock(lipMutex_);
         trackingTestLipVertices_ = std::move(copiedVertices);
         trackingTestLipIndices_ = std::move(unsignedIndices);
+        trackingTestLipDisplayToScreen_ = copiedDisplayToScreen;
+        trackingTestLipTemporalFlowEnabled_ = temporalFlowEnabled;
         trackingTestLipVisible_ = true;
         return true;
     }
@@ -1644,16 +1703,45 @@ private:
     }
 
     bool createTrackingTestLipPipeline() {
+        const VkDescriptorSetLayoutBinding temporalFitBinding{
+            .binding = 0,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+            .pImmutableSamplers = nullptr,
+        };
+        const VkDescriptorSetLayoutCreateInfo descriptorLayoutInfo{
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .bindingCount = 1,
+            .pBindings = &temporalFitBinding,
+        };
+        VkResult result = createDescriptorSetLayout_(
+            device_,
+            &descriptorLayoutInfo,
+            nullptr,
+            &trackingTestLipDescriptorSetLayout_
+        );
+        if (result != VK_SUCCESS) {
+            setVulkanError("create_tracking_lip_descriptor_layout", result);
+            return false;
+        }
+        const VkPushConstantRange pushConstantRange{
+            .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+            .offset = 0,
+            .size = static_cast<std::uint32_t>(sizeof(TrackingLipPushConstants)),
+        };
         const VkPipelineLayoutCreateInfo layoutInfo{
             .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
             .pNext = nullptr,
             .flags = 0,
-            .setLayoutCount = 0,
-            .pSetLayouts = nullptr,
-            .pushConstantRangeCount = 0,
-            .pPushConstantRanges = nullptr,
+            .setLayoutCount = 1,
+            .pSetLayouts = &trackingTestLipDescriptorSetLayout_,
+            .pushConstantRangeCount = 1,
+            .pPushConstantRanges = &pushConstantRange,
         };
-        VkResult result = createPipelineLayout_(
+        result = createPipelineLayout_(
             device_,
             &layoutInfo,
             nullptr,
@@ -1711,7 +1799,7 @@ private:
             ),
             .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
         };
-        const std::array<VkVertexInputAttributeDescription, 2> attributes{
+        const std::array<VkVertexInputAttributeDescription, 3> attributes{
             VkVertexInputAttributeDescription{
                 .location = 0,
                 .binding = 0,
@@ -1721,8 +1809,14 @@ private:
             VkVertexInputAttributeDescription{
                 .location = 1,
                 .binding = 0,
-                .format = VK_FORMAT_R32_SFLOAT,
+                .format = VK_FORMAT_R32G32_SFLOAT,
                 .offset = static_cast<std::uint32_t>(sizeof(float) * 2U),
+            },
+            VkVertexInputAttributeDescription{
+                .location = 2,
+                .binding = 0,
+                .format = VK_FORMAT_R32_SFLOAT,
+                .offset = static_cast<std::uint32_t>(sizeof(float) * 4U),
             },
         };
         const VkPipelineVertexInputStateCreateInfo vertexInput{
@@ -1846,7 +1940,82 @@ private:
             setVulkanError("create_tracking_lip_pipeline", result);
             return false;
         }
+        if (!createTrackingTestLipBuffer(
+                sizeof(float) * kTemporalResultElementCount,
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                &trackingTestLipFallbackFitBuffer_,
+                &trackingTestLipFallbackFitMemory_,
+                &trackingTestLipFallbackFitMapped_
+            )) {
+            return false;
+        }
+        std::memset(
+            trackingTestLipFallbackFitMapped_,
+            0,
+            sizeof(float) * kTemporalResultElementCount
+        );
+        const VkDescriptorPoolSize descriptorPoolSize{
+            .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = 1,
+        };
+        const VkDescriptorPoolCreateInfo descriptorPoolInfo{
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .maxSets = 1,
+            .poolSizeCount = 1,
+            .pPoolSizes = &descriptorPoolSize,
+        };
+        result = createDescriptorPool_(
+            device_,
+            &descriptorPoolInfo,
+            nullptr,
+            &trackingTestLipDescriptorPool_
+        );
+        if (result != VK_SUCCESS) {
+            setVulkanError("create_tracking_lip_descriptor_pool", result);
+            return false;
+        }
+        const VkDescriptorSetAllocateInfo descriptorAllocateInfo{
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+            .pNext = nullptr,
+            .descriptorPool = trackingTestLipDescriptorPool_,
+            .descriptorSetCount = 1,
+            .pSetLayouts = &trackingTestLipDescriptorSetLayout_,
+        };
+        result = allocateDescriptorSets_(
+            device_,
+            &descriptorAllocateInfo,
+            &trackingTestLipDescriptorSet_
+        );
+        if (result != VK_SUCCESS) {
+            setVulkanError("allocate_tracking_lip_descriptor", result);
+            return false;
+        }
+        updateTrackingTestLipFitDescriptor(trackingTestLipFallbackFitBuffer_);
         return true;
+    }
+
+    void updateTrackingTestLipFitDescriptor(VkBuffer buffer) {
+        if (trackingTestLipDescriptorSet_ == VK_NULL_HANDLE || buffer == VK_NULL_HANDLE) return;
+        const VkDescriptorBufferInfo bufferInfo{
+            .buffer = buffer,
+            .offset = 0,
+            .range = sizeof(float) * kTemporalResultElementCount,
+        };
+        const VkWriteDescriptorSet write{
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .pNext = nullptr,
+            .dstSet = trackingTestLipDescriptorSet_,
+            .dstBinding = 0,
+            .dstArrayElement = 0,
+            .descriptorCount = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .pImageInfo = nullptr,
+            .pBufferInfo = &bufferInfo,
+            .pTexelBufferView = nullptr,
+        };
+        updateDescriptorSets_(device_, 1, &write, 0, nullptr);
     }
 
     bool createRetainedCameraResources() {
@@ -2437,6 +2606,35 @@ private:
         );
         *outputIndexCount = static_cast<std::uint32_t>(trackingTestLipIndices_.size());
         return true;
+    }
+
+    void bindTrackingTestLipTemporalState(
+        VkCommandBuffer commandBuffer,
+        bool temporalFlowAvailable
+    ) {
+        cmdBindDescriptorSets_(
+            commandBuffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            trackingTestLipPipelineLayout_,
+            0,
+            1,
+            &trackingTestLipDescriptorSet_,
+            0,
+            nullptr
+        );
+        TrackingLipPushConstants pushConstants{};
+        pushConstants.displayToScreen = trackingTestLipDisplayToScreen_;
+        pushConstants.flags[0] = trackingTestLipTemporalFlowEnabled_ && temporalFlowAvailable
+            ? 1
+            : 0;
+        cmdPushConstants_(
+            commandBuffer,
+            trackingTestLipPipelineLayout_,
+            VK_SHADER_STAGE_VERTEX_BIT,
+            0,
+            static_cast<std::uint32_t>(sizeof(pushConstants)),
+            &pushConstants
+        );
     }
 
     bool createCameraPipeline(
@@ -3183,6 +3381,8 @@ private:
             destroyTemporalPipeline();
             return false;
         }
+        std::memset(temporalFitMapped_, 0, sizeof(float) * kTemporalResultElementCount);
+        updateTrackingTestLipFitDescriptor(temporalFitBuffer_);
         if (!createComputePipeline(
                 armakeup::shaders::kTemporalLuma,
                 sizeof(armakeup::shaders::kTemporalLuma),
@@ -3796,6 +3996,7 @@ private:
         if (!recordTemporalCommands(retainedCameraCopyCommandBuffer_)) {
             return false;
         }
+        retainedTemporalFlowAvailable_ = pendingCameraFrame_.temporalComputed;
         const VkClearValue clearValue{
             .color = VkClearColorValue{.float32 = {0.0F, 0.0F, 0.0F, 1.0F}},
         };
@@ -4081,6 +4282,10 @@ private:
                 VK_PIPELINE_BIND_POINT_GRAPHICS,
                 trackingTestLipPipeline_
             );
+            bindTrackingTestLipTemporalState(
+                commandBuffer,
+                retainedTemporalFlowAvailable_
+            );
             cmdBindVertexBuffers_(
                 commandBuffer,
                 0,
@@ -4337,6 +4542,10 @@ private:
                 commandBuffer,
                 VK_PIPELINE_BIND_POINT_GRAPHICS,
                 trackingTestLipPipeline_
+            );
+            bindTrackingTestLipTemporalState(
+                commandBuffer,
+                pendingCameraFrame_.temporalComputed
             );
             cmdBindVertexBuffers_(
                 commandBuffer,
@@ -4618,7 +4827,7 @@ private:
             .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
             .pNext = nullptr,
             .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
-            .dstAccessMask = VK_ACCESS_HOST_READ_BIT,
+            .dstAccessMask = VK_ACCESS_HOST_READ_BIT | VK_ACCESS_SHADER_READ_BIT,
             .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
             .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
             .buffer = temporalFitBuffer_,
@@ -4628,7 +4837,7 @@ private:
         cmdPipelineBarrier_(
             commandBuffer,
             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            VK_PIPELINE_STAGE_HOST_BIT,
+            VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
             0,
             0,
             nullptr,
@@ -4814,6 +5023,7 @@ private:
         if (device_ == VK_NULL_HANDLE) {
             return;
         }
+        updateTrackingTestLipFitDescriptor(trackingTestLipFallbackFitBuffer_);
         const std::array<VkPipeline*, 4> pipelines{
             &temporalLumaPipeline_,
             &temporalDownsamplePipeline_,
@@ -5113,6 +5323,34 @@ private:
                 destroyPipelineLayout_(device_, trackingTestLipPipelineLayout_, nullptr);
                 trackingTestLipPipelineLayout_ = VK_NULL_HANDLE;
             }
+            if (trackingTestLipDescriptorPool_ != VK_NULL_HANDLE &&
+                destroyDescriptorPool_ != nullptr) {
+                destroyDescriptorPool_(device_, trackingTestLipDescriptorPool_, nullptr);
+                trackingTestLipDescriptorPool_ = VK_NULL_HANDLE;
+                trackingTestLipDescriptorSet_ = VK_NULL_HANDLE;
+            }
+            if (trackingTestLipDescriptorSetLayout_ != VK_NULL_HANDLE &&
+                destroyDescriptorSetLayout_ != nullptr) {
+                destroyDescriptorSetLayout_(
+                    device_,
+                    trackingTestLipDescriptorSetLayout_,
+                    nullptr
+                );
+                trackingTestLipDescriptorSetLayout_ = VK_NULL_HANDLE;
+            }
+            if (trackingTestLipFallbackFitMapped_ != nullptr && unmapMemory_ != nullptr) {
+                unmapMemory_(device_, trackingTestLipFallbackFitMemory_);
+                trackingTestLipFallbackFitMapped_ = nullptr;
+            }
+            if (trackingTestLipFallbackFitBuffer_ != VK_NULL_HANDLE &&
+                destroyBuffer_ != nullptr) {
+                destroyBuffer_(device_, trackingTestLipFallbackFitBuffer_, nullptr);
+                trackingTestLipFallbackFitBuffer_ = VK_NULL_HANDLE;
+            }
+            if (trackingTestLipFallbackFitMemory_ != VK_NULL_HANDLE && freeMemory_ != nullptr) {
+                freeMemory_(device_, trackingTestLipFallbackFitMemory_, nullptr);
+                trackingTestLipFallbackFitMemory_ = VK_NULL_HANDLE;
+            }
             for (std::size_t index = 0; index < kFramesInFlight; ++index) {
                 if (trackingTestLipVertexMapped_[index] != nullptr && unmapMemory_ != nullptr) {
                     unmapMemory_(device_, trackingTestLipVertexMemories_[index]);
@@ -5338,6 +5576,12 @@ private:
     void* temporalFitMapped_ = nullptr;
     VkPipelineLayout trackingTestLipPipelineLayout_ = VK_NULL_HANDLE;
     VkPipeline trackingTestLipPipeline_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout trackingTestLipDescriptorSetLayout_ = VK_NULL_HANDLE;
+    VkDescriptorPool trackingTestLipDescriptorPool_ = VK_NULL_HANDLE;
+    VkDescriptorSet trackingTestLipDescriptorSet_ = VK_NULL_HANDLE;
+    VkBuffer trackingTestLipFallbackFitBuffer_ = VK_NULL_HANDLE;
+    VkDeviceMemory trackingTestLipFallbackFitMemory_ = VK_NULL_HANDLE;
+    void* trackingTestLipFallbackFitMapped_ = nullptr;
     std::array<VkBuffer, kFramesInFlight> trackingTestLipVertexBuffers_{};
     std::array<VkDeviceMemory, kFramesInFlight> trackingTestLipVertexMemories_{};
     std::array<void*, kFramesInFlight> trackingTestLipVertexMapped_{};
@@ -5346,7 +5590,10 @@ private:
     std::array<void*, kFramesInFlight> trackingTestLipIndexMapped_{};
     std::vector<float> trackingTestLipVertices_;
     std::vector<std::uint16_t> trackingTestLipIndices_;
+    std::array<float, 4> trackingTestLipDisplayToScreen_{1.0F, 1.0F, 0.0F, 0.0F};
+    bool trackingTestLipTemporalFlowEnabled_ = false;
     bool trackingTestLipVisible_ = false;
+    bool retainedTemporalFlowAvailable_ = false;
     bool displayTimingSupported_ = false;
     std::uint64_t refreshDurationNs_ = 0;
     std::uint32_t nextPresentationId_ = 1;
@@ -5638,7 +5885,9 @@ Java_com_example_armakeup_render_NativeVulkanDiagnosticRuntime_nativeUpdateVisib
     jobject /* runtime */,
     jlong handle,
     jfloatArray uvTransform,
-    jfloatArray trackingRoi
+    jfloatArray trackingRoi,
+    jlongArray metadata,
+    jfloatArray temporalValues
 ) {
     VulkanDiagnosticRuntime* runtime = fromHandle(handle);
     return runtime == nullptr
@@ -5646,7 +5895,9 @@ Java_com_example_armakeup_render_NativeVulkanDiagnosticRuntime_nativeUpdateVisib
         : static_cast<jlong>(runtime->updateVisibleCamera(
             environment,
             uvTransform,
-            trackingRoi
+            trackingRoi,
+            metadata,
+            temporalValues
         ));
 }
 
@@ -5679,6 +5930,8 @@ Java_com_example_armakeup_render_NativeVulkanDiagnosticRuntime_nativeUpdateTrack
     jlong handle,
     jfloatArray vertices,
     jshortArray indices,
+    jfloatArray displayToScreen,
+    jboolean temporalFlowEnabled,
     jboolean visible
 ) {
     VulkanDiagnosticRuntime* runtime = fromHandle(handle);
@@ -5686,6 +5939,8 @@ Java_com_example_armakeup_render_NativeVulkanDiagnosticRuntime_nativeUpdateTrack
         environment,
         vertices,
         indices,
+        displayToScreen,
+        temporalFlowEnabled == JNI_TRUE,
         visible == JNI_TRUE
     ) ? JNI_TRUE : JNI_FALSE;
 }

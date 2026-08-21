@@ -1,6 +1,6 @@
 #version 450
 
-layout(local_size_x = 8, local_size_y = 6, local_size_z = 1) in;
+layout(local_size_x = 12, local_size_y = 9, local_size_z = 1) in;
 
 layout(set = 0, binding = 4) uniform sampler2D previousPyramid;
 layout(set = 0, binding = 5) uniform sampler2D currentPyramid;
@@ -14,9 +14,14 @@ layout(push_constant) uniform TemporalState {
     ivec4 parameters;
 } state;
 
-const ivec2 GRID_SIZE = ivec2(8, 6);
-const int PYRAMID_LEVELS = 3;
-const int ITERATIONS = 3;
+// A denser grid gives the fit enough actual features around the eyes, nose and face outline
+// without pretending that textureless skin pixels are reliable measurements.
+const ivec2 GRID_SIZE = ivec2(12, 9);
+// Four levels keep the LK solver inside its convergence basin when the 30 Hz camera moves
+// sharply. The previous three-level pyramid could represent a large displacement numerically,
+// but frequently reached the finest level before the coarse estimate had converged.
+const int PYRAMID_LEVELS = 4;
+const int ITERATIONS = 4;
 const int WINDOW_RADIUS = 2;
 
 float bilinearSample(sampler2D source, vec2 uv, int level) {

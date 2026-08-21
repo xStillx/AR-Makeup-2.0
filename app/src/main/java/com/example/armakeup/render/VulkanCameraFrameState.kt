@@ -67,3 +67,10 @@ internal data class VulkanCameraFrameState(
         ): Long = (cameraSensorTimestampNs - landmarkSensorTimestampNs).coerceAtLeast(0L)
     }
 }
+
+/** Result of one retained-camera update; temporal flow completes one GPU submission later. */
+internal data class VulkanVisibleCameraUpdate(
+    val sensorTimestampNs: Long,
+    val temporalTrackingAttempted: Boolean,
+    val temporalTracking: VulkanTemporalTrackingResult?,
+)

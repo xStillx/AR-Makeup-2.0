@@ -131,8 +131,13 @@ add_library(
     SHARED
     vulkan/VulkanBootstrap.cpp
     vulkan/VulkanDiagnosticRuntime.cpp
+    image/Yuv420ToRgba.cpp
     "${camera_shader_header}"
 )
+
+# The converter is a tiny per-pixel debug bridge. Keep it optimized even in a debuggable APK so
+# its scalar loop does not throttle the independent ARCore render session.
+set_source_files_properties(image/Yuv420ToRgba.cpp PROPERTIES COMPILE_OPTIONS "-O3")
 
 find_library(android_log_library log REQUIRED)
 find_library(android_native_library android REQUIRED)

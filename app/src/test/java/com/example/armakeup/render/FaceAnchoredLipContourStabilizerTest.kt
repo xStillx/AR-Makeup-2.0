@@ -78,6 +78,26 @@ class FaceAnchoredLipContourStabilizerTest {
         assertEquals(contour()[0] + 0.04f, changedOuter[0], EPSILON)
     }
 
+    @Test
+    fun repeatedCameraTimestampKeepsGeometryBitIdentical() {
+        val stabilizer = FaceAnchoredLipContourStabilizer(localCutoffHz = 4f)
+        val firstOuter = contour()
+        val firstInner = innerContour()
+        stabilizer.stabilize(anchors(), firstOuter, firstInner, timestampMs = 1_000L)
+
+        val changedOuter = translated(contour(), x = 0.04f, y = 0f)
+        val changedInner = translated(innerContour(), x = 0.04f, y = 0f)
+        stabilizer.stabilize(
+            translated(anchors(), x = 0.04f, y = 0f),
+            changedOuter,
+            changedInner,
+            timestampMs = 1_000L,
+        )
+
+        assertPointsEqual(contour(), changedOuter)
+        assertPointsEqual(innerContour(), changedInner)
+    }
+
     private fun anchors() = floatArrayOf(
         0.30f, 0.35f,
         0.70f, 0.35f,

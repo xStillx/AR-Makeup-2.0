@@ -1,6 +1,7 @@
 package com.example.armakeup
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.hardware.camera2.CameraCharacteristics
@@ -30,7 +31,9 @@ import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.doOnLayout
 import com.example.armakeup.databinding.ActivityMainBinding
+import com.example.armakeup.arcore.ArCoreFaceAnchorActivity
 import com.example.armakeup.makeup.LipstickFinish
 import com.example.armakeup.tracking.FaceLandmarkerTracker
 import com.example.armakeup.tracking.CameraCaptureMetadataStore
@@ -50,6 +53,8 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
     private var cameraStarted = false
     private var cameraBindingStarted = false
     private var cameraFpsLabel = "auto"
+    private var cameraExposureCompensationIndex = 0
+    private var landmarkPredictionEnabled = true
     private var trackingTelemetryRecorder: TrackingTelemetryRecorder? = null
     private val cameraCaptureMetadataStore = CameraCaptureMetadataStore()
     private val fpsMeter = FpsMeter()
@@ -68,6 +73,11 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val debuggable = applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
+        if (debuggable && intent.getBooleanExtra(EXTRA_ENABLE_ARCORE_FACE_ANCHOR_PROOF, false)) {
+            startActivity(Intent(this, ArCoreFaceAnchorActivity::class.java))
+            finish()
+            return
+        }
         val displayQueueProtectionOverride = if (
             debuggable && intent.hasExtra(EXTRA_ENABLE_DISPLAY_QUEUE_PROTECTION)
         ) {
@@ -79,6 +89,17 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
             !intent.getBooleanExtra(EXTRA_DISABLE_FILAMENT_PRESENTATION_HINTS, false)
         val nativeVulkanVisibleEnabled = debuggable &&
             intent.getBooleanExtra(EXTRA_ENABLE_NATIVE_VULKAN_VISIBLE, false)
+        val vulkanSameFrameFlowVisibleEnabled = debuggable && nativeVulkanVisibleEnabled &&
+            intent.getBooleanExtra(EXTRA_ENABLE_VULKAN_SAME_FRAME_FLOW_VISIBLE, false)
+        val nativeVulkanPresentOnCameraFramesOnly = debuggable && nativeVulkanVisibleEnabled &&
+            intent.getBooleanExtra(EXTRA_NATIVE_VULKAN_PRESENT_ON_CAMERA_FRAMES_ONLY, false)
+        landmarkPredictionEnabled = !debuggable ||
+            !intent.getBooleanExtra(EXTRA_DISABLE_LANDMARK_PREDICTOR, false)
+        cameraExposureCompensationIndex = if (debuggable) {
+            intent.getIntExtra(EXTRA_CAMERA_EXPOSURE_COMPENSATION_INDEX, 0)
+        } else {
+            0
+        }
         enableEdgeToEdge()
         WindowCompat.getInsetsController(window, window.decorView).apply {
             isAppearanceLightStatusBars = false
@@ -92,6 +113,8 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
             displayQueueProtectionEnabled = displayQueueProtectionOverride,
             filamentPresentationHintsEnabled = filamentPresentationHintsEnabled,
             nativeVulkanVisibleEnabled = nativeVulkanVisibleEnabled,
+            vulkanSameFrameFlowVisibleEnabled = vulkanSameFrameFlowVisibleEnabled,
+            nativeVulkanPresentOnCameraFramesOnly = nativeVulkanPresentOnCameraFramesOnly,
         )
         binding.makeupRenderer.setGyroscopeCorrectionEnabled(
             !intent.getBooleanExtra(EXTRA_DISABLE_GYROSCOPE_CORRECTION, false),
@@ -186,13 +209,14 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
                     listener = this,
                     telemetrySink = trackingTelemetryRecorder,
                     cameraCaptureMetadataStore = cameraCaptureMetadataStore,
+                    landmarkPredictionEnabled = landmarkPredictionEnabled,
                 ).also { it.initialize() }
             }
         }
 
         if (!cameraStarted && !cameraBindingStarted) {
             cameraBindingStarted = true
-            binding.makeupRenderer.post { bindCameraUseCases() }
+            binding.makeupRenderer.doOnLayout { bindCameraUseCases() }
         }
     }
 
@@ -267,10 +291,20 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
                     cameraFpsLabel = getString(R.string.camera_fps_auto)
                     baseSession
                 }
-                provider.bindToLifecycle(
+                val camera = provider.bindToLifecycle(
                     this,
                     CameraSelector.DEFAULT_FRONT_CAMERA,
                     session,
+                )
+                val compensationRange = camera.cameraInfo.exposureState.exposureCompensationRange
+                val appliedCompensation = cameraExposureCompensationIndex.coerceIn(
+                    compensationRange.lower,
+                    compensationRange.upper,
+                )
+                camera.cameraControl.setExposureCompensationIndex(appliedCompensation)
+                Log.i(
+                    PERFORMANCE_LOG_TAG,
+                    "cameraExposureCompensation=$appliedCompensation range=$compensationRange",
                 )
                 cameraStarted = true
                 cameraBindingStarted = false
@@ -282,8 +316,12 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
     }
 
     private fun createCameraViewPort(targetRotation: Int): ViewPort {
-        val width = binding.makeupRenderer.width.coerceAtLeast(1)
-        val height = binding.makeupRenderer.height.coerceAtLeast(1)
+        val width = binding.makeupRenderer.width
+        val height = binding.makeupRenderer.height
+        require(width > 0 && height > 0) {
+            "Camera viewport requested before renderer layout: ${width}x$height"
+        }
+        Log.i(PERFORMANCE_LOG_TAG, "cameraViewport=${width}x$height rotation=$targetRotation")
         return ViewPort.Builder(Rational(width, height), targetRotation)
             .setScaleType(ViewPort.FILL_CENTER)
             .build()
@@ -486,12 +524,22 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
     companion object {
         const val EXTRA_DISABLE_GYROSCOPE_CORRECTION =
             "com.example.armakeup.extra.DISABLE_GYROSCOPE_CORRECTION"
+        const val EXTRA_DISABLE_LANDMARK_PREDICTOR =
+            "com.example.armakeup.extra.DISABLE_LANDMARK_PREDICTOR"
         const val EXTRA_ENABLE_DISPLAY_QUEUE_PROTECTION =
             "com.example.armakeup.extra.ENABLE_DISPLAY_QUEUE_PROTECTION"
         const val EXTRA_DISABLE_FILAMENT_PRESENTATION_HINTS =
             "com.example.armakeup.extra.DISABLE_FILAMENT_PRESENTATION_HINTS"
         const val EXTRA_ENABLE_NATIVE_VULKAN_VISIBLE =
             "com.example.armakeup.extra.ENABLE_NATIVE_VULKAN_VISIBLE"
+        const val EXTRA_ENABLE_VULKAN_SAME_FRAME_FLOW_VISIBLE =
+            "com.example.armakeup.extra.ENABLE_VULKAN_SAME_FRAME_FLOW_VISIBLE"
+        const val EXTRA_NATIVE_VULKAN_PRESENT_ON_CAMERA_FRAMES_ONLY =
+            "com.example.armakeup.extra.NATIVE_VULKAN_PRESENT_ON_CAMERA_FRAMES_ONLY"
+        const val EXTRA_CAMERA_EXPOSURE_COMPENSATION_INDEX =
+            "com.example.armakeup.extra.CAMERA_EXPOSURE_COMPENSATION_INDEX"
+        const val EXTRA_ENABLE_ARCORE_FACE_ANCHOR_PROOF =
+            "com.example.armakeup.extra.ENABLE_ARCORE_FACE_ANCHOR_PROOF"
         private const val MIN_CAMERA_FPS = 30
         private const val MAX_CAMERA_FPS = 60
         private const val PERFORMANCE_LOG_TAG = "ARMakeupPerf"

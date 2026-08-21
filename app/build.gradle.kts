@@ -61,6 +61,7 @@ dependencies {
     implementation(libs.mediapipe.tasks.vision)
     implementation(libs.filament.android)
     implementation(libs.filamat.android)
+    implementation(libs.arcore)
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.espresso.core)
     androidTestImplementation(libs.androidx.junit)

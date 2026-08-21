@@ -22,6 +22,15 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.ARMakeup"
         android:usesCleartextTraffic="false">
+        <meta-data
+            android:name="com.google.ar.core"
+            android:value="optional" />
+
+        <activity
+            android:name=".arcore.ArCoreFaceAnchorActivity"
+            android:exported="false"
+            android:screenOrientation="portrait" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true"

@@ -767,9 +767,8 @@ internal class FilamentMakeupRenderer(
                 correctedDisplayX = displayX
                 correctedDisplayY = displayY
             } else {
-                val displayUvY = 1f - displayY
-                correctedDisplayX = temporalCorrection.mapX(displayX, displayUvY)
-                correctedDisplayY = 1f - temporalCorrection.mapY(displayX, displayUvY)
+                correctedDisplayX = temporalCorrection.mapX(displayX, displayY)
+                correctedDisplayY = temporalCorrection.mapY(displayX, displayY)
             }
             val gyroCorrectedDisplayX = gyroscopeCorrection.mapX(
                 correctedDisplayX,
@@ -811,7 +810,7 @@ internal class FilamentMakeupRenderer(
             val rawX = state.landmarks.x(landmarkIndex, predictionSeconds)
             val rawY = state.landmarks.y(landmarkIndex, predictionSeconds)
             val displayX = imageTransform.mapX(rawX, rawY)
-            val displayUvY = 1f - imageTransform.mapY(rawX, rawY)
+            val displayUvY = imageTransform.mapY(rawX, rawY)
             minX = minOf(minX, displayX)
             minY = minOf(minY, displayUvY)
             maxX = maxOf(maxX, displayX)
@@ -827,9 +826,9 @@ internal class FilamentMakeupRenderer(
         )
         return VulkanTemporalTrackingRoi(
             left = (centerX - halfWidth).coerceIn(0f, 1f),
-            bottom = (centerY - halfHeight).coerceIn(0f, 1f),
+            top = (centerY - halfHeight).coerceIn(0f, 1f),
             right = (centerX + halfWidth).coerceIn(0f, 1f),
-            top = (centerY + halfHeight).coerceIn(0f, 1f),
+            bottom = (centerY + halfHeight).coerceIn(0f, 1f),
         ).takeIf { it.isValid } ?: VulkanTemporalTrackingRoi.INVALID
     }
 

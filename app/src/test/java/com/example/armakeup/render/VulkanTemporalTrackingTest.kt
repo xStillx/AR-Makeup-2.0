@@ -12,7 +12,7 @@ class VulkanTemporalTrackingTest {
             VulkanTemporalTrackingResult.fromNative(
                 fromSensorTimestampNs = 1_000_000_000L,
                 toSensorTimestampNs = 1_033_000_000L,
-                values = floatArrayOf(1f, 0f, 0.08f, 0f, 0.9f, 0.002f, 30f, 1f),
+                values = floatArrayOf(1f, 0f, 0.12f, 0f, 0.9f, 0.002f, 30f, 1f),
             ),
         )
         assertNull(
@@ -36,16 +36,27 @@ class VulkanTemporalTrackingTest {
     }
 
     @Test
-    fun nativeResultAdmitsSparseButCoherentTexturedCoverage() {
+    fun nativeResultAllowsCoherentFastInterFrameTranslation() {
+        val result = VulkanTemporalTrackingResult.fromNative(
+            fromSensorTimestampNs = 1_000_000_000L,
+            toSensorTimestampNs = 1_033_000_000L,
+            values = floatArrayOf(1f, 0f, 0.08f, 0f, 0.9f, 0.002f, 30f, 1f),
+        )
+
+        assertTrue(result?.passesNativeContract == true)
+    }
+
+    @Test
+    fun nativeResultRequiresSpatiallySupportedCoherentCoverage() {
         val accepted = VulkanTemporalTrackingResult.fromNative(
             fromSensorTimestampNs = 1_000_000_000L,
             toSensorTimestampNs = 1_033_000_000L,
-            values = floatArrayOf(0.994f, 0.008f, 0.006f, -0.004f, 0.38f, 0.009f, 12f, 1f),
+            values = floatArrayOf(0.994f, 0.008f, 0.006f, -0.004f, 0.52f, 0.008f, 16f, 1f),
         )
         val tooSparse = VulkanTemporalTrackingResult.fromNative(
             fromSensorTimestampNs = 1_000_000_000L,
             toSensorTimestampNs = 1_033_000_000L,
-            values = floatArrayOf(0.994f, 0.008f, 0.006f, -0.004f, 0.38f, 0.009f, 11f, 1f),
+            values = floatArrayOf(0.994f, 0.008f, 0.006f, -0.004f, 0.52f, 0.008f, 15f, 1f),
         )
 
         assertTrue(accepted?.passesNativeContract == true)

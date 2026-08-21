@@ -39,11 +39,23 @@ internal class FaceAnchoredLipContourStabilizer(
         }
         val elapsedMs = timestampMs - lastTimestampMs
         if (
+            elapsedMs == 0L &&
+            previousAnchors.size == anchors.size &&
+            stabilizedOuter.size == outerContour.size &&
+            stabilizedInner.size == innerContour.size
+        ) {
+            // A 30 FPS retained camera buffer is normally presented twice on a 60 Hz display.
+            // Keep geometry bit-identical while that camera image is unchanged.
+            stabilizedOuter.copyInto(outerContour)
+            stabilizedInner.copyInto(innerContour)
+            return
+        }
+        if (
             previousAnchors.size != anchors.size ||
             stabilizedOuter.size != outerContour.size ||
             stabilizedInner.size != innerContour.size ||
             lastTimestampMs == NO_TIMESTAMP ||
-            elapsedMs <= 0L ||
+            elapsedMs < 0L ||
             elapsedMs > maximumFrameGapMs
         ) {
             initialize(anchors, outerContour, innerContour, timestampMs)

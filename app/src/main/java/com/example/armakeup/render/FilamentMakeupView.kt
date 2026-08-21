@@ -30,6 +30,8 @@ class FilamentMakeupView @JvmOverloads constructor(
         displayQueueProtectionEnabled: Boolean?,
         filamentPresentationHintsEnabled: Boolean,
         nativeVulkanVisibleEnabled: Boolean,
+        vulkanSameFrameFlowVisibleEnabled: Boolean,
+        nativeVulkanPresentOnCameraFramesOnly: Boolean,
     ) {
         if (isInEditMode || compositor != null || initializationError != null) return
         compositor = runCatching {
@@ -37,6 +39,8 @@ class FilamentMakeupView @JvmOverloads constructor(
                 NativeVulkanVisibleRenderer(
                     context = context,
                     surfaceView = this,
+                    sameFrameFlowVisibleEnabled = vulkanSameFrameFlowVisibleEnabled,
+                    presentOnCameraFramesOnly = nativeVulkanPresentOnCameraFramesOnly,
                     onError = ::dispatchError,
                 )
             } else {

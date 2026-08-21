@@ -15,7 +15,7 @@ layout(push_constant) uniform TemporalState {
     ivec4 parameters;
 } state;
 
-const ivec2 GRID_SIZE = ivec2(8, 6);
+const ivec2 GRID_SIZE = ivec2(12, 9);
 const int POINT_COUNT = GRID_SIZE.x * GRID_SIZE.y;
 
 vec2 pointAt(int index) {
@@ -96,6 +96,9 @@ void main() {
     float squaredResidual = 0.0;
     float confidenceSum = 0.0;
     int inliers = 0;
+    uint occupiedQuadrants = 0u;
+    vec2 minimumInlier = vec2(1.0);
+    vec2 maximumInlier = vec2(0.0);
     for (int index = 0; index < POINT_COUNT; ++index) {
         vec4 flow = inputFlow.vectors[index];
         vec2 source = pointAt(index);
@@ -105,24 +108,42 @@ void main() {
             fitted.y * source.x + fitted.x * source.y + fitted.w
         );
         float residual = length(predicted - target);
-        if (baseWeight(flow) > 0.0 && residual <= 0.014) {
+        if (baseWeight(flow) > 0.0 && residual <= 0.012) {
             squaredResidual += residual * residual;
             confidenceSum += flow.z;
             inliers++;
+            minimumInlier = min(minimumInlier, source);
+            maximumInlier = max(maximumInlier, source);
+            vec2 roiCenter = (state.roi.xy + state.roi.zw) * 0.5;
+            uint quadrant = (source.x >= roiCenter.x ? 1u : 0u) |
+                (source.y >= roiCenter.y ? 2u : 0u);
+            occupiedQuadrants |= 1u << quadrant;
         }
     }
     float rms = inliers > 0 ? sqrt(squaredResidual / float(inliers)) : 1.0;
+    int quadrantCount = bitCount(occupiedQuadrants);
+    vec2 roiExtent = max(state.roi.zw - state.roi.xy, vec2(1e-5));
+    vec2 relativeInlierSpan = (maximumInlier - minimumInlier) / roiExtent;
+    // Textureless skin no longer lowers confidence merely by existing in the ROI. Reliability is
+    // instead proven by strong coherent features distributed across the face.
+    float countCoverage = clamp(float(inliers) / 28.0, 0.0, 1.0);
+    float spatialCoverage = clamp(float(quadrantCount) / 4.0, 0.0, 1.0) *
+        smoothstep(0.35, 0.55, relativeInlierSpan.x) *
+        smoothstep(0.30, 0.50, relativeInlierSpan.y);
     float confidence = inliers > 0
-        ? (confidenceSum / float(inliers)) * sqrt(float(inliers) / float(POINT_COUNT))
+        ? (confidenceSum / float(inliers)) * sqrt(countCoverage) * spatialCoverage
         : 0.0;
     float scale = length(fitted.xy);
     float rotation = abs(atan(fitted.y, fitted.x));
     float translation = length(fitted.zw);
-    // Confidence already includes sqrt(inlier coverage), so requiring 0.52
-    // effectively rejected otherwise coherent fits with 25-35% textured ROI
-    // coverage. Keep the geometric bounds strict and admit those sparse fits.
-    bool valid = inliers >= 12 && confidence >= 0.36 && rms <= 0.014 &&
-        scale >= 0.975 && scale <= 1.025 && rotation <= 0.05 && translation <= 0.045;
+    // These are per-camera-frame bounds, not smoothing limits. At 30 Hz a deliberate phone
+    // jerk can legitimately exceed the old 4.5% translation / 2.9 degree limits. Robust
+    // photometric, residual and spatial gates above still have to agree before a wider motion
+    // is accepted.
+    bool valid = inliers >= 16 && quadrantCount >= 3 &&
+        relativeInlierSpan.x >= 0.35 && relativeInlierSpan.y >= 0.30 &&
+        confidence >= 0.42 && rms <= 0.012 &&
+        scale >= 0.94 && scale <= 1.06 && rotation <= 0.10 && translation <= 0.10;
     outputFit.values[0] = fitted;
     outputFit.values[1] = vec4(confidence, rms, float(inliers), valid ? 1.0 : 0.0);
 }

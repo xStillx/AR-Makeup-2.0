@@ -8,8 +8,8 @@
 
 ## Базовое решение
 
-- Текущий Android/MediaPipe/Filament стек не требует покупки отдельной коммерческой лицензии или выплаты royalty.
-- Основные runtime-компоненты и текущая face-landmark model используют разрешительную Apache License 2.0. Она допускает коммерческое закрытое приложение, но требует сохранить применимые license/copyright/attribution/NOTICE материалы.
+- Текущий Android/MediaPipe/Filament стек не требует покупки отдельной коммерческой лицензии или выплаты royalty. Добавленный ARCore AAR также не обозначен как `non-commercial`, но его использование регулируется Google APIs Terms of Service и отдельными ARCore Additional Terms; это не Apache 2.0 dependency.
+- Основные runtime-компоненты и текущая face-landmark model используют разрешительную Apache License 2.0. Она допускает коммерческое закрытое приложение, но требует сохранить применимые license/copyright/attribution/NOTICE материалы. Это обобщение не распространяется на бинарный `com.google.ar:core` AAR.
 - Собственный код приложения планируется распространять как закрытый proprietary product. До релиза нужно определить юридического правообладателя и подготовить EULA/Terms of Use.
 - Нельзя считать компонент коммерчески безопасным только потому, что его исходный код открыт, модель обучена самостоятельно или файл доступен для скачивания.
 
@@ -53,6 +53,14 @@
    - Vulkan driver используется как системный компонент устройства и не распространяется внутри APK.
    - Заголовки и build tools приходят из Android NDK; их точные third-party notices должны войти в release audit, если соответствующий код/материалы распространяются в итоговом artifact.
    - Использование API само по себе не требует отдельной коммерческой runtime-лицензии.
+
+9. **Google ARCore SDK / Google Play Services for AR 1.54.0**
+   - Maven dependency: `com.google.ar:core:1.54.0`.
+   - Официальный `LICENSE` репозитория отдельно указывает, что бинарный AAR, получаемый через Gradle, регулируется ARCore Additional Terms of Service. Apache License 2.0 относится к исходным файлам/образцам репозитория, где это указано, и не должна приписываться самому AAR.
+   - Engineering review не обнаружил ограничения `non-commercial`, однако использование требует принятия Google APIs Terms of Service и актуальных ARCore Additional Terms; перед коммерческим релизом обязательна юридическая проверка этих условий в целевых юрисдикциях.
+   - Terms требуют, чтобы Terms приложения уведомляли пользователя: функциональность ARCore предоставляется Google и регулируется актуальными Google Terms of Service и Google Privacy Policy. Это уведомление, Privacy Policy и Google Play Data Safety декларация должны быть подготовлены до release.
+   - Runtime требует совместимое ARCore-certified устройство и Google Play Services for AR. Нужны документированная проверка поддержки и product fallback/unsupported-device flow.
+   - Текущий proof использует только локальные Augmented Faces; Cloud Anchors, Geospatial API, API key и сетевые ARCore cloud-функции не подключены. Это утверждение нужно повторно проверить по exact release artifact и runtime traffic.
 
 ### Build/test-only компоненты
 
@@ -123,6 +131,8 @@ Apache 2.0 не предоставляет права использовать �
 - [x] Source и SHA-256 текущего `face_landmarker.task` зафиксированы.
 - [ ] Release-аудит всех ML model cards/NOTICE повторён на конкретных shipped versions.
 - [ ] Privacy Policy, camera disclosure/consent и корректная Google Play Data Safety декларация.
+- [ ] Terms приложения содержат требуемое ARCore-уведомление о Google Terms of Service и Google Privacy Policy; актуальные ARCore Additional Terms прошли юридическую проверку.
+- [ ] Поддержка Google Play Services for AR, unsupported-device UX и fallback backend проверены на release device matrix.
 - [ ] Проверено фактическое MediaPipe/third-party telemetry поведение release APK.
 - [ ] Права на все продуктовые изображения, шрифты, иконки, текстуры и бренды подтверждены.
 - [ ] Финальный юридический review выполнен перед публичным коммерческим запуском.
@@ -140,7 +150,11 @@ Apache 2.0 не предоставляет права использовать �
 - JUnit 4 EPL 1.0: https://github.com/junit-team/junit4/blob/main/LICENSE-junit.txt
 - Android SDK License Agreement: https://developer.android.com/studio/terms
 - Google Play Data Safety guidance: https://developer.android.com/privacy-and-security/declare-data-use
+- ARCore Additional Terms of Service: https://developers.google.com/ar/develop/terms
+- ARCore Android SDK repository: https://github.com/google-ar/arcore-android-sdk
+- ARCore Android SDK LICENSE / AAR terms boundary: https://github.com/google-ar/arcore-android-sdk/blob/main/LICENSE
 
 ## История изменений
 
 - 2026-08-17 — создан единый коммерческий лицензионный реестр; зафиксирован текущий Apache 2.0 runtime/model baseline, test-only EPL dependency, future ML/data/asset gates и обязательный release package.
+- 2026-08-21 — добавлен `com.google.ar:core:1.54.0`; зафиксированы отдельные ARCore Additional Terms, обязательное user notice/privacy review, device-support/fallback gate и отличие бинарного AAR от Apache-licensed source samples.
