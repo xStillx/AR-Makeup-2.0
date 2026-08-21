@@ -108,6 +108,11 @@ desired→actual `29.10/46.04 ms`, ready→actual `25.13/42.07 ms`, interval
 retained latest camera image и независимый native 60-Hz present; expected interval около `16.7 ms`
 при `cameraDropped=0`.
 
+Candidate `2fb7cd7` removes the 30-Hz coupling with a persistent device-local camera texture. Native
+diagnostic must show `retainedPresents` growing at roughly twice `cameraCopied`, `retainedReused`
+near half of presents, and the Kotlin `actualIntervalP50Ms/actualIntervalP95Ms` near `16.7 ms`.
+These are acceptance targets, not measured results: the exact APK has not yet run on SM-G990B.
+
 ## FF1 Filament presentation-hints negative control
 
 `.arv6` v10 добавляет `filamentPresentationHintsEnabled`. Этот debug-only negative control

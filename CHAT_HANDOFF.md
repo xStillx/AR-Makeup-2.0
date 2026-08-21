@@ -13,10 +13,10 @@ Native Android-приложение виртуальной примерки ма
 ## Репозиторий и состояние
 
 - Путь: `C:\Users\User\AndroidStudioProjects\ARMakeup`.
-- Ветка: `master`; remote `origin/master` — `c1566d7`; актуальный native-visible FF1 checkpoint — `9bc3efb`. Точки отката: `cc82370` / `tracking-v6.2-stable-2026-08-17`, `d4636ac` / `tracking-v6.2-fast-motion-2026-08-17`, `ab8796a` / `material-temporal-v1-candidate-2026-08-17`, `dd095f7` / `tracking-v6.3-gyro-experimental-2026-08-17`. FF1/FF2 commits: `0554924`, `d083af2`, `19a2280`, `3419063`, `7bd498f`, candidate `1e02424`, device queue/hints validation `6be330f`, native visible proof `9bc3efb`. Оба Filament scheduling candidate отклонены; default остаётся Filament, а native proof включается только debug-extra.
+- Ветка: `master`; актуальный локальный FF1 candidate — `2fb7cd7`, его device-проверенный rollback — `9bc3efb`. Точки отката: `cc82370` / `tracking-v6.2-stable-2026-08-17`, `d4636ac` / `tracking-v6.2-fast-motion-2026-08-17`, `ab8796a` / `material-temporal-v1-candidate-2026-08-17`, `dd095f7` / `tracking-v6.3-gyro-experimental-2026-08-17`. FF1/FF2 commits: `0554924`, `d083af2`, `19a2280`, `3419063`, `7bd498f`, `1e02424`, `6be330f`, native visible proof `9bc3efb`, retained-texture candidate `2fb7cd7`. Default остаётся Filament, native включается только debug-extra.
 - Основные коммиты: `cc82370 [V6.2]`, `cd1a560 [UpdateContext]`, `8d48b46 [V6]`, `4f8039b [V5]`, `3d3572e [V4]`, `395d3f3 [V3]`.
 - Kotlin, XML/View UI, один модуль `:app`; `minSdk 24`, `targetSdk/compileSdk 37`.
-- Последняя полная проверка: 133 unit-теста, 0 failures/errors, lint и debug APK успешно; native код собирается для `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`.
+- Последняя локальная проверка: 134 unit-теста, 0 failures/errors, lint и debug APK успешно; native код/SPIR-V собираются для `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`. Exact APK `2fb7cd7` ещё не проверен на устройстве: `adb` не видел подключённых устройств.
 
 ## Текущий pipeline
 
@@ -95,8 +95,10 @@ adb shell am start -n com.example.armakeup/.MainActivity `
 
 Device proof: visible swapchain `1080×2340`, 5 images, camera `1440×1080`, orientation/mirror/crop/lip alignment правильные; более 1020 camera frames, `cameraDropped=0`, lifecycle Home/resume/Back без crash. Direct native sensor→actual rolling p50/p95 около `127.1/135.2 ms`. SurfaceFlinger 20 s: native `583` frames, desired→actual `30.78/31.37 ms`, interval `33.38/33.60 ms`, `578/582 >25 ms`; same-APK Filament `1186` frames, desired→actual `29.10/46.04 ms`, interval `16.689/16.788 ms`, `1/1185 >25 ms`. Native actual feedback и p95 стабильны, но present выполняется только при новом 30-FPS camera buffer, поэтому production cutover отклонён. Default остаётся Filament.
 
-1. Следующий FF1 slice: native runtime удерживает ровно один последний camera image и независимо представляет camera + актуальную predicted geometry на каждом 60-Hz vsync; latest-only acquisition, foreign ownership и fences не ослаблять.
-2. Затем controlled telemetry-on Filament/Vulkan A/B по direct sensor→actual, interval/jank, camera drops, CPU/GPU/thermal и visual head/phone motion. Не расширять predictor и не переносить full-face/material path одновременно.
+Commit `2fb7cd7` добавляет следующий candidate: latest camera AHB один раз семплируется GPU→GPU в постоянную device-local RGBA texture и сразу возвращается CameraX по export sync-fd; swapchain pass переиспользует texture, но обновляет predicted lip geometry на каждом vsync. Диагностика разделяет `cameraCopied`, `retainedPresents`, `retainedReused`, actual interval и reuse fraction. Локальный gate пройден, device gate отсутствует; не считать candidate 60-Гц или визуально корректным до exact-APK прогона.
+
+1. Подключить SM-G990B, установить exact APK `2fb7cd7` и проверить first frame/orientation/mirror/crop/lip alignment, минимум 1000 camera copies, `cameraDropped=0`, copy:present примерно 1:2, reuse около 0.5 и Home/resume/Back.
+2. Затем controlled telemetry-on Filament/Vulkan A/B по direct sensor→actual, interval/jank около 16.7 ms, camera drops, CPU/GPU/thermal и visual head/phone motion. При regression откатиться к `9bc3efb`; predictor/full-face/material path одновременно не менять.
 3. После 60-Hz gate вернуться к iOS-наблюдению «ARKit + точка на губах»: запросить точный код и проверить, наследует ли точка `ARFaceAnchor`/face geometry. Android-вариант — local 3D lip anchor по нескольким landmarks; shadow A/B MediaPipe face matrix против ARCore Augmented Faces pose/mesh. Одиночная 2D-точка не считается достаточной; ARCore требует предварительного license review.
 4. Записать face-visible yaw/pitch, stop/dropout/weak-light/thermal; после FF1/FF2 перейти к FF3 model-independent `FaceObservation` / `FullFaceRenderState`.
 5. V6.3 strong phone-motion visual acceptance выполнить отдельно; matrix/ARCore не подключать в production renderer до численного и visual acceptance.

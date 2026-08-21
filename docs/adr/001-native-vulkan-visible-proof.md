@@ -2,6 +2,13 @@
 
 Status: accepted for a debug-only vertical slice on 2026-08-18.
 
+Amendment 2026-08-21: the independent-vsync candidate does not retain ownership of a camera AHB.
+Each latest AHB is sampled once into one device-local RGBA image, then returned to CameraX through
+the existing exported sync-fd. Display passes retain and reuse the GPU-owned RGBA image while lip
+geometry can change every vsync. This adds one fullscreen GPU copy per camera frame, but keeps the
+camera queue latest-only and avoids ambiguous repeated FOREIGN queue-family ownership transfers.
+Commit `2fb7cd7` is locally built but not device-accepted; `9bc3efb` remains the verified rollback.
+
 ## Context
 
 The current production-visible path imports each latest camera `AHardwareBuffer` into the native
