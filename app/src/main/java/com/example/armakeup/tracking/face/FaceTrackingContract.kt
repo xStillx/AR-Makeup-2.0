@@ -335,10 +335,12 @@ class FaceRegionGeometry private constructor(
 
 data class FullFaceAttachmentQuality(
     val localDeformationApplied: Boolean,
+    val localDeformationWeight: Float? = null,
     val localObservationAgeNs: Long? = null,
     val affineFitResidualNormalized: Float? = null,
 ) {
     init {
+        require(localDeformationWeight == null || localDeformationWeight in 0f..1f)
         require(localObservationAgeNs == null || localObservationAgeNs >= 0L)
         require(
             affineFitResidualNormalized == null ||

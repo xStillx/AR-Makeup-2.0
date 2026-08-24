@@ -18,6 +18,10 @@ class HybridFullFaceStateComposer(
     private val upperInnerLipIndex: Int = 13,
     private val lowerInnerLipIndex: Int = 14,
     private val maximumGlobalAffineResidual: Float = 0.08f,
+    private val fullLocalAffineResidual: Float = maximumGlobalAffineResidual,
+    private val maximumLocalObservationAgeNs: Long = Long.MAX_VALUE,
+    private val perspectivePolicy: FaceLocalGeometryPerspectivePolicy =
+        FaceLocalGeometryPerspectivePolicy.UNRESTRICTED,
 ) {
     private val stableAnchorIndices = stableAnchorIndices.copyOf()
     private val outerLipIndices = outerLipIndices.copyOf()
@@ -50,6 +54,9 @@ class HybridFullFaceStateComposer(
         require(upperInnerLipIndex >= 0)
         require(lowerInnerLipIndex >= 0)
         require(maximumGlobalAffineResidual.isFinite() && maximumGlobalAffineResidual >= 0f)
+        require(fullLocalAffineResidual.isFinite() &&
+            fullLocalAffineResidual in 0f..maximumGlobalAffineResidual)
+        require(maximumLocalObservationAgeNs >= 0L)
     }
 
     fun compose(
@@ -95,7 +102,9 @@ class HybridFullFaceStateComposer(
         )
 
         val local = localObservation?.takeIf { observation ->
+            val ageNs = globalObservation.sensorTimestampNs - observation.sensorTimestampNs
             observation.quality.tracking &&
+                ageNs in 0L..maximumLocalObservationAgeNs &&
                 observation.role != FaceObservationRole.GLOBAL_POSE &&
                 observation.imageLandmarks != null &&
                 observation.imageLandmarks.coordinateSpace ==
@@ -110,25 +119,40 @@ class HybridFullFaceStateComposer(
         val fitAccepted = globalAffine != null &&
             globalAffine.normalizedRmsResidual <= maximumGlobalAffineResidual
         val regions = mutableMapOf<FaceRegion, FaceRegionGeometry>()
-        val mouthUsesLocal = fitAccepted && localFeatureTracks(local, local?.features?.mouth)
+        val residualLocalWeight = globalAffine?.let { affine ->
+            localWeightForResidual(affine.normalizedRmsResidual)
+        } ?: 0f
+        val localGeometryWeight =
+            perspectivePolicy.localWeight(globalObservation) * residualLocalWeight
+        val mouthLocalWeight = if (
+            fitAccepted && localFeatureTracks(local, local?.features?.mouth)
+        ) {
+            localGeometryWeight
+        } else {
+            0f
+        }
+        val mouthUsesLocal = mouthLocalWeight > MINIMUM_LOCAL_GEOMETRY_WEIGHT
         val leftEyeUsesLocal = fitAccepted &&
             leftEyeIndices.isNotEmpty() &&
             leftEyeAperture != null &&
-            localFeatureTracks(local, local?.features?.leftEye)
+            localFeatureTracks(local, local?.features?.leftEye) &&
+            localGeometryWeight > MINIMUM_LOCAL_GEOMETRY_WEIGHT
         val rightEyeUsesLocal = fitAccepted &&
             rightEyeIndices.isNotEmpty() &&
             rightEyeAperture != null &&
-            localFeatureTracks(local, local?.features?.rightEye)
+            localFeatureTracks(local, local?.features?.rightEye) &&
+            localGeometryWeight > MINIMUM_LOCAL_GEOMETRY_WEIGHT
 
         val acceptedGlobalAffine = globalAffine?.takeIf { fitAccepted }
         val acceptedLocalLandmarks = localLandmarks?.takeIf { fitAccepted }
         val mouthTransform = if (mouthUsesLocal) {
-            checkNotNull(acceptedGlobalAffine).reanchoredAtMidpoint(
-                source = checkNotNull(acceptedLocalLandmarks),
-                target = display,
-                firstIndex = upperInnerLipIndex,
-                secondIndex = lowerInnerLipIndex,
-            )
+            // The stable-anchor affine already moves the stale MediaPipe observation into the
+            // current ARCore face projection. Re-pinning its mouth midpoint to the ARCore mesh
+            // removes a real expression component: when both lips are pulled sideways, their
+            // midpoint moves relative to the eyes/nose/cheeks even though the head pose does not.
+            // Keep that face-local translation along with the contour deformation. Global head
+            // and phone motion still comes exclusively from the current ARCore observation.
+            checkNotNull(acceptedGlobalAffine)
         } else {
             null
         }
@@ -138,12 +162,16 @@ class HybridFullFaceStateComposer(
                 outerLipIndices,
                 checkNotNull(acceptedLocalLandmarks),
                 mouthTransform,
+                display,
+                mouthLocalWeight,
             )
             regions[FaceRegion.LIPS_INNER] = mapRegion(
                 FaceRegion.LIPS_INNER,
                 innerLipIndices,
                 checkNotNull(acceptedLocalLandmarks),
                 mouthTransform,
+                display,
+                mouthLocalWeight,
             )
         } else {
             regions[FaceRegion.LIPS_OUTER] = copyGlobalRegion(
@@ -166,6 +194,7 @@ class HybridFullFaceStateComposer(
             local = acceptedLocalLandmarks,
             display = display,
             globalAffine = acceptedGlobalAffine,
+            localWeight = localGeometryWeight,
             output = regions,
         )
         val rightEyeTransform = mapOptionalFeatureRegion(
@@ -176,6 +205,7 @@ class HybridFullFaceStateComposer(
             local = acceptedLocalLandmarks,
             display = display,
             globalAffine = acceptedGlobalAffine,
+            localWeight = localGeometryWeight,
             output = regions,
         )
         val localAgeNs = local?.let {
@@ -238,6 +268,9 @@ class HybridFullFaceStateComposer(
             regions = regions,
             attachmentQuality = FullFaceAttachmentQuality(
                 localDeformationApplied = mouthUsesLocal || leftEyeUsesLocal || rightEyeUsesLocal,
+                localDeformationWeight = if (
+                    mouthUsesLocal || leftEyeUsesLocal || rightEyeUsesLocal
+                ) localGeometryWeight else 0f,
                 localObservationAgeNs = localAgeNs,
                 affineFitResidualNormalized = globalAffine?.normalizedRmsResidual,
             ),
@@ -258,6 +291,7 @@ class HybridFullFaceStateComposer(
         local: FaceLandmarkSet?,
         display: FaceLandmarkSet,
         globalAffine: FaceLocalAffineTransform?,
+        localWeight: Float,
         output: MutableMap<FaceRegion, FaceRegionGeometry>,
     ): FaceLocalAffineTransform? {
         if (indices.isEmpty()) return null
@@ -271,7 +305,14 @@ class HybridFullFaceStateComposer(
             firstIndex = aperture.firstCornerIndex,
             secondIndex = aperture.secondCornerIndex,
         )
-        output[region] = mapRegion(region, indices, local, transform)
+        output[region] = mapRegion(
+            region = region,
+            indices = indices,
+            source = local,
+            transform = transform,
+            globalDisplay = display,
+            localWeight = localWeight,
+        )
         return transform
     }
 
@@ -351,6 +392,15 @@ class HybridFullFaceStateComposer(
         return kotlin.math.sqrt(dx * dx + dy * dy)
     }
 
+    private fun localWeightForResidual(residual: Float): Float {
+        if (!residual.isFinite() || residual > maximumGlobalAffineResidual) return 0f
+        if (maximumGlobalAffineResidual <= fullLocalAffineResidual) return 1f
+        val normalized = ((residual - fullLocalAffineResidual) /
+            (maximumGlobalAffineResidual - fullLocalAffineResidual)).coerceIn(0f, 1f)
+        val smooth = normalized * normalized * (3f - 2f * normalized)
+        return 1f - smooth
+    }
+
     private fun estimateAffine(
         source: FaceLandmarkSet,
         target: FaceLandmarkSet,
@@ -387,14 +437,20 @@ class HybridFullFaceStateComposer(
         indices: IntArray,
         source: FaceLandmarkSet,
         transform: FaceLocalAffineTransform,
+        globalDisplay: FaceLandmarkSet,
+        localWeight: Float,
     ): FaceRegionGeometry {
+        val weight = localWeight.coerceIn(0f, 1f)
         val mapped = FloatArray(indices.size * XY_COMPONENT_COUNT)
         indices.forEachIndexed { pointIndex, landmarkIndex ->
             val output = pointIndex * XY_COMPONENT_COUNT
             val sourceX = source.x(landmarkIndex)
             val sourceY = source.y(landmarkIndex)
-            mapped[output] = transform.mapX(sourceX, sourceY)
-            mapped[output + 1] = transform.mapY(sourceX, sourceY)
+            val localX = transform.mapX(sourceX, sourceY)
+            val localY = transform.mapY(sourceX, sourceY)
+            mapped[output] = globalDisplay.x(landmarkIndex) * (1f - weight) + localX * weight
+            mapped[output + 1] =
+                globalDisplay.y(landmarkIndex) * (1f - weight) + localY * weight
         }
         return FaceRegionGeometry.takeOwnership(region, mapped)
     }
@@ -407,6 +463,7 @@ class HybridFullFaceStateComposer(
     private companion object {
         const val MINIMUM_AFFINE_POINT_COUNT = 3
         const val MINIMUM_APERTURE_WIDTH = 1e-6f
+        const val MINIMUM_LOCAL_GEOMETRY_WEIGHT = 1e-3f
         const val XY_COMPONENT_COUNT = 2
     }
 }

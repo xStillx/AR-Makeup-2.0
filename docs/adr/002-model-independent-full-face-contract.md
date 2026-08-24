@@ -1,7 +1,7 @@
 # ADR 002: Model-independent full-face tracking contract
 
-Status: accepted for the FF3 shadow integration and device visual gate on 2026-08-24. Production
-Vulkan and material cutover remains pending.
+Status: accepted for the FF3 contract and ARCore→Vulkan debug visual gate on 2026-08-24.
+Production canonical depth/occlusion and material cutover remains pending.
 
 ## Context
 
@@ -45,15 +45,19 @@ fraction remain nullable: neither the current ARCore adapter nor the bundled Fac
 result exposes a calibrated per-feature value, so the domain layer must not manufacture one.
 
 The composer keeps current ARCore display landmarks authoritative for global attachment. It fits
-the same eight shared eye/nose/cheek anchors to obtain the rigid affine linear mapping, then changes
-only its translation so the MediaPipe mouth centre is pinned to the current ARCore centre from
-vertices `13/14`. It intentionally does not inherit scale from deforming ARCore mouth vertices:
-device A/B showed that this widened the contour for an open mouth and large yaw. An absent or
-rejected local result publishes current ARCore regions as a fallback. Eyes use the same accepted
-global affine linear mapping but are reanchored independently at their current ARCore corner
-midpoints, so local blink shape does not inherit a stale global translation. A feature explicitly
-reported as untracked falls back independently instead of invalidating other local features. The
-global pose is never delayed to the MediaPipe timestamp.
+the same eight shared eye/nose/cheek anchors to obtain the affine mapping from a MediaPipe
+observation into the current ARCore projection. It intentionally does not inherit scale from
+deforming ARCore mouth vertices: device A/B showed that this widened the contour for an open mouth
+and large yaw. The first accepted slice additionally pinned the MediaPipe mouth centre to current
+ARCore vertices `13/14`; a later device regression showed that this erased real face-local mouth
+translation when the user pulled both lips sideways. The accepted Vulkan checkpoint therefore
+uses the stable-anchor affine directly for lips, preserving local translation and contour shape
+while ARCore remains the sole source of global head/phone motion. An absent or rejected local
+result publishes current ARCore regions as a fallback. Eyes still use the same accepted affine
+linear mapping but are reanchored independently at their current ARCore corner midpoints, so local
+blink shape does not inherit a stale global translation. A feature explicitly reported as
+untracked falls back independently instead of invalidating other local features. The global pose
+is never delayed to the MediaPipe timestamp.
 
 ARCore remains the only camera owner. This ADR does not authorize a second CameraX session, a
 production OpenGL cutover, or direct ARCore/MediaPipe types in Vulkan or makeup material APIs.
@@ -89,8 +93,9 @@ explicit, allows fake/replay/fallback backends, and gives Vulkan one renderer-fa
   calibrated visibility/occlusion and semantic probabilities remain later FF3/FF5 work.
 - Current per-feature confidence and visible fraction are deliberately `null`. Consumers must use
   geometry provenance/timestamp and aperture without treating unknown quality as zero or one.
-- The accepted anchored affine mapping is still a diagnostic 2D bridge, not the final 3D
-  deformation model. Large-pose correctness must be revalidated after canonical 3D cutover.
+- The accepted affine mapping is still a diagnostic 2D bridge, not the final 3D deformation model.
+  At extreme yaw/pitch the lip pass has no face depth/occluder, so large-pose correctness must be
+  revalidated after canonical 3D cutover.
 
 ## Consequences
 
@@ -99,8 +104,8 @@ explicit, allows fake/replay/fallback backends, and gives Vulkan one renderer-fa
 - Every future backend must declare topology, coordinate space, sensor timestamp, role and quality.
 - Product renderers must consume `FullFaceRenderState`; importing SDK result classes across that
   boundary is an architecture regression.
-- The accepted OpenGL proof remains the rollback while the same state is moved into the production
-  Vulkan timeline.
+- The accepted OpenGL proof remains a rollback; the device-accepted Vulkan debug path is the 2D
+  baseline for the next canonical depth/occlusion A/B.
 
 ## Action items
 
@@ -111,6 +116,8 @@ explicit, allows fake/replay/fallback backends, and gives Vulkan one renderer-fa
    `88453CDDD81DD63A265B9F668BA8634858923787536358E1F7BC7ADE2F88F229`.
 4. Add explicit mouth/left-eye/right-eye state and visibility fields before product full-face masks.
    Implemented in shadow mode; device image remains unchanged because eye regions are not drawn.
-5. Feed `FullFaceRenderState` into the production Vulkan camera/render timeline.
-6. Add ARCore unsupported-device/fallback backend and controlled device matrix before default
+5. Feed `FullFaceRenderState` into the Vulkan camera/render timeline. Completed for the debug path;
+   lifecycle, sharp motion, large pose and local-mouth-expression gates passed on SM-G990B.
+6. Add canonical 468-point depth/occlusion and compare it against the accepted 2D Vulkan baseline.
+7. Add ARCore unsupported-device/fallback backend and controlled device matrix before default
    cutover.

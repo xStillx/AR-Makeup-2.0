@@ -98,6 +98,58 @@ class HybridFullFaceStateComposerTest {
     }
 
     @Test
+    fun `preserves mouth translation relative to stable face anchors`() {
+        val mouthTopology = FaceTopologyDescriptor("mouth-expression-translation", 1, 10)
+        val mouthComposer = HybridFullFaceStateComposer(
+            stableAnchorIndices = intArrayOf(0, 1, 2, 3),
+            outerLipIndices = intArrayOf(8),
+            innerLipIndices = intArrayOf(9),
+            upperInnerLipIndex = 8,
+            lowerInnerLipIndex = 9,
+            maximumGlobalAffineResidual = 0.02f,
+        )
+        val localCoordinates = floatArrayOf(
+            0.1f, 0.1f, 0f,
+            0.9f, 0.1f, 0f,
+            0.1f, 0.9f, 0f,
+            0.9f, 0.9f, 0f,
+            0.35f, 0.45f, 0f,
+            0.65f, 0.45f, 0f,
+            0.35f, 0.55f, 0f,
+            0.65f, 0.55f, 0f,
+            0.62f, 0.47f, 0f,
+            0.62f, 0.53f, 0f,
+        )
+        val currentGlobalCoordinates = mapCoordinates(mouthTopology, localCoordinates).also {
+            // ARCore's global mesh keeps the semantic mouth anchor near the neutral face center.
+            it[8 * 3] = 0.45f
+            it[9 * 3] = 0.45f
+        }
+        val global = observationForTopology(
+            topology = mouthTopology,
+            displayCoordinates = currentGlobalCoordinates,
+            sensorTimestampNs = 20L,
+            role = FaceObservationRole.GLOBAL_POSE,
+        )
+        val local = observationForTopology(
+            topology = mouthTopology,
+            displayCoordinates = localCoordinates,
+            sensorTimestampNs = 10L,
+            role = FaceObservationRole.LOCAL_DEFORMATION,
+        )
+
+        val state = mouthComposer.compose(global, local, renderTimestampNs = 21L)
+
+        assertNotNull(state)
+        val expectedExpressionX = 0.7f * localCoordinates[8 * 3] + 0.1f
+        val outer = state!!.region(FaceRegion.LIPS_OUTER)!!
+        val inner = state.region(FaceRegion.LIPS_INNER)!!
+        assertEquals(expectedExpressionX, outer.x(0), 1e-5f)
+        assertEquals(expectedExpressionX, inner.x(0), 1e-5f)
+        assertTrue(outer.x(0) > currentGlobalCoordinates[8 * 3])
+    }
+
+    @Test
     fun `backend implementations can be replaced without changing composer`() {
         val localCoordinates = sourceCoordinates()
         val global = globalObservation(mapCoordinates(localCoordinates), sensorTimestampNs = 10L)
@@ -152,6 +204,64 @@ class HybridFullFaceStateComposerTest {
             state.region(FaceRegion.LIPS_OUTER)!!.x(0),
             1e-5f,
         )
+    }
+
+    @Test
+    fun `fades local deformation as affine residual approaches rejection`() {
+        val residualAwareComposer = HybridFullFaceStateComposer(
+            stableAnchorIndices = intArrayOf(0, 1, 2, 3),
+            outerLipIndices = intArrayOf(4),
+            innerLipIndices = intArrayOf(5),
+            upperInnerLipIndex = 4,
+            lowerInnerLipIndex = 5,
+            fullLocalAffineResidual = 0.002f,
+            maximumGlobalAffineResidual = 0.02f,
+        )
+        val localCoordinates = sourceCoordinates()
+        val perturbedGlobal = mapCoordinates(localCoordinates).also { coordinates ->
+            coordinates[3 * 3] += 0.01f
+        }
+
+        val state = residualAwareComposer.compose(
+            globalObservation(perturbedGlobal, sensorTimestampNs = 20L),
+            localObservation(localCoordinates, sensorTimestampNs = 10L),
+            renderTimestampNs = 21L,
+        )
+
+        assertNotNull(state)
+        val residual = state!!.attachmentQuality.affineFitResidualNormalized!!
+        val weight = state.attachmentQuality.localDeformationWeight!!
+        assertTrue(residual in 0.002f..0.02f)
+        assertTrue(weight in 0f..1f)
+        assertTrue(weight < 1f)
+        assertTrue(state.attachmentQuality.localDeformationApplied)
+    }
+
+    @Test
+    fun `rejects stale local deformation and keeps current global lips`() {
+        val ageBoundedComposer = HybridFullFaceStateComposer(
+            stableAnchorIndices = intArrayOf(0, 1, 2, 3),
+            outerLipIndices = intArrayOf(4),
+            innerLipIndices = intArrayOf(5),
+            upperInnerLipIndex = 4,
+            lowerInnerLipIndex = 5,
+            maximumGlobalAffineResidual = 0.02f,
+            maximumLocalObservationAgeNs = 100L,
+        )
+        val localCoordinates = sourceCoordinates()
+        val globalCoordinates = mapCoordinates(localCoordinates)
+
+        val state = ageBoundedComposer.compose(
+            globalObservation(globalCoordinates, sensorTimestampNs = 500L),
+            localObservation(localCoordinates, sensorTimestampNs = 399L),
+            renderTimestampNs = 501L,
+        )
+
+        assertNotNull(state)
+        assertFalse(state!!.attachmentQuality.localDeformationApplied)
+        assertEquals(0f, state.attachmentQuality.localDeformationWeight!!, 0f)
+        assertEquals(globalCoordinates[4 * 3], state.region(FaceRegion.LIPS_OUTER)!!.x(0), 1e-5f)
+        assertNull(state.localObservationTimestampNs)
     }
 
     @Test

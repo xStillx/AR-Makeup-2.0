@@ -194,6 +194,31 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
         )
     }
 
+    /**
+     * Imports the camera image exposed by the current ARCore frame and copies it into the retained
+     * Vulkan texture. Native code acquires its own AHardwareBuffer reference until the release
+     * fence signals, so the caller may close [hardwareBuffer] as soon as this method returns.
+     */
+    fun updateExternalVisibleCamera(
+        hardwareBuffer: HardwareBuffer,
+        sensorTimestampNs: Long,
+        uvTransform: FloatArray,
+    ): Long {
+        require(sensorTimestampNs > 0L)
+        require(uvTransform.size == VISIBLE_TRANSFORM_ELEMENT_COUNT)
+        val handle = nativeHandle
+        return if (handle == 0L) {
+            0L
+        } else {
+            nativeUpdateExternalVisibleCamera(
+                handle,
+                hardwareBuffer,
+                sensorTimestampNs,
+                uvTransform,
+            )
+        }
+    }
+
     /** Returns -1 on failure, 0 without display-timing feedback, or the submitted present id. */
     fun presentVisibleFrame(): Long {
         val handle = nativeHandle
@@ -380,6 +405,12 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
         trackingRoi: FloatArray,
         metadata: LongArray,
         temporalValues: FloatArray,
+    ): Long
+    private external fun nativeUpdateExternalVisibleCamera(
+        handle: Long,
+        hardwareBuffer: HardwareBuffer,
+        sensorTimestampNs: Long,
+        uvTransform: FloatArray,
     ): Long
     private external fun nativePresentVisibleFrame(handle: Long): Long
     private external fun nativeCloseCamera(handle: Long)

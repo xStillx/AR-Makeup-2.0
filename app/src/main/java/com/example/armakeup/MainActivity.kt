@@ -74,7 +74,14 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
         super.onCreate(savedInstanceState)
         val debuggable = applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
         if (debuggable && intent.getBooleanExtra(EXTRA_ENABLE_ARCORE_FACE_ANCHOR_PROOF, false)) {
-            startActivity(Intent(this, ArCoreFaceAnchorActivity::class.java))
+            startActivity(
+                Intent(this, ArCoreFaceAnchorActivity::class.java).apply {
+                    putExtra(
+                        EXTRA_ENABLE_NATIVE_VULKAN_VISIBLE,
+                        intent.getBooleanExtra(EXTRA_ENABLE_NATIVE_VULKAN_VISIBLE, false),
+                    )
+                },
+            )
             finish()
             return
         }

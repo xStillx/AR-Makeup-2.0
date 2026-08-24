@@ -10,12 +10,15 @@ import android.os.Bundle
 import android.os.Build
 import android.util.Log
 import android.view.Gravity
+import android.view.SurfaceView
+import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import com.example.armakeup.MainActivity
 import com.google.ar.core.ArCoreApk
 import com.google.ar.core.Config
 import com.google.ar.core.Session
@@ -24,15 +27,18 @@ import java.util.EnumSet
 /**
  * Isolated ARCore Augmented Faces proof.
  *
- * This activity intentionally does not start CameraX, MediaPipe, Filament, or the Vulkan visible
- * renderer. ARCore owns the front camera so that its face pose and camera image have one timeline.
- * The production pipeline remains available through [com.example.armakeup.MainActivity].
+ * ARCore is always the sole front-camera owner. The default mode keeps the isolated OpenGL proof;
+ * the explicit native-Vulkan extra switches presentation to a direct ARCore HardwareBuffer import
+ * while preserving the same ARCore + MediaPipe hybrid face-state contract.
  */
 class ArCoreFaceAnchorActivity : AppCompatActivity() {
 
-    private lateinit var surfaceView: GLSurfaceView
+    private lateinit var surfaceView: View
     private lateinit var statusView: TextView
-    private lateinit var renderer: ArCoreFaceAnchorRenderer
+    private var glSurfaceView: GLSurfaceView? = null
+    private var glRenderer: ArCoreFaceAnchorRenderer? = null
+    private var vulkanRenderer: ArCoreVulkanFaceRenderer? = null
+    private var useVulkan = false
 
     private var session: Session? = null
     private var mediaPipeTracker: ArCoreMediaPipeLipTracker? = null
@@ -55,9 +61,24 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
-        surfaceView = GLSurfaceView(this).apply {
-            setEGLContextClientVersion(2)
-            preserveEGLContextOnPause = true
+        val vulkanRequested =
+            intent.getBooleanExtra(MainActivity.EXTRA_ENABLE_NATIVE_VULKAN_VISIBLE, false)
+        useVulkan = vulkanRequested && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+        surfaceView = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && useVulkan) {
+            SurfaceView(this).also { view ->
+                vulkanRenderer = ArCoreVulkanFaceRenderer(
+                    surfaceView = view,
+                    displayRotation = { currentDisplayRotation() },
+                    imageRotationDegrees = { mediaPipeImageRotationDegrees },
+                    onStatus = { status -> runOnUiThread { statusView.text = status } },
+                    onFatalError = { message -> runOnUiThread { showFatal(message) } },
+                )
+            }
+        } else {
+            GLSurfaceView(this).apply {
+                setEGLContextClientVersion(2)
+                preserveEGLContextOnPause = true
+            }.also { view -> glSurfaceView = view }
         }
         statusView = TextView(this).apply {
             setTextColor(Color.WHITE)
@@ -66,14 +87,17 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
             setPadding(28, 24, 28, 24)
             text = "ARCore: initialization"
         }
-        renderer = ArCoreFaceAnchorRenderer(
-            displayRotation = { currentDisplayRotation() },
-            imageRotationDegrees = { mediaPipeImageRotationDegrees },
-            onStatus = { status -> runOnUiThread { statusView.text = status } },
-            onFatalError = { message -> runOnUiThread { showFatal(message) } },
-        )
-        surfaceView.setRenderer(renderer)
-        surfaceView.renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
+        glSurfaceView?.let { view ->
+            glRenderer = ArCoreFaceAnchorRenderer(
+                displayRotation = { currentDisplayRotation() },
+                imageRotationDegrees = { mediaPipeImageRotationDegrees },
+                onStatus = { status -> runOnUiThread { statusView.text = status } },
+                onFatalError = { message -> runOnUiThread { showFatal(message) } },
+            ).also { renderer ->
+                view.setRenderer(renderer)
+                view.renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
+            }
+        }
 
         val root = FrameLayout(this).apply {
             addView(
@@ -107,18 +131,23 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
 
     override fun onPause() {
         resumed = false
-        surfaceView.onPause()
+        vulkanRenderer?.pause()
+        glSurfaceView?.onPause()
         session?.pause()
         super.onPause()
     }
 
     override fun onDestroy() {
-        renderer.bindMediaPipeTracker(null)
+        glRenderer?.bindMediaPipeTracker(null)
+        vulkanRenderer?.bindMediaPipeTracker(null)
         mediaPipeTracker?.close()
         mediaPipeTracker = null
-        renderer.bindSession(null)
+        glRenderer?.bindSession(null)
+        vulkanRenderer?.bindSession(null)
         session?.close()
         session = null
+        vulkanRenderer?.close()
+        vulkanRenderer = null
         super.onDestroy()
     }
 
@@ -153,24 +182,34 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
                     augmentedFaceMode = Config.AugmentedFaceMode.MESH3D
                     lightEstimationMode = Config.LightEstimationMode.DISABLED
                     updateMode = Config.UpdateMode.LATEST_CAMERA_IMAGE
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && useVulkan) {
+                        textureUpdateMode = Config.TextureUpdateMode.EXPOSE_HARDWARE_BUFFER
+                    }
                 }
                 newSession.configure(config)
                 mediaPipeImageRotationDegrees = calculateImageRotationDegrees(newSession)
                 session = newSession
-                renderer.bindSession(newSession)
+                glRenderer?.bindSession(newSession)
+                vulkanRenderer?.bindSession(newSession)
                 ArCoreMediaPipeLipTracker(
                     context = applicationContext,
                     onError = { message -> Log.w(TAG, message) },
                 ).also { tracker ->
                     tracker.initialize()
                     mediaPipeTracker = tracker
-                    renderer.bindMediaPipeTracker(tracker)
+                    glRenderer?.bindMediaPipeTracker(tracker)
+                    vulkanRenderer?.bindMediaPipeTracker(tracker)
                 }
             }
 
             session?.resume()
-            surfaceView.onResume()
-            statusView.text = "ARCore: point the front camera at your face"
+            glSurfaceView?.onResume()
+            vulkanRenderer?.resume()
+            statusView.text = if (useVulkan) {
+                "ARCore + Vulkan: point the front camera at your face"
+            } else {
+                "ARCore: point the front camera at your face"
+            }
         } catch (error: Exception) {
             Log.e(TAG, "Unable to start ARCore face-anchor proof", error)
             showFatal("ARCore initialization failed: ${error.message ?: error.javaClass.simpleName}")

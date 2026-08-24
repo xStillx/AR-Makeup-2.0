@@ -95,6 +95,9 @@ struct MediaDispatch final {
     using GetTimestamp = media_status_t (*)(const AImage*, std::int64_t*);
     using DeleteImage = void (*)(AImage*);
     using DescribeHardwareBuffer = void (*)(const AHardwareBuffer*, AHardwareBuffer_Desc*);
+    using FromJavaHardwareBuffer = AHardwareBuffer* (*)(JNIEnv*, jobject);
+    using AcquireHardwareBuffer = void (*)(AHardwareBuffer*);
+    using ReleaseHardwareBuffer = void (*)(AHardwareBuffer*);
     using ToJavaHardwareBuffer = jobject (*)(JNIEnv*, AHardwareBuffer*);
     using NativeWindowToSurface = jobject (*)(JNIEnv*, ANativeWindow*);
 
@@ -108,6 +111,9 @@ struct MediaDispatch final {
     GetTimestamp getTimestamp = nullptr;
     DeleteImage deleteImage = nullptr;
     DescribeHardwareBuffer describeHardwareBuffer = nullptr;
+    FromJavaHardwareBuffer fromJavaHardwareBuffer = nullptr;
+    AcquireHardwareBuffer acquireHardwareBuffer = nullptr;
+    ReleaseHardwareBuffer releaseHardwareBuffer = nullptr;
     ToJavaHardwareBuffer toJavaHardwareBuffer = nullptr;
     NativeWindowToSurface nativeWindowToSurface = nullptr;
 
@@ -138,6 +144,18 @@ struct MediaDispatch final {
             androidLibrary,
             "AHardwareBuffer_describe"
         );
+        fromJavaHardwareBuffer = loadSymbol<FromJavaHardwareBuffer>(
+            androidLibrary,
+            "AHardwareBuffer_fromHardwareBuffer"
+        );
+        acquireHardwareBuffer = loadSymbol<AcquireHardwareBuffer>(
+            androidLibrary,
+            "AHardwareBuffer_acquire"
+        );
+        releaseHardwareBuffer = loadSymbol<ReleaseHardwareBuffer>(
+            androidLibrary,
+            "AHardwareBuffer_release"
+        );
         toJavaHardwareBuffer = loadSymbol<ToJavaHardwareBuffer>(
             androidLibrary,
             "AHardwareBuffer_toHardwareBuffer"
@@ -162,6 +180,9 @@ struct MediaDispatch final {
             getTimestamp != nullptr &&
             deleteImage != nullptr &&
             describeHardwareBuffer != nullptr &&
+            fromJavaHardwareBuffer != nullptr &&
+            acquireHardwareBuffer != nullptr &&
+            releaseHardwareBuffer != nullptr &&
             toJavaHardwareBuffer != nullptr &&
             nativeWindowToSurface != nullptr;
     }
@@ -175,6 +196,9 @@ struct MediaDispatch final {
         getTimestamp = nullptr;
         deleteImage = nullptr;
         describeHardwareBuffer = nullptr;
+        fromJavaHardwareBuffer = nullptr;
+        acquireHardwareBuffer = nullptr;
+        releaseHardwareBuffer = nullptr;
         toJavaHardwareBuffer = nullptr;
         nativeWindowToSurface = nullptr;
         if (mediaLibrary != nullptr) {
@@ -391,7 +415,7 @@ public:
         if (!ready_.load() || cameraReader_ == nullptr || !cameraPipelineReady_) {
             return nullptr;
         }
-        if (pendingCameraFrame_.image != nullptr) {
+        if (pendingCameraFrame_.hardwareBuffer != nullptr) {
             if (!finalizePendingCameraFrame()) {
                 return nullptr;
             }
@@ -497,17 +521,14 @@ public:
         if (!ready_.load() || cameraReader_ == nullptr || !cameraPipelineReady_) {
             return publishResult(retainedCameraTimestampNs_);
         }
-        if (pendingCameraFrame_.image != nullptr) {
+        if (pendingCameraFrame_.hardwareBuffer != nullptr) {
             if (!finalizePendingCameraFrame()) {
                 return publishResult(retainedCameraTimestampNs_);
             }
             completedTemporalFromTimestampNs = pendingCameraFrame_.temporalFromTimestampNs;
             completedTemporalToTimestampNs = pendingCameraFrame_.timestampNs;
             completedTemporalResult = pendingCameraFrame_.temporalResult;
-            if (mediaDispatch_.deleteImage != nullptr) {
-                mediaDispatch_.deleteImage(pendingCameraFrame_.image);
-            }
-            pendingCameraFrame_.image = nullptr;
+            releasePendingCameraSource();
             pendingCameraFrame_ = PendingCameraFrame{};
             cameraReleasedFrames_.fetch_add(1);
         }
@@ -532,6 +553,79 @@ public:
         retainedCameraCopies_.fetch_add(1);
         cameraRenderedFrames_.fetch_add(1);
         return publishResult(retainedCameraTimestampNs_);
+    }
+
+    std::int64_t updateExternalVisibleCamera(
+        JNIEnv* environment,
+        jobject hardwareBufferObject,
+        std::int64_t sensorTimestampNs,
+        jfloatArray uvTransform
+    ) {
+        if (hardwareBufferObject == nullptr || sensorTimestampNs <= 0 || uvTransform == nullptr ||
+            environment->GetArrayLength(uvTransform) !=
+                static_cast<jsize>(kTransformElementCount)) {
+            return 0;
+        }
+        std::array<float, kTransformElementCount> transform{};
+        environment->GetFloatArrayRegion(
+            uvTransform,
+            0,
+            static_cast<jsize>(transform.size()),
+            transform.data()
+        );
+        if (environment->ExceptionCheck() == JNI_TRUE ||
+            !std::all_of(transform.begin(), transform.end(), [](float value) {
+                return std::isfinite(value);
+            })) {
+            return 0;
+        }
+
+        std::lock_guard lock(cameraMutex_);
+        if (!ready_.load()) {
+            return 0;
+        }
+        if (!mediaDispatch_.load()) {
+            setCameraError("external_ahb_dispatch_unavailable");
+            return retainedCameraTimestampNs_;
+        }
+        if (pendingCameraFrame_.hardwareBuffer != nullptr) {
+            if (!finalizePendingCameraFrame()) {
+                return retainedCameraTimestampNs_;
+            }
+            releasePendingCameraSource();
+            pendingCameraFrame_ = PendingCameraFrame{};
+            cameraReleasedFrames_.fetch_add(1);
+        }
+
+        AHardwareBuffer* hardwareBuffer = mediaDispatch_.fromJavaHardwareBuffer(
+            environment,
+            hardwareBufferObject
+        );
+        if (hardwareBuffer == nullptr) {
+            setCameraError("external_java_hardware_buffer_unavailable");
+            return retainedCameraTimestampNs_;
+        }
+        mediaDispatch_.acquireHardwareBuffer(hardwareBuffer);
+        AHardwareBuffer_Desc description{};
+        mediaDispatch_.describeHardwareBuffer(hardwareBuffer, &description);
+        pendingCameraFrame_.hardwareBuffer = hardwareBuffer;
+        pendingCameraFrame_.ownsHardwareBufferReference = true;
+        pendingCameraFrame_.description = description;
+        pendingCameraFrame_.timestampNs = sensorTimestampNs;
+        pendingCameraFrame_.token = nextCameraToken_++;
+        pendingCameraFrame_.transform = transform;
+
+        int acquireFenceFd = -1;
+        if (!importAndCopyCameraFrame(acquireFenceFd)) {
+            destroyPendingCameraFrame(/* deleteImage = */ false);
+            cameraDroppedFrames_.fetch_add(1);
+            return retainedCameraTimestampNs_;
+        }
+        retainedCameraTimestampNs_ = sensorTimestampNs;
+        retainedCameraValid_ = true;
+        retainedCameraCopies_.fetch_add(1);
+        cameraRenderedFrames_.fetch_add(1);
+        return retainedCameraTimestampNs_;
     }
 
     std::int64_t presentVisibleFrame() {
@@ -717,6 +811,7 @@ private:
     struct PendingCameraFrame final {
         AImage* image = nullptr;
         AHardwareBuffer* hardwareBuffer = nullptr;
+        bool ownsHardwareBufferReference = false;
         AHardwareBuffer_Desc description{};
         std::int64_t timestampNs = 0;
         std::uint64_t token = 0;
@@ -3518,7 +3613,7 @@ private:
         const std::array<float, kTemporalRoiElementCount>& roi,
         int* acquireFenceFd
     ) {
-        if (acquireFenceFd == nullptr || pendingCameraFrame_.image != nullptr) {
+        if (acquireFenceFd == nullptr || pendingCameraFrame_.hardwareBuffer != nullptr) {
             setCameraError("invalid_pending_camera_acquire_state");
             return CameraAcquireResult::error;
         }
@@ -4850,7 +4945,8 @@ private:
     }
 
     bool finalizePendingCameraFrame() {
-        if (pendingCameraFrame_.image == nullptr || pendingCameraFrame_.releaseFenceFd < 0) {
+        if (pendingCameraFrame_.hardwareBuffer == nullptr ||
+            pendingCameraFrame_.releaseFenceFd < 0) {
             return false;
         }
         pollfd fencePoll{
@@ -5004,14 +5100,26 @@ private:
         }
     }
 
-    void destroyPendingCameraFrame(bool deleteImage) {
-        closeFileDescriptor(pendingCameraFrame_.releaseFenceFd);
-        pendingCameraFrame_.releaseFenceFd = -1;
-        destroyPendingCameraGpuResources();
+    void releasePendingCameraSource(bool deleteImage = true) {
         if (deleteImage && pendingCameraFrame_.image != nullptr &&
             mediaDispatch_.deleteImage != nullptr) {
             mediaDispatch_.deleteImage(pendingCameraFrame_.image);
         }
+        pendingCameraFrame_.image = nullptr;
+        if (pendingCameraFrame_.ownsHardwareBufferReference &&
+            pendingCameraFrame_.hardwareBuffer != nullptr &&
+            mediaDispatch_.releaseHardwareBuffer != nullptr) {
+            mediaDispatch_.releaseHardwareBuffer(pendingCameraFrame_.hardwareBuffer);
+        }
+        pendingCameraFrame_.ownsHardwareBufferReference = false;
+        pendingCameraFrame_.hardwareBuffer = nullptr;
+    }
+
+    void destroyPendingCameraFrame(bool deleteImage) {
+        closeFileDescriptor(pendingCameraFrame_.releaseFenceFd);
+        pendingCameraFrame_.releaseFenceFd = -1;
+        destroyPendingCameraGpuResources();
+        releasePendingCameraSource(deleteImage);
         pendingCameraFrame_ = PendingCameraFrame{};
     }
 
@@ -5898,6 +6006,26 @@ Java_com_example_armakeup_render_NativeVulkanDiagnosticRuntime_nativeUpdateVisib
             trackingRoi,
             metadata,
             temporalValues
+        ));
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_example_armakeup_render_NativeVulkanDiagnosticRuntime_nativeUpdateExternalVisibleCamera(
+    JNIEnv* environment,
+    jobject /* runtime */,
+    jlong handle,
+    jobject hardwareBuffer,
+    jlong sensorTimestampNs,
+    jfloatArray uvTransform
+) {
+    VulkanDiagnosticRuntime* runtime = fromHandle(handle);
+    return runtime == nullptr
+        ? 0
+        : static_cast<jlong>(runtime->updateExternalVisibleCamera(
+            environment,
+            hardwareBuffer,
+            static_cast<std::int64_t>(sensorTimestampNs),
+            uvTransform
         ));
 }
 
