@@ -7,6 +7,9 @@ import android.opengl.Matrix
 import android.util.Log
 import com.example.armakeup.makeup.LipLandmarkTopology
 import com.example.armakeup.tracking.TrackingGeometryExtractor
+import com.example.armakeup.tracking.face.FaceRegion
+import com.example.armakeup.tracking.face.FullFaceRenderState
+import com.example.armakeup.tracking.face.HybridFullFaceStateComposer
 import com.google.ar.core.AugmentedFace
 import com.google.ar.core.Coordinates2d
 import com.google.ar.core.Session
@@ -20,7 +23,7 @@ import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 import kotlin.math.roundToInt
 
-/** Draws the ARCore front-camera image and one face-local point centered between the inner lips. */
+/** ARCore camera adapter and debug renderer for the model-independent FF3 render state. */
 internal class ArCoreFaceAnchorRenderer(
     private val displayRotation: () -> Int,
     private val imageRotationDegrees: () -> Int,
@@ -43,16 +46,17 @@ internal class ArCoreFaceAnchorRenderer(
 
     private val transformedCameraUvs = directFloatBuffer(8)
     private val lipAnchorVertex = directFloatBuffer(3)
-    private val mappedMediaPipeLipVertices = directFloatBuffer(
+    private val mappedLipVertices = directFloatBuffer(
         (LipLandmarkTopology.outerContour.size + LipLandmarkTopology.innerContour.size) * 3,
     )
-    private val projection = FloatArray(16)
-    private val view = FloatArray(16)
-    private val model = FloatArray(16)
-    private val viewModel = FloatArray(16)
-    private val mvp = FloatArray(16)
-    private val clipPoint = FloatArray(4)
     private val identity = FloatArray(16).apply { Matrix.setIdentityM(this, 0) }
+    private val arCoreObservationAdapter = ArCoreFaceObservationAdapter()
+    private val stateComposer = HybridFullFaceStateComposer(
+        stableAnchorIndices = TrackingGeometryExtractor.stableAnchorIndices,
+        outerLipIndices = LipLandmarkTopology.outerContour,
+        innerLipIndices = LipLandmarkTopology.innerContour,
+        maximumGlobalAffineResidual = MAXIMUM_GLOBAL_AFFINE_RESIDUAL,
+    )
 
     private var statusWindowStartNs = 0L
     private var statusWindowFrames = 0
@@ -60,6 +64,7 @@ internal class ArCoreFaceAnchorRenderer(
     fun bindSession(value: Session?) {
         session = value
         cameraTextureBoundSession = null
+        if (value == null) arCoreObservationAdapter.clear()
     }
 
     fun bindMediaPipeTracker(value: ArCoreMediaPipeLipTracker?) {
@@ -87,21 +92,44 @@ internal class ArCoreFaceAnchorRenderer(
                 activeSession.setCameraTextureName(cameraTextureId)
                 cameraTextureBoundSession = activeSession
             }
-            activeSession.setDisplayGeometry(displayRotation(), viewportWidth, viewportHeight)
+            val currentDisplayRotation = displayRotation()
+            val currentImageRotationDegrees = imageRotationDegrees()
+            activeSession.setDisplayGeometry(currentDisplayRotation, viewportWidth, viewportHeight)
             val frame = activeSession.update()
             val timestampNs = frame.timestamp
 
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT or GLES20.GL_DEPTH_BUFFER_BIT)
             if (timestampNs != 0L) {
                 drawCameraBackground(frame)
-                mediaPipeTracker?.tryDetect(frame, imageRotationDegrees())
+                mediaPipeTracker?.tryDetect(frame, currentImageRotationDegrees)
             }
 
             val face = activeSession
                 .getAllTrackables(AugmentedFace::class.java)
                 .firstOrNull { it.trackingState == TrackingState.TRACKING }
-            val screenPoint = face?.let { drawLipAnchor(frame.camera, it) }
-            val hybridStatus = face?.let { drawMediaPipeLipContour(timestampNs, it) }
+            if (face == null) arCoreObservationAdapter.clear()
+            val globalObservationAvailable = face?.let { trackedFace ->
+                arCoreObservationAdapter.create(
+                    sensorTimestampNs = timestampNs,
+                    displayRotation = currentDisplayRotation,
+                    analysisImageRotationDegrees = currentImageRotationDegrees,
+                    viewportWidth = viewportWidth,
+                    viewportHeight = viewportHeight,
+                    camera = frame.camera,
+                    face = trackedFace,
+                ) != null
+            } ?: false
+            val renderState = if (globalObservationAvailable) {
+                stateComposer.compose(
+                    globalBackend = arCoreObservationAdapter,
+                    localBackend = mediaPipeTracker,
+                    renderTimestampNs = timestampNs,
+                )
+            } else {
+                null
+            }
+            val screenPoint = renderState?.let(::drawLipAnchor)
+            val hybridStatus = renderState?.let(::drawHybridLipContour)
             publishStatus(timestampNs, face != null, screenPoint, hybridStatus)
         } catch (error: CameraNotAvailableException) {
             Log.e(TAG, "ARCore camera became unavailable", error)
@@ -143,92 +171,46 @@ internal class ArCoreFaceAnchorRenderer(
         GLES20.glDisableVertexAttribArray(texCoord)
     }
 
-    private fun drawLipAnchor(
-        camera: com.google.ar.core.Camera,
-        face: AugmentedFace,
-    ): Pair<Float, Float>? {
-        val vertices = face.meshVertices
-        val requiredFloats = (maxOf(UPPER_INNER_LIP_INDEX, LOWER_INNER_LIP_INDEX) + 1) * 3
-        if (vertices.limit() < requiredFloats) return null
-
-        val x = (vertices[UPPER_INNER_LIP_INDEX * 3] + vertices[LOWER_INNER_LIP_INDEX * 3]) * 0.5f
-        val y = (vertices[UPPER_INNER_LIP_INDEX * 3 + 1] +
-            vertices[LOWER_INNER_LIP_INDEX * 3 + 1]) * 0.5f
-        val z = (vertices[UPPER_INNER_LIP_INDEX * 3 + 2] +
-            vertices[LOWER_INNER_LIP_INDEX * 3 + 2]) * 0.5f
-
+    private fun drawLipAnchor(state: FullFaceRenderState): Pair<Float, Float>? {
+        val anchor = state.lipAnchor ?: return null
         lipAnchorVertex.position(0)
-        lipAnchorVertex.put(x).put(y).put(z).position(0)
-        camera.getProjectionMatrix(projection, 0, NEAR_METERS, FAR_METERS)
-        camera.getViewMatrix(view, 0)
-        face.centerPose.toMatrix(model, 0)
-        Matrix.multiplyMM(viewModel, 0, view, 0, model, 0)
-        Matrix.multiplyMM(mvp, 0, projection, 0, viewModel, 0)
-
+        lipAnchorVertex
+            .put(anchor.x * 2f - 1f)
+            .put(1f - anchor.y * 2f)
+            .put(0f)
+            .position(0)
         drawPointCloud(
             vertices = lipAnchorVertex,
             pointCount = 1,
-            transform = mvp,
+            transform = identity,
             pointSize = 30f,
             color = MAGENTA,
             ringColor = WHITE,
         )
-
-        Matrix.multiplyMV(clipPoint, 0, mvp, 0, floatArrayOf(x, y, z, 1f), 0)
-        if (clipPoint[3] <= 0f) return null
-        val ndcX = clipPoint[0] / clipPoint[3]
-        val ndcY = clipPoint[1] / clipPoint[3]
-        return Pair((ndcX + 1f) * 0.5f, (1f - ndcY) * 0.5f)
+        return Pair(anchor.x, anchor.y)
     }
 
-    private fun drawMediaPipeLipContour(
-        cameraTimestampNs: Long,
-        face: AugmentedFace,
-    ): HybridStatus? {
-        val observation = mediaPipeTracker?.latest() ?: return null
-        val coordinates = observation.coordinates
-        val maximumRequiredIndex = maxOf(
-            TrackingGeometryExtractor.stableAnchorIndices.maxOrNull() ?: 0,
-            LipLandmarkTopology.outerContour.maxOrNull() ?: 0,
-            LipLandmarkTopology.innerContour.maxOrNull() ?: 0,
-        )
-        if (coordinates.size / 3 <= maximumRequiredIndex) return null
-
-        val meshVertices = face.meshVertices
-        if (meshVertices.limit() / 3 <= maximumRequiredIndex) return null
-        val sourceAnchors = FloatArray(TrackingGeometryExtractor.stableAnchorIndices.size * 2)
-        val targetAnchors = FloatArray(sourceAnchors.size)
-        TrackingGeometryExtractor.stableAnchorIndices.forEachIndexed { anchorIndex, landmark ->
-            val mediaPipeIndex = landmark * 3
-            val outputIndex = anchorIndex * 2
-            sourceAnchors[outputIndex] = coordinates[mediaPipeIndex]
-            sourceAnchors[outputIndex + 1] = coordinates[mediaPipeIndex + 1]
-            val projected = projectFaceVertex(meshVertices, landmark) ?: return null
-            targetAnchors[outputIndex] = projected.first
-            targetAnchors[outputIndex + 1] = projected.second
-        }
-        val affine = FaceLocalAffineTransform.estimate(sourceAnchors, targetAnchors) ?: return null
-        if (affine.normalizedRmsResidual > MAXIMUM_AFFINE_RESIDUAL) return null
-
-        mappedMediaPipeLipVertices.clear()
+    private fun drawHybridLipContour(state: FullFaceRenderState): HybridStatus? {
+        val outer = state.region(FaceRegion.LIPS_OUTER) ?: return null
+        val inner = state.region(FaceRegion.LIPS_INNER) ?: return null
+        mappedLipVertices.clear()
         var pointCount = 0
-        fun appendLandmark(landmark: Int) {
-            val coordinateIndex = landmark * 3
-            val sourceX = coordinates[coordinateIndex]
-            val sourceY = coordinates[coordinateIndex + 1]
-            val screenX = affine.mapX(sourceX, sourceY)
-            val screenY = affine.mapY(sourceX, sourceY)
-            mappedMediaPipeLipVertices
-                .put(screenX * 2f - 1f)
-                .put(1f - screenY * 2f)
-                .put(0f)
-            pointCount++
+        fun appendRegion(region: com.example.armakeup.tracking.face.FaceRegionGeometry) {
+            repeat(region.pointCount) { pointIndex ->
+                val screenX = region.x(pointIndex)
+                val screenY = region.y(pointIndex)
+                mappedLipVertices
+                    .put(screenX * 2f - 1f)
+                    .put(1f - screenY * 2f)
+                    .put(0f)
+                pointCount++
+            }
         }
-        LipLandmarkTopology.outerContour.forEach(::appendLandmark)
-        LipLandmarkTopology.innerContour.forEach(::appendLandmark)
-        mappedMediaPipeLipVertices.position(0)
+        appendRegion(outer)
+        appendRegion(inner)
+        mappedLipVertices.position(0)
         drawPointCloud(
-            vertices = mappedMediaPipeLipVertices,
+            vertices = mappedLipVertices,
             pointCount = pointCount,
             transform = identity,
             pointSize = 11f,
@@ -236,27 +218,17 @@ internal class ArCoreFaceAnchorRenderer(
             ringColor = DARK_CYAN,
         )
 
+        val diagnostics = state.localDiagnostics ?: return null
         return HybridStatus(
-            mediaPipeFps = observation.smoothedFps,
-            inferenceDurationMs = observation.inferenceDurationMs,
-            conversionDurationMs = observation.conversionDurationMs,
-            cameraAgeMs = (cameraTimestampNs - observation.sensorTimestampNs)
-                .coerceAtLeast(0L) / 1_000_000f,
-            fitResidualPixels = affine.normalizedRmsResidual *
+            mediaPipeFps = diagnostics.smoothedFps,
+            inferenceDurationMs = diagnostics.inferenceDurationMs,
+            conversionDurationMs = diagnostics.conversionDurationMs,
+            cameraAgeMs = (state.attachmentQuality.localObservationAgeNs ?: 0L) /
+                1_000_000f,
+            fitResidualPixels = (state.attachmentQuality.affineFitResidualNormalized ?: 0f) *
                 minOf(viewportWidth, viewportHeight),
+            localDeformationApplied = state.attachmentQuality.localDeformationApplied,
         )
-    }
-
-    private fun projectFaceVertex(vertices: FloatBuffer, landmarkIndex: Int): Pair<Float, Float>? {
-        val index = landmarkIndex * 3
-        val x = vertices[index]
-        val y = vertices[index + 1]
-        val z = vertices[index + 2]
-        val clipX = mvp[0] * x + mvp[4] * y + mvp[8] * z + mvp[12]
-        val clipY = mvp[1] * x + mvp[5] * y + mvp[9] * z + mvp[13]
-        val clipW = mvp[3] * x + mvp[7] * y + mvp[11] * z + mvp[15]
-        if (!clipW.isFinite() || clipW <= 0f) return null
-        return Pair((clipX / clipW + 1f) * 0.5f, (1f - clipY / clipW) * 0.5f)
     }
 
     private fun drawPointCloud(
@@ -312,12 +284,13 @@ internal class ArCoreFaceAnchorRenderer(
         val hybridLabel = hybridStatus?.let { status ->
             String.format(
                 Locale.US,
-                "MediaPipe %.1f FPS · YUV %.0f + ML %.0f ms · age %.0f ms · fit %.1f px",
+                "MediaPipe %.1f FPS · YUV %.0f + ML %.0f ms · age %.0f ms · fit %.1f px · %s",
                 status.mediaPipeFps,
                 status.conversionDurationMs,
                 status.inferenceDurationMs,
                 status.cameraAgeMs,
                 status.fitResidualPixels,
+                if (status.localDeformationApplied) "local" else "ARCore fallback",
             )
         } ?: "MediaPipe: waiting for synchronized result"
         val text = String.format(
@@ -340,6 +313,7 @@ internal class ArCoreFaceAnchorRenderer(
         val conversionDurationMs: Float,
         val cameraAgeMs: Float,
         val fitResidualPixels: Float,
+        val localDeformationApplied: Boolean,
     )
 
     private fun createExternalTexture(): Int {
@@ -405,12 +379,8 @@ internal class ArCoreFaceAnchorRenderer(
 
     private companion object {
         const val TAG = "ARMakeupArCore"
-        const val UPPER_INNER_LIP_INDEX = 13
-        const val LOWER_INNER_LIP_INDEX = 14
-        const val NEAR_METERS = 0.05f
-        const val FAR_METERS = 100f
         const val STATUS_INTERVAL_NS = 1_000_000_000L
-        const val MAXIMUM_AFFINE_RESIDUAL = 0.08f
+        const val MAXIMUM_GLOBAL_AFFINE_RESIDUAL = 0.08f
 
         val MAGENTA = floatArrayOf(1f, 0.05f, 0.8f)
         val CYAN = floatArrayOf(0.05f, 1f, 0.95f)

@@ -2,6 +2,14 @@ package com.example.armakeup.arcore
 
 import android.os.SystemClock
 import android.util.Log
+import com.example.armakeup.tracking.face.FaceCoordinateSpace
+import com.example.armakeup.tracking.face.FaceLandmarkSet
+import com.example.armakeup.tracking.face.FaceObservation
+import com.example.armakeup.tracking.face.FaceObservationDiagnostics
+import com.example.armakeup.tracking.face.FaceObservationQuality
+import com.example.armakeup.tracking.face.FaceObservationRole
+import com.example.armakeup.tracking.face.FaceTopologies
+import com.example.armakeup.tracking.face.FaceTrackingBackend
 import com.google.ar.core.Frame
 import com.google.ar.core.exceptions.NotYetAvailableException
 import com.google.mediapipe.framework.image.ByteBufferImageBuilder
@@ -27,12 +35,16 @@ import java.util.concurrent.atomic.AtomicReference
 internal class ArCoreMediaPipeLipTracker(
     context: android.content.Context,
     private val onError: (String) -> Unit,
-) : AutoCloseable {
+) : FaceTrackingBackend {
+
+    override val backendId: String = BACKEND_ID
+    override val role: FaceObservationRole = FaceObservationRole.LOCAL_DEFORMATION
+    override val topology = FaceTopologies.MEDIAPIPE_FACE_LANDMARKER_478
 
     private val applicationContext = context.applicationContext
     private val lock = Any()
     private val busy = AtomicBoolean(false)
-    private val latestObservation = AtomicReference<Observation?>()
+    private val latestObservation = AtomicReference<FaceObservation?>()
     private val conversionExecutor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "arcore-mediapipe-conversion")
     }
@@ -156,7 +168,7 @@ internal class ArCoreMediaPipeLipTracker(
         }
     }
 
-    fun latest(): Observation? = latestObservation.get()
+    override fun latestObservation(): FaceObservation? = latestObservation.get()
 
     override fun close() {
         val inputToClose: MPImage?
@@ -234,16 +246,33 @@ internal class ArCoreMediaPipeLipTracker(
                 smoothedFps + FPS_RESPONSE * (instantaneousFps - smoothedFps)
             }
             lastResultTimestampNs = resultAtNs
-            latestObservation.set(
-                Observation(
-                    coordinates = coordinates,
-                    sensorTimestampNs = sensorTimestampNs,
-                    inferenceDurationMs = (resultAtNs - submittedAtNs).coerceAtLeast(0L) /
-                        NANOS_PER_MILLISECOND.toFloat(),
-                    conversionDurationMs = conversionDurationMs,
-                    smoothedFps = smoothedFps,
-                ),
-            )
+            if (landmarks.size == topology.pointCount) {
+                latestObservation.set(
+                    FaceObservation(
+                        backendId = backendId,
+                        role = role,
+                        sensorTimestampNs = sensorTimestampNs,
+                        topology = topology,
+                        imageLandmarks = FaceLandmarkSet.takeOwnership(
+                            topology = topology,
+                            coordinateSpace = FaceCoordinateSpace.NORMALIZED_IMAGE_TOP_LEFT,
+                            packedCoordinates = coordinates,
+                        ),
+                        quality = FaceObservationQuality(
+                            tracking = true,
+                            trackingConfidence = null,
+                            visibleFraction = null,
+                        ),
+                        diagnostics = FaceObservationDiagnostics(
+                            resultTimestampNs = resultAtNs,
+                            inferenceDurationMs = (resultAtNs - submittedAtNs).coerceAtLeast(0L) /
+                                NANOS_PER_MILLISECOND.toFloat(),
+                            conversionDurationMs = conversionDurationMs,
+                            smoothedFps = smoothedFps,
+                        ),
+                    ),
+                )
+            }
         }
         releaseActiveInput(inputImage)
     }
@@ -290,16 +319,9 @@ internal class ArCoreMediaPipeLipTracker(
         target.position(0)
     }
 
-    data class Observation(
-        val coordinates: FloatArray,
-        val sensorTimestampNs: Long,
-        val inferenceDurationMs: Float,
-        val conversionDurationMs: Float,
-        val smoothedFps: Float,
-    )
-
     private companion object {
         const val TAG = "ARMakeupArCore"
+        const val BACKEND_ID = "mediapipe-face-landmarker"
         const val MODEL_ASSET_PATH = "face_landmarker.task"
         const val MIN_CONFIDENCE = 0.5f
         const val COMPONENT_COUNT = 3

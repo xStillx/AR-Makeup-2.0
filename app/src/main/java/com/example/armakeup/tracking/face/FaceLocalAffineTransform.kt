@@ -1,8 +1,8 @@
-package com.example.armakeup.arcore
+package com.example.armakeup.tracking.face
 
 import kotlin.math.sqrt
 
-/** Maps stale ML image coordinates into the current ARCore face projection. */
+/** Maps a stale local-model image observation into the current normalized display projection. */
 internal data class FaceLocalAffineTransform(
     val xFromX: Float,
     val xFromY: Float,
@@ -15,6 +15,17 @@ internal data class FaceLocalAffineTransform(
     fun mapX(x: Float, y: Float): Float = xFromX * x + xFromY * y + xOffset
 
     fun mapY(x: Float, y: Float): Float = yFromX * x + yFromY * y + yOffset
+
+    /** Keeps the rigid linear mapping but pins one semantic point to the current global frame. */
+    fun reanchored(
+        sourceX: Float,
+        sourceY: Float,
+        targetX: Float,
+        targetY: Float,
+    ): FaceLocalAffineTransform = copy(
+        xOffset = targetX - xFromX * sourceX - xFromY * sourceY,
+        yOffset = targetY - yFromX * sourceX - yFromY * sourceY,
+    )
 
     companion object {
         fun estimate(source: FloatArray, target: FloatArray): FaceLocalAffineTransform? {
