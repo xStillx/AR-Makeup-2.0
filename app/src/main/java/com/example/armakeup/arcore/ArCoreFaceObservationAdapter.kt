@@ -15,6 +15,7 @@ import com.example.armakeup.tracking.face.FacePose
 import com.example.armakeup.tracking.face.FaceTopologies
 import com.example.armakeup.tracking.face.FaceTrackingBackend
 import com.example.armakeup.tracking.face.FaceSurfaceTopology
+import com.example.armakeup.tracking.face.FaceSurfaceTextureCoordinates
 import com.google.ar.core.AugmentedFace
 import com.google.ar.core.Camera
 import java.util.concurrent.atomic.AtomicReference
@@ -32,6 +33,7 @@ internal class ArCoreFaceObservationAdapter : FaceTrackingBackend {
     private val viewModel = FloatArray(FaceMatrix4.ELEMENT_COUNT)
     private val modelViewProjection = FloatArray(FaceMatrix4.ELEMENT_COUNT)
     private var cachedSurfaceTopology: FaceSurfaceTopology? = null
+    private var cachedSurfaceTextureCoordinates: FaceSurfaceTextureCoordinates? = null
 
     fun create(
         sensorTimestampNs: Long,
@@ -55,6 +57,15 @@ internal class ArCoreFaceObservationAdapter : FaceTrackingBackend {
                 .let { FaceSurfaceTopology.takeOwnership(topology, it) }
                 .also { cachedSurfaceTopology = it }
         }
+        val surfaceTextureCoordinates = cachedSurfaceTextureCoordinates
+            ?: face.meshTextureCoordinates.let { textureCoordinates ->
+                val requiredValues = topology.pointCount *
+                    FaceSurfaceTextureCoordinates.COMPONENT_COUNT
+                if (textureCoordinates.limit() < requiredValues) return null
+                FloatArray(requiredValues) { index -> textureCoordinates[index] }
+                    .let { FaceSurfaceTextureCoordinates.takeOwnership(topology, it) }
+                    .also { cachedSurfaceTextureCoordinates = it }
+            }
 
         camera.getProjectionMatrix(projection, 0, NEAR_METERS, FAR_METERS)
         camera.getViewMatrix(view, 0)
@@ -103,6 +114,7 @@ internal class ArCoreFaceObservationAdapter : FaceTrackingBackend {
                 displayCoordinates,
             ),
             surfaceTopology = surfaceTopology,
+            surfaceTextureCoordinates = surfaceTextureCoordinates,
             pose = FacePose(FaceMatrix4.columnMajor(model)),
             cameraFrame = FaceCameraFrameMetadata(
                 sensorTimestampNs = sensorTimestampNs,

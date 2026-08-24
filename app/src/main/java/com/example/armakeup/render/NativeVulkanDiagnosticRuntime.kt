@@ -246,6 +246,7 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
         sampledDepthMinimum: Float = 0f,
         sampledDepthMaximum: Float = sampledDepthMinimum,
         visualizeSampledDepth: Boolean = false,
+        dynamicContour: FloatArray = EMPTY_DYNAMIC_LIP_CONTOUR,
         visible: Boolean,
     ): Boolean {
         require(lipDepthBias.isFinite())
@@ -263,6 +264,7 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
             sampledDepthMinimum,
             sampledDepthMaximum,
             visualizeSampledDepth,
+            dynamicContour,
             visible,
         )
     }
@@ -446,6 +448,7 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
         sampledDepthMinimum: Float,
         sampledDepthMaximum: Float,
         visualizeSampledDepth: Boolean,
+        dynamicContour: FloatArray,
         visible: Boolean,
     ): Boolean
     private external fun nativeUpdateFaceOccluder(
@@ -505,7 +508,8 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
         private const val PRESENTATION_MARGIN_INDEX = 5
         private const val PRESENTATION_REFRESH_DURATION_INDEX = 6
         private const val PRESENTATION_FAILED = -1L
-        private const val DEFAULT_TRACKING_LIP_DEPTH_BIAS = -0.0005f
+        private const val DEFAULT_TRACKING_LIP_DEPTH_BIAS = 0f
+        private val EMPTY_DYNAMIC_LIP_CONTOUR = FloatArray(0)
         private val IDENTITY_DISPLAY_TO_SCREEN = floatArrayOf(1f, 1f, 0f, 0f)
 
         init {

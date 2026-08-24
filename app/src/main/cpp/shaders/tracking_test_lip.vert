@@ -22,6 +22,7 @@ layout(push_constant) uniform TrackingLipState {
 layout(location = 0) out float fragmentCoverage;
 layout(location = 1) out float sampledDepthDebug;
 layout(location = 2) flat out int sampledDepthDebugEnabled;
+layout(location = 3) out vec2 fragmentDisplayPosition;
 
 void main() {
     vec2 displayPosition = predictorDisplayPosition;
@@ -65,4 +66,5 @@ void main() {
         ? clamp((faceNdcDepth - state.depthParameters.y) / depthRange, 0.0, 1.0)
         : 0.5;
     sampledDepthDebugEnabled = state.flags.y;
+    fragmentDisplayPosition = displayPosition;
 }

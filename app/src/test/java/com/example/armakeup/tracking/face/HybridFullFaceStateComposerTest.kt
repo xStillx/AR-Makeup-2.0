@@ -265,6 +265,46 @@ class HybridFullFaceStateComposerTest {
     }
 
     @Test
+    fun `fades aged local deformation before returning to global lips`() {
+        val ageFadingComposer = HybridFullFaceStateComposer(
+            stableAnchorIndices = intArrayOf(0, 1, 2, 3),
+            outerLipIndices = intArrayOf(4),
+            innerLipIndices = intArrayOf(5),
+            upperInnerLipIndex = 4,
+            lowerInnerLipIndex = 5,
+            maximumGlobalAffineResidual = 0.02f,
+            maximumLocalObservationAgeNs = 100L,
+            localObservationAgeFadeOutNs = 100L,
+        )
+        val neutralCoordinates = sourceCoordinates()
+        val globalCoordinates = mapCoordinates(neutralCoordinates)
+        val localCoordinates = neutralCoordinates.copyOf().also { coordinates ->
+            coordinates[4 * 3] += 0.2f
+            coordinates[5 * 3] += 0.2f
+        }
+
+        val state = ageFadingComposer.compose(
+            globalObservation(globalCoordinates, sensorTimestampNs = 500L),
+            localObservation(localCoordinates, sensorTimestampNs = 350L),
+            renderTimestampNs = 501L,
+        )
+
+        assertNotNull(state)
+        state!!
+        val globalOuterX = globalCoordinates[4 * 3]
+        val fullyMappedLocalOuterX = 0.7f * localCoordinates[4 * 3] + 0.1f
+        assertTrue(state.attachmentQuality.localDeformationApplied)
+        assertEquals(0.5f, state.attachmentQuality.localDeformationWeight!!, 1e-5f)
+        assertEquals(150L, state.attachmentQuality.localObservationAgeNs)
+        assertEquals(350L, state.localObservationTimestampNs)
+        assertEquals(
+            (globalOuterX + fullyMappedLocalOuterX) * 0.5f,
+            state.region(FaceRegion.LIPS_OUTER)!!.x(0),
+            1e-5f,
+        )
+    }
+
+    @Test
     fun `publishes independently sourced eye states and normalized aperture`() {
         val featureTopology = FaceTopologyDescriptor("feature-face", 1, 14)
         val featureComposer = HybridFullFaceStateComposer(

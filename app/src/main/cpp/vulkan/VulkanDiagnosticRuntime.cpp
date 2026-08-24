@@ -51,6 +51,9 @@ constexpr std::uint32_t kTemporalFlowPointCount = 108;
 constexpr std::size_t kTrackingTestLipVertexComponentCount = 6;
 constexpr std::size_t kTrackingTestLipMaxVertexCount = 1024;
 constexpr std::size_t kTrackingTestLipMaxIndexCount = 6000;
+constexpr std::size_t kTrackingLipContourPointCount = 20;
+constexpr std::size_t kTrackingLipContourFloatCount =
+    kTrackingLipContourPointCount * 4U + 4U;
 constexpr std::size_t kFaceOccluderVertexComponentCount = 3;
 constexpr std::size_t kFaceOccluderMaxVertexCount = 468;
 constexpr std::size_t kFaceOccluderMaxIndexCount = 3000;
@@ -82,6 +85,12 @@ struct alignas(16) TrackingLipPushConstants final {
 };
 
 static_assert(sizeof(TrackingLipPushConstants) == 48U);
+
+struct alignas(16) TrackingLipContourState final {
+    std::array<float, kTrackingLipContourFloatCount> values{};
+};
+
+static_assert(sizeof(TrackingLipContourState) == 336U);
 
 struct MediaDispatch final {
     using NewWithUsage = media_status_t (*)(
@@ -683,6 +692,7 @@ public:
         float sampledDepthMinimum,
         float sampledDepthMaximum,
         bool visualizeSampledDepth,
+        jfloatArray dynamicContour,
         bool visible
     ) {
         if (!ready_.load()) {
@@ -696,6 +706,7 @@ public:
             return true;
         }
         if (vertices == nullptr || indices == nullptr || displayToScreen == nullptr ||
+            dynamicContour == nullptr ||
             !std::isfinite(lipDepthBias) || !std::isfinite(sampledDepthMinimum) ||
             !std::isfinite(sampledDepthMaximum) ||
             sampledDepthMaximum < sampledDepthMinimum ||
@@ -704,7 +715,11 @@ public:
         }
         const jsize vertexValueCount = environment->GetArrayLength(vertices);
         const jsize indexCount = environment->GetArrayLength(indices);
+        const jsize dynamicContourValueCount = environment->GetArrayLength(dynamicContour);
         if (vertexValueCount <= 0 || indexCount <= 0 ||
+            (dynamicContourValueCount != 0 &&
+                dynamicContourValueCount !=
+                    static_cast<jsize>(kTrackingLipContourFloatCount)) ||
             vertexValueCount % static_cast<jsize>(kTrackingTestLipVertexComponentCount) != 0) {
             return false;
         }
@@ -730,12 +745,26 @@ public:
             static_cast<jsize>(copiedDisplayToScreen.size()),
             copiedDisplayToScreen.data()
         );
+        TrackingLipContourState copiedDynamicContour{};
+        if (dynamicContourValueCount ==
+            static_cast<jsize>(kTrackingLipContourFloatCount)) {
+            environment->GetFloatArrayRegion(
+                dynamicContour,
+                0,
+                dynamicContourValueCount,
+                copiedDynamicContour.values.data()
+            );
+        }
         if (environment->ExceptionCheck() == JNI_TRUE ||
             !std::all_of(copiedVertices.begin(), copiedVertices.end(), [](float value) {
                 return std::isfinite(value);
             }) || !std::all_of(
                 copiedDisplayToScreen.begin(),
                 copiedDisplayToScreen.end(),
+                [](float value) { return std::isfinite(value); }
+            ) || !std::all_of(
+                copiedDynamicContour.values.begin(),
+                copiedDynamicContour.values.end(),
                 [](float value) { return std::isfinite(value); }
             )) {
             return false;
@@ -757,6 +786,7 @@ public:
         trackingTestLipSampledDepthMinimum_ = sampledDepthMinimum;
         trackingTestLipSampledDepthMaximum_ = sampledDepthMaximum;
         trackingTestLipSampledDepthVisualizationEnabled_ = visualizeSampledDepth;
+        trackingTestLipDynamicContour_ = copiedDynamicContour;
         trackingTestLipVisible_ = true;
         return true;
     }
@@ -2033,19 +2063,28 @@ private:
     }
 
     bool createTrackingTestLipPipeline() {
-        const VkDescriptorSetLayoutBinding temporalFitBinding{
-            .binding = 0,
-            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-            .descriptorCount = 1,
-            .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
-            .pImmutableSamplers = nullptr,
+        const std::array<VkDescriptorSetLayoutBinding, 2> descriptorBindings{
+            VkDescriptorSetLayoutBinding{
+                .binding = 0,
+                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .descriptorCount = 1,
+                .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+                .pImmutableSamplers = nullptr,
+            },
+            VkDescriptorSetLayoutBinding{
+                .binding = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .descriptorCount = 1,
+                .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+                .pImmutableSamplers = nullptr,
+            },
         };
         const VkDescriptorSetLayoutCreateInfo descriptorLayoutInfo{
             .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
             .pNext = nullptr,
             .flags = 0,
-            .bindingCount = 1,
-            .pBindings = &temporalFitBinding,
+            .bindingCount = static_cast<std::uint32_t>(descriptorBindings.size()),
+            .pBindings = descriptorBindings.data(),
         };
         VkResult result = createDescriptorSetLayout_(
             device_,
@@ -2304,15 +2343,31 @@ private:
             0,
             sizeof(float) * kTemporalResultElementCount
         );
+        for (std::size_t index = 0; index < kFramesInFlight; ++index) {
+            if (!createTrackingTestLipBuffer(
+                    sizeof(TrackingLipContourState),
+                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                    &trackingTestLipContourBuffers_[index],
+                    &trackingTestLipContourMemories_[index],
+                    &trackingTestLipContourMapped_[index]
+                )) {
+                return false;
+            }
+            std::memset(
+                trackingTestLipContourMapped_[index],
+                0,
+                sizeof(TrackingLipContourState)
+            );
+        }
         const VkDescriptorPoolSize descriptorPoolSize{
             .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-            .descriptorCount = 1,
+            .descriptorCount = static_cast<std::uint32_t>(kFramesInFlight * 2U),
         };
         const VkDescriptorPoolCreateInfo descriptorPoolInfo{
             .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
             .pNext = nullptr,
             .flags = 0,
-            .maxSets = 1,
+            .maxSets = static_cast<std::uint32_t>(kFramesInFlight),
             .poolSizeCount = 1,
             .pPoolSizes = &descriptorPoolSize,
         };
@@ -2326,38 +2381,71 @@ private:
             setVulkanError("create_tracking_lip_descriptor_pool", result);
             return false;
         }
+        std::array<VkDescriptorSetLayout, kFramesInFlight> descriptorLayouts{};
+        descriptorLayouts.fill(trackingTestLipDescriptorSetLayout_);
         const VkDescriptorSetAllocateInfo descriptorAllocateInfo{
             .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
             .pNext = nullptr,
             .descriptorPool = trackingTestLipDescriptorPool_,
-            .descriptorSetCount = 1,
-            .pSetLayouts = &trackingTestLipDescriptorSetLayout_,
+            .descriptorSetCount = static_cast<std::uint32_t>(descriptorLayouts.size()),
+            .pSetLayouts = descriptorLayouts.data(),
         };
         result = allocateDescriptorSets_(
             device_,
             &descriptorAllocateInfo,
-            &trackingTestLipDescriptorSet_
+            trackingTestLipDescriptorSets_.data()
         );
         if (result != VK_SUCCESS) {
             setVulkanError("allocate_tracking_lip_descriptor", result);
             return false;
         }
         updateTrackingTestLipFitDescriptor(trackingTestLipFallbackFitBuffer_);
+        for (std::size_t index = 0; index < kFramesInFlight; ++index) {
+            updateTrackingTestLipContourDescriptor(index);
+        }
         return true;
     }
 
     void updateTrackingTestLipFitDescriptor(VkBuffer buffer) {
-        if (trackingTestLipDescriptorSet_ == VK_NULL_HANDLE || buffer == VK_NULL_HANDLE) return;
+        if (trackingTestLipDescriptorSets_[0] == VK_NULL_HANDLE || buffer == VK_NULL_HANDLE) return;
         const VkDescriptorBufferInfo bufferInfo{
             .buffer = buffer,
             .offset = 0,
             .range = sizeof(float) * kTemporalResultElementCount,
         };
+        for (const VkDescriptorSet descriptorSet : trackingTestLipDescriptorSets_) {
+            const VkWriteDescriptorSet write{
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .pNext = nullptr,
+                .dstSet = descriptorSet,
+                .dstBinding = 0,
+                .dstArrayElement = 0,
+                .descriptorCount = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .pImageInfo = nullptr,
+                .pBufferInfo = &bufferInfo,
+                .pTexelBufferView = nullptr,
+            };
+            updateDescriptorSets_(device_, 1, &write, 0, nullptr);
+        }
+    }
+
+    void updateTrackingTestLipContourDescriptor(std::size_t frameIndex) {
+        if (frameIndex >= kFramesInFlight ||
+            trackingTestLipDescriptorSets_[frameIndex] == VK_NULL_HANDLE ||
+            trackingTestLipContourBuffers_[frameIndex] == VK_NULL_HANDLE) {
+            return;
+        }
+        const VkDescriptorBufferInfo bufferInfo{
+            .buffer = trackingTestLipContourBuffers_[frameIndex],
+            .offset = 0,
+            .range = sizeof(TrackingLipContourState),
+        };
         const VkWriteDescriptorSet write{
             .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
             .pNext = nullptr,
-            .dstSet = trackingTestLipDescriptorSet_,
-            .dstBinding = 0,
+            .dstSet = trackingTestLipDescriptorSets_[frameIndex],
+            .dstBinding = 1,
             .dstArrayElement = 0,
             .descriptorCount = 1,
             .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
@@ -3197,6 +3285,11 @@ private:
             trackingTestLipIndices_.data(),
             trackingTestLipIndices_.size() * sizeof(std::uint16_t)
         );
+        std::memcpy(
+            trackingTestLipContourMapped_[frameIndex],
+            &trackingTestLipDynamicContour_,
+            sizeof(TrackingLipContourState)
+        );
         *outputIndexCount = static_cast<std::uint32_t>(trackingTestLipIndices_.size());
         return true;
     }
@@ -3296,15 +3389,17 @@ private:
 
     void bindTrackingTestLipTemporalState(
         VkCommandBuffer commandBuffer,
-        bool temporalFlowAvailable
+        bool temporalFlowAvailable,
+        std::uint32_t frameIndex
     ) {
+        if (frameIndex >= kFramesInFlight) return;
         cmdBindDescriptorSets_(
             commandBuffer,
             VK_PIPELINE_BIND_POINT_GRAPHICS,
             trackingTestLipPipelineLayout_,
             0,
             1,
-            &trackingTestLipDescriptorSet_,
+            &trackingTestLipDescriptorSets_[frameIndex],
             0,
             nullptr
         );
@@ -4984,7 +5079,8 @@ private:
             );
             bindTrackingTestLipTemporalState(
                 commandBuffer,
-                retainedTemporalFlowAvailable_
+                retainedTemporalFlowAvailable_,
+                frameIndex
             );
             cmdBindVertexBuffers_(
                 commandBuffer,
@@ -5259,7 +5355,8 @@ private:
             );
             bindTrackingTestLipTemporalState(
                 commandBuffer,
-                pendingCameraFrame_.temporalComputed
+                pendingCameraFrame_.temporalComputed,
+                frameIndex
             );
             cmdBindVertexBuffers_(
                 commandBuffer,
@@ -6068,7 +6165,7 @@ private:
                 destroyDescriptorPool_ != nullptr) {
                 destroyDescriptorPool_(device_, trackingTestLipDescriptorPool_, nullptr);
                 trackingTestLipDescriptorPool_ = VK_NULL_HANDLE;
-                trackingTestLipDescriptorSet_ = VK_NULL_HANDLE;
+                trackingTestLipDescriptorSets_.fill(VK_NULL_HANDLE);
             }
             if (trackingTestLipDescriptorSetLayout_ != VK_NULL_HANDLE &&
                 destroyDescriptorSetLayout_ != nullptr) {
@@ -6129,6 +6226,10 @@ private:
                     unmapMemory_(device_, trackingTestLipIndexMemories_[index]);
                     trackingTestLipIndexMapped_[index] = nullptr;
                 }
+                if (trackingTestLipContourMapped_[index] != nullptr && unmapMemory_ != nullptr) {
+                    unmapMemory_(device_, trackingTestLipContourMemories_[index]);
+                    trackingTestLipContourMapped_[index] = nullptr;
+                }
                 if (trackingTestLipVertexBuffers_[index] != VK_NULL_HANDLE &&
                     destroyBuffer_ != nullptr) {
                     destroyBuffer_(device_, trackingTestLipVertexBuffers_[index], nullptr);
@@ -6139,6 +6240,11 @@ private:
                     destroyBuffer_(device_, trackingTestLipIndexBuffers_[index], nullptr);
                     trackingTestLipIndexBuffers_[index] = VK_NULL_HANDLE;
                 }
+                if (trackingTestLipContourBuffers_[index] != VK_NULL_HANDLE &&
+                    destroyBuffer_ != nullptr) {
+                    destroyBuffer_(device_, trackingTestLipContourBuffers_[index], nullptr);
+                    trackingTestLipContourBuffers_[index] = VK_NULL_HANDLE;
+                }
                 if (trackingTestLipVertexMemories_[index] != VK_NULL_HANDLE &&
                     freeMemory_ != nullptr) {
                     freeMemory_(device_, trackingTestLipVertexMemories_[index], nullptr);
@@ -6148,6 +6254,11 @@ private:
                     freeMemory_ != nullptr) {
                     freeMemory_(device_, trackingTestLipIndexMemories_[index], nullptr);
                     trackingTestLipIndexMemories_[index] = VK_NULL_HANDLE;
+                }
+                if (trackingTestLipContourMemories_[index] != VK_NULL_HANDLE &&
+                    freeMemory_ != nullptr) {
+                    freeMemory_(device_, trackingTestLipContourMemories_[index], nullptr);
+                    trackingTestLipContourMemories_[index] = VK_NULL_HANDLE;
                 }
             }
             for (const VkFence fence : frameFences_) {
@@ -6388,7 +6499,7 @@ private:
     std::atomic<bool> faceDepthVisualizationEnabled_{false};
     VkDescriptorSetLayout trackingTestLipDescriptorSetLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool trackingTestLipDescriptorPool_ = VK_NULL_HANDLE;
-    VkDescriptorSet trackingTestLipDescriptorSet_ = VK_NULL_HANDLE;
+    std::array<VkDescriptorSet, kFramesInFlight> trackingTestLipDescriptorSets_{};
     VkBuffer trackingTestLipFallbackFitBuffer_ = VK_NULL_HANDLE;
     VkDeviceMemory trackingTestLipFallbackFitMemory_ = VK_NULL_HANDLE;
     void* trackingTestLipFallbackFitMapped_ = nullptr;
@@ -6398,14 +6509,18 @@ private:
     std::array<VkBuffer, kFramesInFlight> trackingTestLipIndexBuffers_{};
     std::array<VkDeviceMemory, kFramesInFlight> trackingTestLipIndexMemories_{};
     std::array<void*, kFramesInFlight> trackingTestLipIndexMapped_{};
+    std::array<VkBuffer, kFramesInFlight> trackingTestLipContourBuffers_{};
+    std::array<VkDeviceMemory, kFramesInFlight> trackingTestLipContourMemories_{};
+    std::array<void*, kFramesInFlight> trackingTestLipContourMapped_{};
     std::vector<float> trackingTestLipVertices_;
     std::vector<std::uint16_t> trackingTestLipIndices_;
     std::array<float, 4> trackingTestLipDisplayToScreen_{1.0F, 1.0F, 0.0F, 0.0F};
     bool trackingTestLipTemporalFlowEnabled_ = false;
-    float trackingTestLipDepthBias_ = -0.0005F;
+    float trackingTestLipDepthBias_ = 0.0F;
     float trackingTestLipSampledDepthMinimum_ = 0.0F;
     float trackingTestLipSampledDepthMaximum_ = 0.0F;
     bool trackingTestLipSampledDepthVisualizationEnabled_ = false;
+    TrackingLipContourState trackingTestLipDynamicContour_{};
     bool trackingTestLipVisible_ = false;
     bool retainedTemporalFlowAvailable_ = false;
     bool displayTimingSupported_ = false;
@@ -6773,6 +6888,7 @@ Java_com_example_armakeup_render_NativeVulkanDiagnosticRuntime_nativeUpdateTrack
     jfloat sampledDepthMinimum,
     jfloat sampledDepthMaximum,
     jboolean visualizeSampledDepth,
+    jfloatArray dynamicContour,
     jboolean visible
 ) {
     VulkanDiagnosticRuntime* runtime = fromHandle(handle);
@@ -6786,6 +6902,7 @@ Java_com_example_armakeup_render_NativeVulkanDiagnosticRuntime_nativeUpdateTrack
         sampledDepthMinimum,
         sampledDepthMaximum,
         visualizeSampledDepth == JNI_TRUE,
+        dynamicContour,
         visible == JNI_TRUE
     ) ? JNI_TRUE : JNI_FALSE;
 }

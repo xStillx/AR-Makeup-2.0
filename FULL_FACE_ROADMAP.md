@@ -158,6 +158,10 @@ MediaPipe-specific классы не проходят в Vulkan renderer или 
 
 Статус 2026-08-24: инфраструктурный vertical slice реализован, но критерий завершения не достигнут. Архитектура depth pass и lifecycle функциональны; визуальные ошибки показывают, что простого семплирования depth для остающейся 2D-деформации губ недостаточно. До продолжения FF6 нужно на новом устройстве разделить XY attachment, depth interpolation/bias и visibility/loss gating контролируемым A/B, затем решить, требуется ли полноценная 3D local lip deformation/canonical UV attachment.
 
+Follow-up локализовал причины и сохранён commit `75425b1`. Текущий structural candidate уже переносит ARCore canonical UV в общий contract, заменяет грубое whole-triangle coverage аналитическим feathered coverage на полной face topology и рисует depth/lip по одной surface с `bias=0`. Device functional gate: `40` coverage vertices, `898` triangles, fallback/overlap `0`, camera drops `0`, около `59 FPS`; front/yaw screenshots не воспроизводят прежние holes/coarse drift. Measured loss policy удерживает полную opacity `100 ms`, гасит к `350 ms` и возвращает за `120 ms`; короткие bursts не скрываются мгновенно, длинные корректно доходят до hide. Gate `185` tests + lint/APK/four ABI пройден. Критерий FF5 остаётся открытым до пользовательского A/B visual acceptance.
+
+Статус 2026-08-25: camera-space deformation и dynamic fragment contour заметно улучшили local lip attachment и границы. Hard age switch заменён fade `120–220 ms`; face-anchored `8 Hz` фильтр применяется только к MediaPipe lip-local shape и не задерживает current ARCore global pose. В покое дрожь устранена, но FF5 всё ещё не принят: при движении остаётся мелкий shimmer, резкое открытие/закрытие выявляет response lag/contour slide, а широкий рот — неверную толщину, особенно верхней губы. Gate текущего checkpoint: `187` tests, lint/APK/four ABI; APK SHA-256 `EAF5D9E98E3D08921361DBB1F7E8CAF56D96E77DC1EAB95D6D032E3A9B5757E9`.
+
 ## FF6 — semantic face parsing
 
 Минимальная схема классов:
@@ -237,9 +241,9 @@ Parsing выполняется ориентировочно 15–30 раз/с п
 
 ## Следующее действие
 
-1. Использовать `80aaf7e`/`92fc514` как принятый 2D Vulkan baseline, а `18cf1e0` — только как отклонённый 3D candidate для сравнения.
-2. Использовать завершённый A/B verdict: forward drift уже локализован в XY/affine attachment; skin holes — в несовпадающих face/lip depth triangulations; pitch-down flicker — в реальных ARCore global-loss bursts около `+30°` и текущем hide/hold policy.
-3. Заменить грубый shared-face-triangle proof на canonical UV/analytic lip coverage поверх той же ARCore face surface. Переносить MediaPipe local deformation в camera/face space для всей lip region, сохраняя общий depth raster и `bias=0`; не возвращаться к отдельному screen-space lip mesh с sampled Z.
-4. Добавить per-loss-episode frames/duration и visual reacquisition telemetry, затем определить hold/fade policy по измеренным burst distributions, а не подбором порога.
-5. Повторить front/open-mouth/yaw `±45–55°`/pitch-down A/B и получить пользовательский visual acceptance без holes, forward drift, coverage gaps и flicker. До acceptance не переключать default и не переходить к FF6/material tuning.
+1. Использовать `80aaf7e`/`92fc514` как принятый 2D Vulkan baseline, `18cf1e0` как отклонённый sampled-depth candidate, а `75425b1` как сохранённое причинное исследование/shared-surface proof.
+2. Измерить motion-only residual: raw/stabilized lip-local displacement и response на резкое открытие/закрытие, cadence affine weight, contour slide и separate upper/lower lip thickness при широком рте. Не тюнить cutoff/thresholds без этих данных и не low-pass current ARCore global pose.
+3. Исправить успеваемость и реальную толщину dynamic contour, затем провести одинаковый live A/B current depth candidate / `ENABLE_VULKAN_FACE_DEPTH=false` / при необходимости exact rollback `80aaf7e`.
+4. Получить visual acceptance без motion shimmer, contour slide, wrong upper-lip thickness, skin holes, forward drift/coarse coverage gaps и короткого hide/show blink. При длинной реальной потере tracking маска должна мягко исчезнуть и вернуться, а не зависнуть на лице.
+5. До acceptance не переключать default и не переходить к FF6/material tuning.
 6. После 3D acceptance выполнить actual-present/camera telemetry и 10–15-минутный thermal soak, затем добавить reusable replay, ARCore/Vulkan fallback и matte/satin/gloss + color/HDR contract. IMU/optical flow добавлять только при измеримом residual.

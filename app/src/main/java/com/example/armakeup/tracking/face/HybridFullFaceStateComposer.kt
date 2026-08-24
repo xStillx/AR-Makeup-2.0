@@ -20,6 +20,7 @@ class HybridFullFaceStateComposer(
     private val maximumGlobalAffineResidual: Float = 0.08f,
     private val fullLocalAffineResidual: Float = maximumGlobalAffineResidual,
     private val maximumLocalObservationAgeNs: Long = Long.MAX_VALUE,
+    private val localObservationAgeFadeOutNs: Long = 0L,
     private val perspectivePolicy: FaceLocalGeometryPerspectivePolicy =
         FaceLocalGeometryPerspectivePolicy.UNRESTRICTED,
 ) {
@@ -57,6 +58,7 @@ class HybridFullFaceStateComposer(
         require(fullLocalAffineResidual.isFinite() &&
             fullLocalAffineResidual in 0f..maximumGlobalAffineResidual)
         require(maximumLocalObservationAgeNs >= 0L)
+        require(localObservationAgeFadeOutNs >= 0L)
     }
 
     fun compose(
@@ -104,7 +106,11 @@ class HybridFullFaceStateComposer(
         val local = localObservation?.takeIf { observation ->
             val ageNs = globalObservation.sensorTimestampNs - observation.sensorTimestampNs
             observation.quality.tracking &&
-                ageNs in 0L..maximumLocalObservationAgeNs &&
+                ageNs >= 0L &&
+                ageNs <= saturatedAdd(
+                    maximumLocalObservationAgeNs,
+                    localObservationAgeFadeOutNs,
+                ) &&
                 observation.role != FaceObservationRole.GLOBAL_POSE &&
                 observation.imageLandmarks != null &&
                 observation.imageLandmarks.coordinateSpace ==
@@ -123,7 +129,8 @@ class HybridFullFaceStateComposer(
             localWeightForResidual(affine.normalizedRmsResidual)
         } ?: 0f
         val localGeometryWeight =
-            perspectivePolicy.localWeight(globalObservation) * residualLocalWeight
+            perspectivePolicy.localWeight(globalObservation) * residualLocalWeight *
+                localObservationAgeWeight(globalObservation, local)
         val mouthLocalWeight = if (
             fitAccepted && localFeatureTracks(local, local?.features?.mouth)
         ) {
@@ -264,6 +271,7 @@ class HybridFullFaceStateComposer(
             canonicalLandmarks = canonical,
             displayLandmarks = display,
             surfaceTopology = globalObservation.surfaceTopology,
+            surfaceTextureCoordinates = globalObservation.surfaceTextureCoordinates,
             lipAnchor = lipAnchor,
             features = featureStates,
             regions = regions,
@@ -283,6 +291,25 @@ class HybridFullFaceStateComposer(
         observation: FaceObservation?,
         feature: FaceFeatureObservationState?,
     ): Boolean = observation != null && (feature?.tracking ?: observation.quality.tracking)
+
+    private fun localObservationAgeWeight(
+        globalObservation: FaceObservation,
+        localObservation: FaceObservation?,
+    ): Float {
+        val local = localObservation ?: return 0f
+        val ageNs = (globalObservation.sensorTimestampNs - local.sensorTimestampNs)
+            .coerceAtLeast(0L)
+        if (ageNs <= maximumLocalObservationAgeNs) return 1f
+        if (localObservationAgeFadeOutNs <= 0L) return 0f
+        return (1.0 -
+            (ageNs - maximumLocalObservationAgeNs).toDouble() /
+                localObservationAgeFadeOutNs.toDouble())
+            .toFloat()
+            .coerceIn(0f, 1f)
+    }
+
+    private fun saturatedAdd(first: Long, second: Long): Long =
+        if (Long.MAX_VALUE - first < second) Long.MAX_VALUE else first + second
 
     private fun mapOptionalFeatureRegion(
         region: FaceRegion,

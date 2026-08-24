@@ -12,16 +12,21 @@ import com.example.armakeup.render.NativeVulkanBootstrap
 import com.example.armakeup.render.NativeVulkanDiagnosticRuntime
 import com.example.armakeup.tracking.CanonicalFaceTransform
 import com.example.armakeup.tracking.TrackingGeometryExtractor
+import com.example.armakeup.tracking.face.DynamicLipContourCoverage
 import com.example.armakeup.tracking.face.FaceMesh468RegionTopology
 import com.example.armakeup.tracking.face.FaceLocalGeometryPerspectivePolicy
 import com.example.armakeup.tracking.face.FaceLandmarkSet
 import com.example.armakeup.tracking.face.FaceRegion
 import com.example.armakeup.tracking.face.FaceSurfaceDepthSampler
-import com.example.armakeup.tracking.face.FaceSurfaceLipTopology
-import com.example.armakeup.tracking.face.FaceSurfaceProjectedLipDeformer
+import com.example.armakeup.tracking.face.FaceSurfaceLipCoverage
+import com.example.armakeup.tracking.face.FaceSurfaceCameraLipDeformer
 import com.example.armakeup.tracking.face.FaceSurfaceTopology
+import com.example.armakeup.tracking.face.FaceSurfaceTextureCoordinates
 import com.example.armakeup.tracking.face.FullFaceRenderState
 import com.example.armakeup.tracking.face.HybridFullFaceStateComposer
+import com.example.armakeup.tracking.face.TrackingLossEpisodeTracker
+import com.example.armakeup.tracking.face.TrackingVisibilityController
+import com.example.armakeup.tracking.face.TrackingVisibilityDecision
 import com.google.ar.core.AugmentedFace
 import com.google.ar.core.Coordinates2d
 import com.google.ar.core.Frame
@@ -65,6 +70,9 @@ internal class ArCoreVulkanFaceRenderer(
     private val nativeLipVertices = FloatArray(lipTessellator.vertexCount * NATIVE_VERTEX_COMPONENTS)
     private var faceLipTopology: FaceSurfaceTopology? = null
     private var faceLipIndices = EMPTY_SHORTS
+    private var faceLipTextureCoordinates: FaceSurfaceTextureCoordinates? = null
+    private var faceLipCoverage = EMPTY_FLOATS
+    private val dynamicLipContour = FloatArray(DynamicLipContourCoverage.FLOAT_COUNT)
     private var deformedSurfaceTimestampNs = 0L
     private var deformedSurfaceCoordinates: FloatArray? = null
     private val nativeFaceVertices = FloatArray(
@@ -86,6 +94,7 @@ internal class ArCoreVulkanFaceRenderer(
         maximumGlobalAffineResidual = MAXIMUM_GLOBAL_AFFINE_RESIDUAL,
         fullLocalAffineResidual = FULL_LOCAL_AFFINE_RESIDUAL,
         maximumLocalObservationAgeNs = MAXIMUM_LOCAL_OBSERVATION_AGE_NS,
+        localObservationAgeFadeOutNs = LOCAL_OBSERVATION_AGE_FADE_OUT_NS,
         perspectivePolicy = FaceLocalGeometryPerspectivePolicy.profileSafe(),
     )
 
@@ -106,8 +115,9 @@ internal class ArCoreVulkanFaceRenderer(
     private var lastRenderState: FullFaceRenderState? = null
     private var statusWindowStartNs = 0L
     private var statusWindowFrames = 0
-    private var consecutiveGlobalTrackingLossFrames = 0
-    private var totalGlobalTrackingLossFrames = 0L
+    private val trackingLossEpisodes = TrackingLossEpisodeTracker()
+    private val trackingVisibilityController = TrackingVisibilityController()
+    private var lastTrackingVisibilityDecision = TrackingVisibilityDecision.HIDDEN
     private var lastLipDepthSamplingStats: LipDepthSamplingStats? = null
 
     init {
@@ -192,11 +202,25 @@ internal class ArCoreVulkanFaceRenderer(
                 displayRotation = currentDisplayRotation,
                 imageRotationDegrees = currentImageRotationDegrees,
             )
-            if (renderState == null) {
-                consecutiveGlobalTrackingLossFrames++
-                totalGlobalTrackingLossFrames++
+            trackingLossEpisodes.record(timestampNs, tracking = renderState != null)?.let { episode ->
+                Log.i(
+                    TAG,
+                    "FF5 tracking reacquired after frames=${episode.frameCount} " +
+                        "durationMs=${episode.durationNs / 1_000_000L}",
+                )
+            }
+            lastTrackingVisibilityDecision = if (faceDepthEnabled) {
+                trackingVisibilityController.update(timestampNs, tracking = renderState != null)
             } else {
-                consecutiveGlobalTrackingLossFrames = 0
+                if (renderState != null) {
+                    TrackingVisibilityDecision(
+                        useCurrentGeometry = true,
+                        retainLastGeometry = false,
+                        opacity = 1f,
+                    )
+                } else {
+                    TrackingVisibilityDecision.HIDDEN
+                }
             }
             val retainedTimestampNs = if (
                 android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O_MR1
@@ -206,8 +230,18 @@ internal class ArCoreVulkanFaceRenderer(
                 lastAcceptedCameraTimestampNs
             }
             if (retainedTimestampNs == timestampNs) {
-                uploadFaceSurface(activeRuntime, renderState, timestampNs)
-                uploadLip(activeRuntime, renderState, timestampNs)
+                uploadFaceSurface(
+                    activeRuntime,
+                    renderState,
+                    timestampNs,
+                    lastTrackingVisibilityDecision,
+                )
+                uploadLip(
+                    activeRuntime,
+                    renderState,
+                    timestampNs,
+                    lastTrackingVisibilityDecision,
+                )
                 lastRenderState = renderState
                 lastAcceptedCameraTimestampNs = timestampNs
             }
@@ -298,12 +332,18 @@ internal class ArCoreVulkanFaceRenderer(
         activeRuntime: NativeVulkanDiagnosticRuntime,
         state: FullFaceRenderState?,
         timestampNs: Long,
+        visibility: TrackingVisibilityDecision,
     ) {
         val outer = state?.region(FaceRegion.LIPS_OUTER)
         val inner = state?.region(FaceRegion.LIPS_INNER)
         if (outer == null || inner == null ||
             outer.pointCount != LIP_CONTOUR_POINT_COUNT ||
             inner.pointCount != LIP_CONTOUR_POINT_COUNT) {
+            if (faceDepthEnabled && visibility.retainLastGeometry &&
+                uploadRetainedFaceAttachedLipOpacity(activeRuntime, visibility.opacity)
+            ) {
+                return
+            }
             if (lastValidLipTimestampNs > 0L &&
                 timestampNs - lastValidLipTimestampNs <= TRACKING_LOSS_HOLD_NS
             ) {
@@ -318,7 +358,9 @@ internal class ArCoreVulkanFaceRenderer(
             lastLipDepthSamplingStats = null
             return
         }
-        if (faceDepthEnabled && uploadFaceAttachedLip(activeRuntime, state)) {
+        if (faceDepthEnabled &&
+            uploadFaceAttachedLip(activeRuntime, state, visibility.opacity)
+        ) {
             lastValidLipTimestampNs = timestampNs
             return
         }
@@ -408,19 +450,17 @@ internal class ArCoreVulkanFaceRenderer(
     private fun uploadFaceAttachedLip(
         activeRuntime: NativeVulkanDiagnosticRuntime,
         state: FullFaceRenderState,
+        opacity: Float,
     ): Boolean {
-        val topology = state.surfaceTopology ?: return false
-        if (faceLipTopology != topology) {
-            faceLipTopology = topology
-            faceLipIndices = FaceSurfaceLipTopology.extractBandIndices(
-                surface = topology,
-                canonicalLandmarks = state.canonicalLandmarks,
-                outerContour = LipLandmarkTopology.outerContour,
-                innerContour = LipLandmarkTopology.innerContour,
-            )
-            Log.i(TAG, "Face-attached lip triangles=${faceLipIndices.size / 3}")
-        }
-        if (faceLipIndices.isEmpty()) return false
+        if (!ensureFaceLipResources(state)) return false
+        val outer = state.region(FaceRegion.LIPS_OUTER) ?: return false
+        val inner = state.region(FaceRegion.LIPS_INNER) ?: return false
+        DynamicLipContourCoverage.write(
+            outer = outer,
+            inner = inner,
+            opacity = opacity,
+            destination = dynamicLipContour,
+        )
 
         val display = state.displayLandmarks
         val projectedSurface = projectedSurfaceCoordinates(state)
@@ -436,7 +476,7 @@ internal class ArCoreVulkanFaceRenderer(
             nativeLipVertices[destination++] = y
             nativeLipVertices[destination++] = x
             nativeLipVertices[destination++] = y
-            nativeLipVertices[destination++] = 1f
+            nativeLipVertices[destination++] = faceLipCoverage[index] * opacity
             nativeLipVertices[destination++] = depth
         }
         val vertices = if (requiredComponents == nativeLipVertices.size) {
@@ -456,7 +496,7 @@ internal class ArCoreVulkanFaceRenderer(
         lastLipDepthSamplingStats = LipDepthSamplingStats(
             minimumNdcDepth = minimumDepth,
             maximumNdcDepth = maximumDepth,
-            triangleSampleCount = display.pointCount,
+            triangleSampleCount = faceLipIndices.size / FaceSurfaceTopology.INDICES_PER_TRIANGLE,
             fallbackSampleCount = 0,
             overlappingSampleCount = 0,
             maximumOverlapSpread = 0f,
@@ -470,9 +510,47 @@ internal class ArCoreVulkanFaceRenderer(
                 sampledDepthMinimum = minimumDepth,
                 sampledDepthMaximum = maximumDepth,
                 visualizeSampledDepth = visualizeLipDepth,
+                dynamicContour = dynamicLipContour,
                 visible = true,
             ),
         ) { "ARCore Vulkan face-attached lip upload failed" }
+        return true
+    }
+
+    private fun uploadRetainedFaceAttachedLipOpacity(
+        activeRuntime: NativeVulkanDiagnosticRuntime,
+        opacity: Float,
+    ): Boolean {
+        if (faceLipCoverage.isEmpty() || faceLipIndices.isEmpty() ||
+            lastValidLipTimestampNs <= 0L
+        ) {
+            return false
+        }
+        faceLipCoverage.indices.forEach { index ->
+            nativeLipVertices[index * NATIVE_VERTEX_COMPONENTS + 4] =
+                faceLipCoverage[index] * opacity
+        }
+        dynamicLipContour[DynamicLipContourCoverage.OPACITY_INDEX] = opacity
+        val requiredComponents = faceLipCoverage.size * NATIVE_VERTEX_COMPONENTS
+        val vertices = if (requiredComponents == nativeLipVertices.size) {
+            nativeLipVertices
+        } else {
+            nativeLipVertices.copyOf(requiredComponents)
+        }
+        val depthStats = lastLipDepthSamplingStats
+        check(
+            activeRuntime.updateTrackingTestLip(
+                vertices = vertices,
+                indices = faceLipIndices,
+                temporalFlowEnabled = false,
+                lipDepthBias = lipDepthBias,
+                sampledDepthMinimum = depthStats?.minimumNdcDepth ?: 0f,
+                sampledDepthMaximum = depthStats?.maximumNdcDepth ?: 0f,
+                visualizeSampledDepth = visualizeLipDepth,
+                dynamicContour = dynamicLipContour,
+                visible = opacity > 0f,
+            ),
+        ) { "ARCore Vulkan retained face-attached lip opacity upload failed" }
         return true
     }
 
@@ -480,6 +558,7 @@ internal class ArCoreVulkanFaceRenderer(
         activeRuntime: NativeVulkanDiagnosticRuntime,
         state: FullFaceRenderState?,
         timestampNs: Long,
+        visibility: TrackingVisibilityDecision,
     ) {
         if (!faceDepthEnabled) {
             activeRuntime.updateFaceOccluder(
@@ -495,6 +574,7 @@ internal class ArCoreVulkanFaceRenderer(
         if (display == null || topology == null ||
             display.pointCount != FaceMesh468RegionTopology.POINT_COUNT
         ) {
+            if (visibility.retainLastGeometry && lastValidFaceTimestampNs > 0L) return
             if (lastValidFaceTimestampNs > 0L &&
                 timestampNs - lastValidFaceTimestampNs <= TRACKING_LOSS_HOLD_NS
             ) {
@@ -527,12 +607,19 @@ internal class ArCoreVulkanFaceRenderer(
         }?.let { return it }
         val outer = state.region(FaceRegion.LIPS_OUTER)
         val inner = state.region(FaceRegion.LIPS_INNER)
+        val textureCoordinates = state.surfaceTextureCoordinates
         val coordinates = if (outer != null && inner != null &&
+            textureCoordinates != null && ensureFaceLipResources(state) &&
             outer.pointCount == LipLandmarkTopology.outerContour.size &&
             inner.pointCount == LipLandmarkTopology.innerContour.size
         ) {
-            FaceSurfaceProjectedLipDeformer.deform(
+            FaceSurfaceCameraLipDeformer.deform(
+                canonicalLandmarks = state.canonicalLandmarks,
                 displayLandmarks = state.displayLandmarks,
+                textureCoordinates = textureCoordinates,
+                deformationSupport = faceLipCoverage,
+                facePose = state.globalPose,
+                cameraFrame = state.cameraFrame,
                 outerGeometry = outer,
                 innerGeometry = inner,
                 outerIndices = LipLandmarkTopology.outerContour,
@@ -544,6 +631,30 @@ internal class ArCoreVulkanFaceRenderer(
         deformedSurfaceTimestampNs = state.renderTimestampNs
         deformedSurfaceCoordinates = coordinates
         return coordinates
+    }
+
+    private fun ensureFaceLipResources(state: FullFaceRenderState): Boolean {
+        val topology = state.surfaceTopology ?: return false
+        val textureCoordinates = state.surfaceTextureCoordinates ?: return false
+        if (faceLipTopology != topology) {
+            faceLipTopology = topology
+            faceLipIndices = topology.packedCopy()
+        }
+        if (faceLipTextureCoordinates != textureCoordinates) {
+            faceLipTextureCoordinates = textureCoordinates
+            faceLipCoverage = FaceSurfaceLipCoverage.build(
+                textureCoordinates = textureCoordinates,
+                outerContour = LipLandmarkTopology.outerContour,
+                innerContour = LipLandmarkTopology.innerContour,
+            )
+            Log.i(
+                TAG,
+                "Canonical-UV camera-space lip vertices=" +
+                    "${faceLipCoverage.count { it > 0f }} " +
+                    "faceTriangles=${faceLipIndices.size / 3}",
+            )
+        }
+        return faceLipIndices.isNotEmpty() && faceLipCoverage.any { it > 0f }
     }
 
     private fun depthSamplerFor(topology: FaceSurfaceTopology): FaceSurfaceDepthSampler {
@@ -571,7 +682,8 @@ internal class ArCoreVulkanFaceRenderer(
                 Locale.US,
                 "ARCore + Vulkan %.1f FPS · depth=%s\n" +
                     "same Frame: camera + ARCore pose + hybrid lips\n" +
-                    "yaw=%s pitch=%s loss=%d total=%d\n" +
+                    "yaw=%s pitch=%s loss=%d total=%d max=%d/%dms\n" +
+                    "visibility=%.2f retain=%s current=%s\n" +
                     "lipLocal=%.2f age=%s residual=%s\n" +
                     "lipDepth=%s tri=%d fallback=%d overlap=%d spread=%s bias=%.6f\n" +
                     "debugFace=%s debugLip=%s\n%s",
@@ -579,8 +691,13 @@ internal class ArCoreVulkanFaceRenderer(
                 if (faceDepthEnabled) "3D" else "2D",
                 angles?.first?.let { String.format(Locale.US, "%.1f", it) } ?: "n/a",
                 angles?.second?.let { String.format(Locale.US, "%.1f", it) } ?: "n/a",
-                consecutiveGlobalTrackingLossFrames,
-                totalGlobalTrackingLossFrames,
+                trackingLossEpisodes.consecutiveLossFrames,
+                trackingLossEpisodes.totalLossFrames,
+                trackingLossEpisodes.maximumLossFrames,
+                trackingLossEpisodes.maximumLossDurationNs / 1_000_000L,
+                lastTrackingVisibilityDecision.opacity,
+                lastTrackingVisibilityDecision.retainLastGeometry,
+                lastTrackingVisibilityDecision.useCurrentGeometry,
                 lastRenderState?.attachmentQuality?.localDeformationWeight ?: 0f,
                 lastRenderState?.attachmentQuality?.localObservationAgeNs
                     ?.let { "${it / 1_000_000L}ms" } ?: "global",
@@ -603,8 +720,13 @@ internal class ArCoreVulkanFaceRenderer(
         Log.i(
             TAG,
             "FF5 ts=$timestampNs depth=$faceDepthEnabled yaw=${angles?.first} " +
-                "pitch=${angles?.second} loss=$consecutiveGlobalTrackingLossFrames/" +
-                "$totalGlobalTrackingLossFrames localWeight=" +
+                "pitch=${angles?.second} loss=${trackingLossEpisodes.consecutiveLossFrames}/" +
+                "${trackingLossEpisodes.totalLossFrames} maxLoss=" +
+                "${trackingLossEpisodes.maximumLossFrames}/" +
+                "${trackingLossEpisodes.maximumLossDurationNs}ns visibility=" +
+                "${lastTrackingVisibilityDecision.opacity}/" +
+                "${lastTrackingVisibilityDecision.retainLastGeometry}/" +
+                "${lastTrackingVisibilityDecision.useCurrentGeometry} localWeight=" +
                 "${lastRenderState?.attachmentQuality?.localDeformationWeight} ageNs=" +
                 "${lastRenderState?.attachmentQuality?.localObservationAgeNs} residual=" +
                 "${lastRenderState?.attachmentQuality?.affineFitResidualNormalized} " +
@@ -684,11 +806,15 @@ internal class ArCoreVulkanFaceRenderer(
         depthSampler = null
         faceLipTopology = null
         faceLipIndices = EMPTY_SHORTS
+        faceLipTextureCoordinates = null
+        faceLipCoverage = EMPTY_FLOATS
         deformedSurfaceTimestampNs = 0L
         deformedSurfaceCoordinates = null
         lastRenderState = null
         lastLipDepthSamplingStats = null
-        consecutiveGlobalTrackingLossFrames = 0
+        trackingLossEpisodes.reset()
+        trackingVisibilityController.reset()
+        lastTrackingVisibilityDecision = TrackingVisibilityDecision.HIDDEN
         statusWindowStartNs = 0L
         statusWindowFrames = 0
         arCoreObservationAdapter.clear()
@@ -725,6 +851,7 @@ internal class ArCoreVulkanFaceRenderer(
         const val FULL_LOCAL_AFFINE_RESIDUAL = 0.006f
         const val MAXIMUM_GLOBAL_AFFINE_RESIDUAL = 0.016f
         const val MAXIMUM_LOCAL_OBSERVATION_AGE_NS = 120_000_000L
+        const val LOCAL_OBSERVATION_AGE_FADE_OUT_NS = 100_000_000L
         const val TRACKING_LOSS_HOLD_NS = 100_000_000L
         const val MAXIMUM_RUNTIME_RECOVERY_ATTEMPTS = 1
         const val NATIVE_VERTEX_COMPONENTS = 6

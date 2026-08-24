@@ -2,6 +2,9 @@ package com.example.armakeup.arcore
 
 import android.os.SystemClock
 import android.util.Log
+import com.example.armakeup.makeup.LipLandmarkTopology
+import com.example.armakeup.render.FaceAnchoredLipContourStabilizer
+import com.example.armakeup.tracking.TrackingGeometryExtractor
 import com.example.armakeup.tracking.face.FaceCoordinateSpace
 import com.example.armakeup.tracking.face.FaceFeatureObservationState
 import com.example.armakeup.tracking.face.FaceLandmarkSet
@@ -47,6 +50,16 @@ internal class ArCoreMediaPipeLipTracker(
     private val lock = Any()
     private val busy = AtomicBoolean(false)
     private val latestObservation = AtomicReference<FaceObservation?>()
+    private val localLipContourStabilizer = FaceAnchoredLipContourStabilizer(
+        localCutoffHz = LOCAL_CONTOUR_CUTOFF_HZ,
+        maximumFrameGapMs = LOCAL_CONTOUR_MAXIMUM_GAP_MS,
+    )
+    private val stableAnchorCoordinates =
+        FloatArray(TrackingGeometryExtractor.stableAnchorIndices.size * XY_COMPONENT_COUNT)
+    private val outerLipCoordinates =
+        FloatArray(LipLandmarkTopology.outerContour.size * XY_COMPONENT_COUNT)
+    private val innerLipCoordinates =
+        FloatArray(LipLandmarkTopology.innerContour.size * XY_COMPONENT_COUNT)
     private val conversionExecutor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "arcore-mediapipe-conversion")
     }
@@ -190,6 +203,7 @@ internal class ArCoreMediaPipeLipTracker(
         inputToClose?.close()
         busy.set(false)
         latestObservation.set(null)
+        localLipContourStabilizer.reset()
     }
 
     private fun createLandmarker(delegate: Delegate): FaceLandmarker {
@@ -249,6 +263,7 @@ internal class ArCoreMediaPipeLipTracker(
             }
             lastResultTimestampNs = resultAtNs
             if (landmarks.size == topology.pointCount) {
+                stabilizeLocalLipShape(coordinates, sensorTimestampNs)
                 latestObservation.set(
                     FaceObservation(
                         backendId = backendId,
@@ -282,6 +297,73 @@ internal class ArCoreMediaPipeLipTracker(
             }
         }
         releaseActiveInput(inputImage)
+    }
+
+    /**
+     * Removes only high-frequency MediaPipe lip-shape noise before hybrid composition.
+     *
+     * The stabilizer transports its previous contour through the current MediaPipe rigid
+     * eye/nose/cheek pose first. Hybrid composition then maps that local shape into the current
+     * ARCore pose, so neither camera motion nor head motion receives an additional low-pass lag.
+     */
+    private fun stabilizeLocalLipShape(coordinates: FloatArray, sensorTimestampNs: Long) {
+        copyRegionCoordinates(
+            source = coordinates,
+            landmarkIndices = TrackingGeometryExtractor.stableAnchorIndices,
+            destination = stableAnchorCoordinates,
+        )
+        copyRegionCoordinates(
+            source = coordinates,
+            landmarkIndices = LipLandmarkTopology.outerContour,
+            destination = outerLipCoordinates,
+        )
+        copyRegionCoordinates(
+            source = coordinates,
+            landmarkIndices = LipLandmarkTopology.innerContour,
+            destination = innerLipCoordinates,
+        )
+        localLipContourStabilizer.stabilize(
+            anchors = stableAnchorCoordinates,
+            outerContour = outerLipCoordinates,
+            innerContour = innerLipCoordinates,
+            timestampMs = sensorTimestampNs / NANOS_PER_MILLISECOND,
+        )
+        writeRegionCoordinates(
+            destination = coordinates,
+            landmarkIndices = LipLandmarkTopology.outerContour,
+            source = outerLipCoordinates,
+        )
+        writeRegionCoordinates(
+            destination = coordinates,
+            landmarkIndices = LipLandmarkTopology.innerContour,
+            source = innerLipCoordinates,
+        )
+    }
+
+    private fun copyRegionCoordinates(
+        source: FloatArray,
+        landmarkIndices: IntArray,
+        destination: FloatArray,
+    ) {
+        landmarkIndices.forEachIndexed { pointIndex, landmarkIndex ->
+            val sourceIndex = landmarkIndex * COMPONENT_COUNT
+            val destinationIndex = pointIndex * XY_COMPONENT_COUNT
+            destination[destinationIndex] = source[sourceIndex]
+            destination[destinationIndex + 1] = source[sourceIndex + 1]
+        }
+    }
+
+    private fun writeRegionCoordinates(
+        destination: FloatArray,
+        landmarkIndices: IntArray,
+        source: FloatArray,
+    ) {
+        landmarkIndices.forEachIndexed { pointIndex, landmarkIndex ->
+            val destinationIndex = landmarkIndex * COMPONENT_COUNT
+            val sourceIndex = pointIndex * XY_COMPONENT_COUNT
+            destination[destinationIndex] = source[sourceIndex]
+            destination[destinationIndex + 1] = source[sourceIndex + 1]
+        }
     }
 
     private fun releaseActiveInput(inputImage: MPImage) {
@@ -336,5 +418,8 @@ internal class ArCoreMediaPipeLipTracker(
         const val NANOS_PER_MILLISECOND = 1_000_000L
         const val NANOS_PER_SECOND = 1_000_000_000L
         const val FPS_RESPONSE = 0.2f
+        const val XY_COMPONENT_COUNT = 2
+        const val LOCAL_CONTOUR_CUTOFF_HZ = 8f
+        const val LOCAL_CONTOUR_MAXIMUM_GAP_MS = 220L
     }
 }

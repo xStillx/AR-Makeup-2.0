@@ -574,7 +574,7 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
             "com.example.armakeup.extra.VISUALIZE_VULKAN_FACE_DEPTH"
         const val EXTRA_VISUALIZE_VULKAN_LIP_DEPTH =
             "com.example.armakeup.extra.VISUALIZE_VULKAN_LIP_DEPTH"
-        const val DEFAULT_VULKAN_LIP_DEPTH_BIAS = -0.0005f
+        const val DEFAULT_VULKAN_LIP_DEPTH_BIAS = 0f
         private const val MIN_CAMERA_FPS = 30
         private const val MAX_CAMERA_FPS = 60
         private const val PERFORMANCE_LOG_TAG = "ARMakeupPerf"

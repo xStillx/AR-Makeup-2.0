@@ -30,7 +30,7 @@ FF5 передаёт ARCore 468-point triangle topology и projected NDC depth �
 
 Следующий чат должен начать с controlled 2D/3D A/B на новом устройстве. Не тюнить predictor/gyro. Сначала разделить XY composition, sampled depth/depth bias и visibility/loss gating; полезно добавить debug-визуализацию face/lip depth и telemetry yaw/pitch/local weight/residual/age. Рассмотреть полноценную camera-space 3D local lip deformation/canonical UV attachment вместо текущей 2D affine geometry с навешанной глубиной. До устранения forward drift, skin holes и pitch flicker не переходить к FF6/material tuning.
 
-## Несохранённый FF5 follow-up — причины разделены, shared-surface proof не принят
+## Сохранённый FF5 follow-up — причины разделены, shared-surface proof не принят
 
 На подключённом SM-G990B выполнен controlled follow-up поверх `b8b3480`. Добавлены debug face-depth/sampled-lip-depth visualization, launch-configurable lip depth bias и раз в секунду telemetry yaw/pitch, local weight, observation age, affine residual, global tracking loss, triangle/fallback/overlap depth sampling. Default остаётся `ENABLE_VULKAN_FACE_DEPTH=false`, default bias исходный `-0.0005`, predictor/gyro/flow не возвращались.
 
@@ -40,7 +40,21 @@ FF5 передаёт ARCore 468-point triangle topology и projected NDC depth �
 
 Pitch-down измерен отдельно: около `pitch=+28…30°` total ARCore global tracking loss вырос с `2` до `38`, был sample `yaw=null pitch=null loss=2/36`. Текущий `100 ms` hold поэтому может переключать hide/show на более длинных loss bursts и объясняет flicker. Не увеличивать hold вслепую: сначала записать per-episode frame count/duration и проверить мягкий visibility transition/reacquisition policy.
 
-Текущий worktree не сохранён commit и по-прежнему визуально не принят. Полный локальный gate: `180` unit-тестов, `0` failures/errors, `lintDebug`, `assembleDebug`, native/SPIR-V четыре ABI. Установленный APK SHA-256 `5B2CDEC797DC3AE0B3E20C0FEA6CA1B984D9DDF343D81F90AC31A9A7743A55F7`. Debug screenshots лежат в `app/build/armakeup_ff5_*.png`. Rollback остаётся `80aaf7e`/`92fc514`; сохранённый rejected candidate остаётся `18cf1e0`/`b8b3480`.
+Follow-up сохранён commit `75425b1` и по-прежнему визуально не принят. Полный локальный gate: `180` unit-тестов, `0` failures/errors, `lintDebug`, `assembleDebug`, native/SPIR-V четыре ABI. Установленный APK SHA-256 `5B2CDEC797DC3AE0B3E20C0FEA6CA1B984D9DDF343D81F90AC31A9A7743A55F7`. Debug screenshots лежат в `app/build/armakeup_ff5_*.png`. Rollback остаётся `80aaf7e`/`92fc514`; исходный rejected candidate остаётся `18cf1e0`/`b8b3480`.
+
+## Текущий FF5 structural candidate — canonical UV, camera-space deformation и measured fades
+
+ARCore canonical texture coordinates добавлены в model-independent `FaceObservation`/`FullFaceRenderState`. Lip coverage вычисляется аналитически в canonical UV, имеет feathered границу и рисуется полной исходной face topology: depth-only face и lipstick используют одну projected/deformed surface и одинаковые `898` triangles. Старый отдельный lip mesh с sampled Z и грубый whole-triangle subset в этом candidate не используются. На SM-G990B получено `40` coverage vertices, `fallback=0`, `overlap=0`, `cameraDropped=0`, примерно `59 FPS`; front и yaw около `41–44°` не показали прежних skin holes или грубого triangle drift. Structural default bias теперь `0`, launch extra остаётся для диагностики.
+
+Добавлены точные loss episodes и FF5-only visibility controller. Измеренные короткие pitch-down bursts обычно занимали `1–3` camera frames/около `121 ms`, максимум первой серии `303 ms`; реальные длинные потери доходили до `28` frames/`1758 ms`. Policy: полная opacity до `100 ms`, fade retained geometry до нуля к `350 ms`, fade-in после reacquisition за `120 ms`. Короткий `2`-frame/`121 ms` burst удерживается без мгновенного hide; длинная потеря корректно скрывает маску. Predictor/gyro/flow выключены, 2D rollback не изменён.
+
+Следующий slice заменил screen-space lip geometry с навешанной глубиной на `FaceSurfaceCameraLipDeformer`. MediaPipe outer/inner targets unprojected на текущую ARCore camera-space surface, displacement распространяется по canonical UV на lip band и затем вся общая face/lip surface повторно проецируется. Fragment shader получает динамические outer/inner loops и аналитически вырезает актуальную толщину губ вместо статической vertex coverage. Это заметно улучшило положение и границы при локальном движении губ; yaw, улыбка, открытый рот и наклон головы пользователь оценил как в целом нормальные.
+
+Device-проверка затем нашла два временных разрыва. Latest MediaPipe observation при возрасте чуть больше `120 ms` раньше мгновенно заменялась ARCore contour; теперь local shape сохраняется полностью до `120 ms` и линейно гаснет до `220 ms`. После этого исчез крупный скачок `lipLocal=1↔0`, но точный fragment contour проявил мелкий raw MediaPipe shimmer при движении. Existing face-anchored `8 Hz` local contour stabilizer подключён только к MediaPipe lip shape: предыдущий contour сначала переносится current eye/nose/cheek similarity pose, глобальное движение по-прежнему принадлежит current ARCore, predictor/gyro/flow не включены. Gap до `220 ms` согласован с age fade.
+
+Последний visual verdict 2026-08-25 частичный, FF5 не принят. В неподвижном состоянии дрожь исчезла. При движении губ мелкая дрожь остаётся; на резком открытии/закрытии нужно улучшить успеваемость без сдвига global pose. Иногда contour съезжает, а при широко открытом рте неверно оценивается реальная толщина, особенно верхней губы. Пользователь остановил итерацию в этом состоянии и явно сохранил возможность вернуться к принятому 2D отображению. Default `ENABLE_VULKAN_FACE_DEPTH=false`, rollback `80aaf7e`/`92fc514` и его APK hash остаются без изменений.
+
+Финальный gate текущего checkpoint: `187` unit-тестов, `0` failures/errors/skipped, `lintDebug`, `assembleDebug`, native/SPIR-V четыре ABI. Установленный APK SHA-256 `EAF5D9E98E3D08921361DBB1F7E8CAF56D96E77DC1EAB95D6D032E3A9B5757E9`. Запись pitch-down: `app/build/armakeup_ff5_uv_pitch_fade.mp4`; screenshots: `app/build/armakeup_ff5_canonical_uv_*.png` и `app/build/armakeup_ff5_dynamic_contour_live.png`.
 
 ## FF3 contract и следующий этап
 
@@ -50,15 +64,15 @@ Pitch-down измерен отдельно: около `pitch=+28…30°` total 
 
 Локальный gate shadow slice пройден: `164` unit-теста, `0` failures/errors, lint, debug APK и native build четырёх ABI. Candidate APK SHA-256 `90BCC7F81E181F0E2598294A52F5536805318950E385C868532AA2B2F67E56BF`; device acceptance для него не выполнялся и не требуется для невидимых eye fields до checkpoint, если lip output действительно не менялся.
 
-Следующий обязательный шаг — продолжить уже сохранённый FF5 candidate на новом устройстве: controlled A/B `принятый 2D baseline / 3D candidate`, локализация XY/depth/visibility причины и исправление yaw/pitch/depth artifacts. После visual acceptance выполнить thermal/dropout gate, reusable replay и unsupported-device fallback; IMU/flow возвращать только при измеримом residual.
+Следующий обязательный шаг — измерить и исправить motion-only residual текущего candidate: raw/stabilized lip-local displacement и response при резком открытии/закрытии, покадровые изменения affine weight, contour position и отдельно upper/lower lip thickness. Не увеличивать cutoff/thresholds вслепую и не фильтровать current ARCore global pose. После исправления повторить одинаковый live A/B с текущим depth candidate, `ENABLE_VULKAN_FACE_DEPTH=false` и при необходимости exact rollback `80aaf7e`. До visual acceptance не переходить к FF6/material tuning. После acceptance выполнить thermal/dropout gate, reusable replay и unsupported-device fallback; IMU/flow возвращать только при измеримом residual.
 
 ## Репозиторий и состояние
 
 - Путь: `C:\Users\User\AndroidStudioProjects\ARMakeup`.
-- Ветка: `master`; `18cf1e0` сохраняет визуально отклонённый FF5 canonical-depth candidate, `80aaf7e` — device-accepted 2D ARCore→Vulkan hybrid, `2568a67` — mouth/eye contract. Исторические точки отката: `cc82370` / `tracking-v6.2-stable-2026-08-17`, `d4636ac` / `tracking-v6.2-fast-motion-2026-08-17`, `ab8796a` / `material-temporal-v1-candidate-2026-08-17`, `dd095f7` / `tracking-v6.3-gyro-experimental-2026-08-17`; FF1/FF2/native commits `0554924`, `19a2280`, `3419063`, `7bd498f`, `6be330f`, `9bc3efb`, `2fb7cd7`, `082d88e`, `be35764`, `1406c24`. Обычный запуск всё ещё использует Filament; ARCore+Vulkan hybrid включается debug-extras.
+- Ветка: `master`; `75425b1` сохраняет FF5 diagnostics/shared-surface proof, `18cf1e0` — первый визуально отклонённый FF5 canonical-depth candidate, `80aaf7e` — device-accepted 2D ARCore→Vulkan hybrid, `2568a67` — mouth/eye contract. Исторические точки отката: `cc82370` / `tracking-v6.2-stable-2026-08-17`, `d4636ac` / `tracking-v6.2-fast-motion-2026-08-17`, `ab8796a` / `material-temporal-v1-candidate-2026-08-17`, `dd095f7` / `tracking-v6.3-gyro-experimental-2026-08-17`; FF1/FF2/native commits `0554924`, `19a2280`, `3419063`, `7bd498f`, `6be330f`, `9bc3efb`, `2fb7cd7`, `082d88e`, `be35764`, `1406c24`. Обычный запуск всё ещё использует Filament; ARCore+Vulkan hybrid включается debug-extras.
 - Основные коммиты: `cc82370 [V6.2]`, `cd1a560 [UpdateContext]`, `8d48b46 [V6]`, `4f8039b [V5]`, `3d3572e [V4]`, `395d3f3 [V3]`.
 - Kotlin, XML/View UI, один модуль `:app`; `minSdk 24`, `targetSdk/compileSdk 37`.
-- Последняя проверка FF5: `177` unit-тестов без failures/errors, lint и debug APK успешны; native код/SPIR-V собираются для `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`; exact FF5 APK установлен на SM-G990B, infrastructure/lifecycle gate пройден, visual gate отклонён. Принятый 2D checkpoint остаётся `80aaf7e`.
+- Последняя проверка FF5: `187` unit-тестов без failures/errors/skipped, lint и debug APK успешны; native код/SPIR-V собираются для `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`; camera-space/dynamic-contour APK установлен на SM-G990B, functional gate пройден, visual gate частично улучшен, но не принят из-за motion jitter/contour/thickness residual. Принятый 2D checkpoint остаётся `80aaf7e`.
 
 ## Текущий pipeline
 
