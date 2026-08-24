@@ -154,6 +154,83 @@ class HybridFullFaceStateComposerTest {
         )
     }
 
+    @Test
+    fun `publishes independently sourced eye states and normalized aperture`() {
+        val featureTopology = FaceTopologyDescriptor("feature-face", 1, 14)
+        val featureComposer = HybridFullFaceStateComposer(
+            stableAnchorIndices = intArrayOf(0, 1, 2, 3),
+            outerLipIndices = intArrayOf(4),
+            innerLipIndices = intArrayOf(5),
+            leftEyeIndices = intArrayOf(6, 8, 7, 9),
+            rightEyeIndices = intArrayOf(10, 12, 11, 13),
+            mouthAperture = FaceApertureTopology(4, 5, 4, 5),
+            leftEyeAperture = FaceApertureTopology(6, 7, 8, 9),
+            rightEyeAperture = FaceApertureTopology(10, 11, 12, 13),
+            upperInnerLipIndex = 4,
+            lowerInnerLipIndex = 5,
+            maximumGlobalAffineResidual = 0.02f,
+        )
+        val localCoordinates = floatArrayOf(
+            0.1f, 0.1f, 0f,
+            0.9f, 0.1f, 0f,
+            0.1f, 0.9f, 0f,
+            0.9f, 0.9f, 0f,
+            0.45f, 0.48f, 0f,
+            0.55f, 0.52f, 0f,
+            0.20f, 0.30f, 0f,
+            0.40f, 0.30f, 0f,
+            0.30f, 0.28f, 0f,
+            0.30f, 0.32f, 0f,
+            0.60f, 0.30f, 0f,
+            0.80f, 0.30f, 0f,
+            0.70f, 0.28f, 0f,
+            0.70f, 0.32f, 0f,
+        )
+        val globalCoordinates = mapCoordinates(featureTopology, localCoordinates)
+        val global = observationForTopology(
+            topology = featureTopology,
+            displayCoordinates = globalCoordinates,
+            sensorTimestampNs = 20L,
+            role = FaceObservationRole.GLOBAL_POSE,
+            features = FaceObservationFeatures(
+                mouth = FaceFeatureObservationState(tracking = true),
+                leftEye = FaceFeatureObservationState(tracking = true),
+                rightEye = FaceFeatureObservationState(tracking = true),
+            ),
+        )
+        val local = observationForTopology(
+            topology = featureTopology,
+            displayCoordinates = localCoordinates,
+            sensorTimestampNs = 10L,
+            role = FaceObservationRole.LOCAL_DEFORMATION,
+            features = FaceObservationFeatures(
+                mouth = FaceFeatureObservationState(tracking = true),
+                leftEye = FaceFeatureObservationState(tracking = true),
+                rightEye = FaceFeatureObservationState(tracking = false),
+            ),
+        )
+
+        val state = featureComposer.compose(global, local, renderTimestampNs = 21L)
+
+        assertNotNull(state)
+        state!!
+        assertEquals(
+            FaceFeatureGeometrySource.LOCAL_DEFORMATION,
+            state.features.leftEye.geometrySource,
+        )
+        assertEquals(10L, state.features.leftEye.observationTimestampNs)
+        assertEquals(0.6f * 0.04f / (0.7f * 0.20f), state.features.leftEye.apertureRatio!!, 1e-5f)
+        assertEquals(
+            FaceFeatureGeometrySource.GLOBAL_FALLBACK,
+            state.features.rightEye.geometrySource,
+        )
+        assertEquals(20L, state.features.rightEye.observationTimestampNs)
+        assertNotNull(state.region(FaceRegion.LEFT_EYE))
+        assertNotNull(state.region(FaceRegion.RIGHT_EYE))
+        assertNull(state.features.leftEye.confidence)
+        assertNull(state.features.leftEye.visibleFraction)
+    }
+
     private fun globalObservation(
         displayCoordinates: FloatArray,
         sensorTimestampNs: Long,
@@ -235,6 +312,18 @@ class HybridFullFaceStateComposerTest {
         }
     }
 
+    private fun mapCoordinates(
+        topology: FaceTopologyDescriptor,
+        source: FloatArray,
+    ): FloatArray = FloatArray(source.size).also {
+        repeat(topology.pointCount) { pointIndex ->
+            val index = pointIndex * 3
+            it[index] = 0.7f * source[index] + 0.1f
+            it[index + 1] = 0.6f * source[index + 1] + 0.2f
+            it[index + 2] = 0f
+        }
+    }
+
     private fun mapWithSplitFrames(source: FloatArray): FloatArray = FloatArray(source.size).also {
         repeat(source.size / 3) { pointIndex ->
             val index = pointIndex * 3
@@ -253,6 +342,7 @@ class HybridFullFaceStateComposerTest {
         displayCoordinates: FloatArray,
         sensorTimestampNs: Long,
         role: FaceObservationRole,
+        features: FaceObservationFeatures = FaceObservationFeatures(),
     ): FaceObservation {
         if (role == FaceObservationRole.LOCAL_DEFORMATION) {
             return FaceObservation(
@@ -266,6 +356,7 @@ class HybridFullFaceStateComposerTest {
                     displayCoordinates,
                 ),
                 quality = FaceObservationQuality(tracking = true),
+                features = features,
             )
         }
         return FaceObservation(
@@ -295,6 +386,7 @@ class HybridFullFaceStateComposerTest {
                 cameraFromWorld = FaceMatrix4.columnMajor(identityMatrix()),
             ),
             quality = FaceObservationQuality(tracking = true),
+            features = features,
         )
     }
 

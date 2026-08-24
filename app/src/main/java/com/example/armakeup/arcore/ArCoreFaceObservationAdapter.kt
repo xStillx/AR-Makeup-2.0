@@ -5,8 +5,10 @@ import android.view.Surface
 import com.example.armakeup.tracking.face.FaceCameraFrameMetadata
 import com.example.armakeup.tracking.face.FaceCoordinateSpace
 import com.example.armakeup.tracking.face.FaceLandmarkSet
+import com.example.armakeup.tracking.face.FaceFeatureObservationState
 import com.example.armakeup.tracking.face.FaceMatrix4
 import com.example.armakeup.tracking.face.FaceObservation
+import com.example.armakeup.tracking.face.FaceObservationFeatures
 import com.example.armakeup.tracking.face.FaceObservationQuality
 import com.example.armakeup.tracking.face.FaceObservationRole
 import com.example.armakeup.tracking.face.FacePose
@@ -102,7 +104,12 @@ internal class ArCoreFaceObservationAdapter : FaceTrackingBackend {
             quality = FaceObservationQuality(
                 tracking = true,
                 trackingConfidence = null,
-                visibleFraction = 1f,
+                visibleFraction = null,
+            ),
+            features = FaceObservationFeatures(
+                mouth = FaceFeatureObservationState(tracking = true),
+                leftEye = FaceFeatureObservationState(tracking = true),
+                rightEye = FaceFeatureObservationState(tracking = true),
             ),
         ).also(latestObservation::set)
     }

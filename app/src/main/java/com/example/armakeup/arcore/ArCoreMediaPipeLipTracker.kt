@@ -3,9 +3,11 @@ package com.example.armakeup.arcore
 import android.os.SystemClock
 import android.util.Log
 import com.example.armakeup.tracking.face.FaceCoordinateSpace
+import com.example.armakeup.tracking.face.FaceFeatureObservationState
 import com.example.armakeup.tracking.face.FaceLandmarkSet
 import com.example.armakeup.tracking.face.FaceObservation
 import com.example.armakeup.tracking.face.FaceObservationDiagnostics
+import com.example.armakeup.tracking.face.FaceObservationFeatures
 import com.example.armakeup.tracking.face.FaceObservationQuality
 import com.example.armakeup.tracking.face.FaceObservationRole
 import com.example.armakeup.tracking.face.FaceTopologies
@@ -262,6 +264,11 @@ internal class ArCoreMediaPipeLipTracker(
                             tracking = true,
                             trackingConfidence = null,
                             visibleFraction = null,
+                        ),
+                        features = FaceObservationFeatures(
+                            mouth = FaceFeatureObservationState(tracking = true),
+                            leftEye = FaceFeatureObservationState(tracking = true),
+                            rightEye = FaceFeatureObservationState(tracking = true),
                         ),
                         diagnostics = FaceObservationDiagnostics(
                             resultTimestampNs = resultAtNs,

@@ -161,6 +161,28 @@ data class FaceObservationQuality(
     }
 }
 
+/** Optional quality reported by a backend for one semantic facial feature. */
+data class FaceFeatureObservationState(
+    val tracking: Boolean,
+    val confidence: Float? = null,
+    val visibleFraction: Float? = null,
+) {
+    init {
+        require(confidence == null || confidence in 0f..1f)
+        require(visibleFraction == null || visibleFraction in 0f..1f)
+    }
+}
+
+/**
+ * Explicit feature-level observation state. Null means that the backend does not report a
+ * calibrated value for that feature; it must not be interpreted as zero confidence.
+ */
+data class FaceObservationFeatures(
+    val mouth: FaceFeatureObservationState? = null,
+    val leftEye: FaceFeatureObservationState? = null,
+    val rightEye: FaceFeatureObservationState? = null,
+)
+
 data class FaceObservationDiagnostics(
     val resultTimestampNs: Long,
     val inferenceDurationMs: Float = 0f,
@@ -193,6 +215,7 @@ data class FaceObservation(
     val pose: FacePose? = null,
     val cameraFrame: FaceCameraFrameMetadata? = null,
     val quality: FaceObservationQuality,
+    val features: FaceObservationFeatures = FaceObservationFeatures(),
     val diagnostics: FaceObservationDiagnostics? = null,
 ) {
     init {
@@ -223,6 +246,44 @@ enum class FaceRegion {
     LEFT_CHEEK,
     RIGHT_CHEEK,
 }
+
+enum class FaceFeatureGeometrySource {
+    LOCAL_DEFORMATION,
+    GLOBAL_FALLBACK,
+    UNAVAILABLE,
+}
+
+/** Renderer-facing provenance and quality for one independently attachable facial feature. */
+data class FaceFeatureRenderState(
+    val geometrySource: FaceFeatureGeometrySource,
+    val observationTimestampNs: Long?,
+    val tracking: Boolean,
+    val confidence: Float? = null,
+    val visibleFraction: Float? = null,
+    val apertureRatio: Float? = null,
+) {
+    init {
+        require(observationTimestampNs == null || observationTimestampNs >= 0L)
+        require(confidence == null || confidence in 0f..1f)
+        require(visibleFraction == null || visibleFraction in 0f..1f)
+        require(apertureRatio == null || (apertureRatio.isFinite() && apertureRatio >= 0f))
+        if (geometrySource == FaceFeatureGeometrySource.UNAVAILABLE) {
+            require(!tracking)
+            require(observationTimestampNs == null)
+            require(confidence == null)
+            require(visibleFraction == null)
+            require(apertureRatio == null)
+        } else {
+            require(observationTimestampNs != null)
+        }
+    }
+}
+
+data class FullFaceFeatureStates(
+    val mouth: FaceFeatureRenderState,
+    val leftEye: FaceFeatureRenderState,
+    val rightEye: FaceFeatureRenderState,
+)
 
 data class NormalizedFacePoint(
     val x: Float,
@@ -301,6 +362,7 @@ class FullFaceRenderState(
     val canonicalLandmarks: FaceLandmarkSet,
     val displayLandmarks: FaceLandmarkSet,
     val lipAnchor: NormalizedFacePoint?,
+    val features: FullFaceFeatureStates,
     regions: Map<FaceRegion, FaceRegionGeometry>,
     val attachmentQuality: FullFaceAttachmentQuality,
     val localDiagnostics: FaceObservationDiagnostics?,

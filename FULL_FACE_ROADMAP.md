@@ -27,6 +27,7 @@
 - Device visual acceptance исходного proof на SM-G990B пройдена для ключевой гипотезы: чистый ARCore anchor не слетает при резких движениях головы и устройства, hybrid MediaPipe contour совпадает с губами. Локальная мимика одной ARCore-точкой не описывается, поэтому принят именно hybrid global-pose/local-deformation design. Следующий FF3 slice ниже уже добавил full-face contract; proof остаётся debug-only OpenGL ES, а production Vulkan/material cutover и compatibility fallback не выполнены.
 - Финальный локальный gate текущего checkpoint: `154` unit-теста, `0` failures/errors, lint, debug APK и четыре ABI. Warm runtime: ARCore `58–60 FPS`, MediaPipe `27–30 FPS`, YUV→RGBA обычно `2–3 ms`, ML `22–27 ms`, latest observation age около `67 ms`, affine fit обычно `2–4 px`.
 - Первый FF3 contract slice реализован и принят на SM-G990B 2026-08-24: immutable `FaceTrackingBackend`/`FaceObservation`/`FullFaceRenderState`, explicit topology/coordinate/camera metadata, ARCore global adapter, MediaPipe local backend и pure hybrid composer. Diagnostic OpenGL draw methods потребляют только `FullFaceRenderState`. Device A/B сохранил отсутствие слёта при резких движениях и уточнил composition: rigid affine берётся по eye/nose/cheek anchors, translation закрепляется в current ARCore lip center, а деформируемый ARCore mouth scale не применяется. Exact accepted APK SHA-256 `88453CDDD81DD63A265B9F668BA8634858923787536358E1F7BC7ADE2F88F229`; unit/lint/APK/four-ABI gate успешен.
+- Следующий shadow contract slice реализован в рабочем дереве: `FaceObservation` и `FullFaceRenderState` имеют отдельные mouth/left-eye/right-eye states, per-feature geometry source/timestamp, nullable confidence/visible fraction и geometric aperture ratio. Добавлены текущие ARCore/MediaPipe eye contours с независимой привязкой каждого глаза и per-feature global fallback. Непроверенные confidence/visibility не синтезируются; debug OpenGL продолжает рисовать только принятую lip-картинку. Локальный gate: `164` unit-теста, `0` failures/errors, `lintDebug`, `assembleDebug` и native build четырёх ABI успешны; candidate APK SHA-256 `90BCC7F81E181F0E2598294A52F5536805318950E385C868532AA2B2F67E56BF`.
 
 Этот файл задаёт порядок дальнейшей разработки после V6.3. Полный исторический и технический контекст находится в `PROJECT_CONTEXT.md`; компактный перенос между чатами — в `CHAT_HANDOFF.md`.
 
@@ -119,7 +120,7 @@ MediaPipe-specific классы не проходят в Vulkan renderer или 
 
 Критерий завершения: MediaPipe backend можно заменить test/replay backend без изменений renderer; все старые tracking regressions проходят.
 
-Статус 2026-08-24: первый vertical slice выполнен и device-accepted. Контракт поддерживает раздельные global/local backends, полную ARCore mesh/pose/camera metadata, MediaPipe local observation и renderer-facing lip regions; fake backend regression доказывает заменяемость composer без SDK типов. Sharp motion, открытый рот и большие yaw проверены пользователем. До полного завершения FF3 нужны mouth/left-eye/right-eye и visibility/confidence state, reusable replay/unsupported-device fallback integration и передача state в production renderer.
+Статус 2026-08-24: первый vertical slice выполнен и device-accepted. Контракт поддерживает раздельные global/local backends, полную ARCore mesh/pose/camera metadata и MediaPipe local observation; fake backend regression доказывает заменяемость composer без SDK типов. Shadow extension уже публикует renderer-facing lip/eye regions, отдельные feature states/provenance/timestamps и nullable visibility/confidence; mouth/eyes имеют scale-independent aperture ratio, а локальный отказ одного глаза не отключает остальные feature. Sharp motion, открытый рот и большие yaw принятого lip path проверены пользователем. До полного завершения FF3 нужны reusable replay/unsupported-device fallback integration и передача state в production renderer.
 
 ## FF4 — единый visual-inertial 3D tracker
 
@@ -231,8 +232,8 @@ Parsing выполняется ориентировочно 15–30 раз/с п
 
 ## Следующее действие
 
-1. Расширить `FaceObservation`/`FullFaceRenderState` явными mouth/left-eye/right-eye, visibility/confidence и full-face region contracts; не переносить SDK classes в makeup material API.
+1. Зафиксировать shadow extension `FaceObservation`/`FullFaceRenderState` с явными mouth/left-eye/right-eye, nullable visibility/confidence и full-face region contracts; не переносить SDK classes в makeup material API. Реализация и локальный gate готовы; требуется checkpoint перед Vulkan cutover.
 2. Сохранить единственного camera owner: ARCore выдаёт camera-synchronized global pose/mesh, MediaPipe обрабатывает только latest analysis image той же session и обновляет local deformation.
-3. Перенести device-accepted hybrid state в production Vulkan camera/render timeline и только затем подключить matte/satin/gloss и полный color/HDR contract. Diagnostic OpenGL ES proof оставить как точку сравнения и отката.
+3. Следующий кодовый этап: перенести device-accepted hybrid state в production Vulkan camera/render timeline и только затем подключить matte/satin/gloss и полный color/HDR contract. Diagnostic OpenGL ES proof оставить как точку сравнения и отката.
 4. Провести controlled stationary/head/phone/mouth/dropout/weak-light/thermal A/B, проверить поддержку ARCore на целевых устройствах и определить fallback для несовместимых устройств.
 5. Перед release выполнить ARCore Terms/privacy/user-notice gate из `LICENSE_COMPLIANCE.md`; IMU/optical flow добавлять только при измеримом residual после production hybrid cutover.

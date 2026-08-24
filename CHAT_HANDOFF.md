@@ -24,12 +24,16 @@ Proof остаётся debug-only и использует отдельную Ope
 
 Первый FF3 slice реализован поверх `782778c` и принят на устройстве. Добавлены explicit topology/coordinate/camera metadata, ARCore global adapter, MediaPipe local-deformation backend, pure composer, current ARCore contour fallback и JVM regressions на заменяемость/immutability/anchored composition. Архитектурное решение: `docs/adr/002-model-independent-full-face-contract.md`.
 
-Следующий обязательный шаг: расширить domain state для mouth/left-eye/right-eye, visibility/confidence и full-face regions, затем перенести именно этот device-accepted `FullFaceRenderState` в production Vulkan camera/render timeline. Diagnostic OpenGL proof сохранить как rollback; IMU/flow возвращать только при измеримом residual после cutover.
+После push checkpoint `fdbe9f8` начат следующий shadow slice: domain state расширен отдельными mouth/left-eye/right-eye, per-feature geometry source/timestamp, nullable confidence/visibility и normalized aperture. Композитор публикует eye regions из MediaPipe local deformation с независимой current-ARCore привязкой каждого глаза и current ARCore fallback для отдельно потерянного feature. Неизвестные confidence/visibility не синтезируются. Debug OpenGL по-прежнему рисует только принятые губы, поэтому изображение этим slice намеренно не меняется.
+
+Локальный gate shadow slice пройден: `164` unit-теста, `0` failures/errors, lint, debug APK и native build четырёх ABI. Candidate APK SHA-256 `90BCC7F81E181F0E2598294A52F5536805318950E385C868532AA2B2F67E56BF`; device acceptance для него не выполнялся и не требуется для невидимых eye fields до checkpoint, если lip output действительно не менялся.
+
+Следующий обязательный шаг после локального gate и checkpoint: перенести именно device-accepted `FullFaceRenderState` в production Vulkan camera/render timeline. Diagnostic OpenGL proof сохранить как rollback; IMU/flow возвращать только при измеримом residual после cutover.
 
 ## Репозиторий и состояние
 
 - Путь: `C:\Users\User\AndroidStudioProjects\ARMakeup`.
-- Ветка: `master`; FF3 checkpoint построен поверх `782778c`. Исторические точки отката: `cc82370` / `tracking-v6.2-stable-2026-08-17`, `d4636ac` / `tracking-v6.2-fast-motion-2026-08-17`, `ab8796a` / `material-temporal-v1-candidate-2026-08-17`, `dd095f7` / `tracking-v6.3-gyro-experimental-2026-08-17`; FF1/FF2/native commits `0554924`, `19a2280`, `3419063`, `7bd498f`, `6be330f`, `9bc3efb`, `2fb7cd7`, `082d88e`, `be35764`, `1406c24`. Обычный запуск всё ещё использует Filament; ARCore hybrid включается отдельным debug-extra.
+- Ветка: `master`; последний pushed FF3 checkpoint `fdbe9f8`, текущий mouth/eye shadow slice пока находится в рабочем дереве. Исторические точки отката: `cc82370` / `tracking-v6.2-stable-2026-08-17`, `d4636ac` / `tracking-v6.2-fast-motion-2026-08-17`, `ab8796a` / `material-temporal-v1-candidate-2026-08-17`, `dd095f7` / `tracking-v6.3-gyro-experimental-2026-08-17`; FF1/FF2/native commits `0554924`, `19a2280`, `3419063`, `7bd498f`, `6be330f`, `9bc3efb`, `2fb7cd7`, `082d88e`, `be35764`, `1406c24`. Обычный запуск всё ещё использует Filament; ARCore hybrid включается отдельным debug-extra.
 - Основные коммиты: `cc82370 [V6.2]`, `cd1a560 [UpdateContext]`, `8d48b46 [V6]`, `4f8039b [V5]`, `3d3572e [V4]`, `395d3f3 [V3]`.
 - Kotlin, XML/View UI, один модуль `:app`; `minSdk 24`, `targetSdk/compileSdk 37`.
 - Последняя проверка: unit-тесты без failures/errors, lint и debug APK успешны; native код/SPIR-V собираются для `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`; exact FF3 APK установлен и визуально принят на SM-G990B. Production Vulkan/material cutover не начат.

@@ -8,6 +8,7 @@ import android.util.Log
 import com.example.armakeup.makeup.LipLandmarkTopology
 import com.example.armakeup.tracking.TrackingGeometryExtractor
 import com.example.armakeup.tracking.face.FaceRegion
+import com.example.armakeup.tracking.face.FaceMesh468RegionTopology
 import com.example.armakeup.tracking.face.FullFaceRenderState
 import com.example.armakeup.tracking.face.HybridFullFaceStateComposer
 import com.google.ar.core.AugmentedFace
@@ -55,6 +56,11 @@ internal class ArCoreFaceAnchorRenderer(
         stableAnchorIndices = TrackingGeometryExtractor.stableAnchorIndices,
         outerLipIndices = LipLandmarkTopology.outerContour,
         innerLipIndices = LipLandmarkTopology.innerContour,
+        leftEyeIndices = FaceMesh468RegionTopology.leftEyeContour,
+        rightEyeIndices = FaceMesh468RegionTopology.rightEyeContour,
+        mouthAperture = FaceMesh468RegionTopology.mouthAperture,
+        leftEyeAperture = FaceMesh468RegionTopology.leftEyeAperture,
+        rightEyeAperture = FaceMesh468RegionTopology.rightEyeAperture,
         maximumGlobalAffineResidual = MAXIMUM_GLOBAL_AFFINE_RESIDUAL,
     )
 

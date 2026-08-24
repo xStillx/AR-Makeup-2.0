@@ -10,6 +10,11 @@ class HybridFullFaceStateComposer(
     stableAnchorIndices: IntArray,
     outerLipIndices: IntArray,
     innerLipIndices: IntArray,
+    leftEyeIndices: IntArray = intArrayOf(),
+    rightEyeIndices: IntArray = intArrayOf(),
+    private val mouthAperture: FaceApertureTopology? = null,
+    private val leftEyeAperture: FaceApertureTopology? = null,
+    private val rightEyeAperture: FaceApertureTopology? = null,
     private val upperInnerLipIndex: Int = 13,
     private val lowerInnerLipIndex: Int = 14,
     private val maximumGlobalAffineResidual: Float = 0.08f,
@@ -17,10 +22,17 @@ class HybridFullFaceStateComposer(
     private val stableAnchorIndices = stableAnchorIndices.copyOf()
     private val outerLipIndices = outerLipIndices.copyOf()
     private val innerLipIndices = innerLipIndices.copyOf()
+    private val leftEyeIndices = leftEyeIndices.copyOf()
+    private val rightEyeIndices = rightEyeIndices.copyOf()
     private val maximumRequiredIndex = sequenceOf(
         this.stableAnchorIndices.maxOrNull(),
         this.outerLipIndices.maxOrNull(),
         this.innerLipIndices.maxOrNull(),
+        this.leftEyeIndices.maxOrNull(),
+        this.rightEyeIndices.maxOrNull(),
+        mouthAperture?.maximumIndex,
+        leftEyeAperture?.maximumIndex,
+        rightEyeAperture?.maximumIndex,
         upperInnerLipIndex,
         lowerInnerLipIndex,
     ).filterNotNull().maxOrNull() ?: 0
@@ -33,6 +45,8 @@ class HybridFullFaceStateComposer(
         require(this.stableAnchorIndices.all { it >= 0 })
         require(this.outerLipIndices.all { it >= 0 })
         require(this.innerLipIndices.all { it >= 0 })
+        require(this.leftEyeIndices.all { it >= 0 })
+        require(this.rightEyeIndices.all { it >= 0 })
         require(upperInnerLipIndex >= 0)
         require(lowerInnerLipIndex >= 0)
         require(maximumGlobalAffineResidual.isFinite() && maximumGlobalAffineResidual >= 0f)
@@ -95,54 +109,120 @@ class HybridFullFaceStateComposer(
         }
         val fitAccepted = globalAffine != null &&
             globalAffine.normalizedRmsResidual <= maximumGlobalAffineResidual
-        val regions = if (fitAccepted) {
-            val acceptedGlobalAffine = checkNotNull(globalAffine)
-            val acceptedLocalLandmarks = checkNotNull(localLandmarks)
-            val sourceLipAnchorX = (
-                acceptedLocalLandmarks.x(upperInnerLipIndex) +
-                    acceptedLocalLandmarks.x(lowerInnerLipIndex)
-                ) * 0.5f
-            val sourceLipAnchorY = (
-                acceptedLocalLandmarks.y(upperInnerLipIndex) +
-                    acceptedLocalLandmarks.y(lowerInnerLipIndex)
-                ) * 0.5f
-            val anchoredTransform = acceptedGlobalAffine.reanchored(
-                sourceX = sourceLipAnchorX,
-                sourceY = sourceLipAnchorY,
-                targetX = lipAnchor.x,
-                targetY = lipAnchor.y,
-            )
-            mapOf(
-                FaceRegion.LIPS_OUTER to mapRegion(
-                    FaceRegion.LIPS_OUTER,
-                    outerLipIndices,
-                    acceptedLocalLandmarks,
-                    anchoredTransform,
-                ),
-                FaceRegion.LIPS_INNER to mapRegion(
-                    FaceRegion.LIPS_INNER,
-                    innerLipIndices,
-                    acceptedLocalLandmarks,
-                    anchoredTransform,
-                ),
+        val regions = mutableMapOf<FaceRegion, FaceRegionGeometry>()
+        val mouthUsesLocal = fitAccepted && localFeatureTracks(local, local?.features?.mouth)
+        val leftEyeUsesLocal = fitAccepted &&
+            leftEyeIndices.isNotEmpty() &&
+            leftEyeAperture != null &&
+            localFeatureTracks(local, local?.features?.leftEye)
+        val rightEyeUsesLocal = fitAccepted &&
+            rightEyeIndices.isNotEmpty() &&
+            rightEyeAperture != null &&
+            localFeatureTracks(local, local?.features?.rightEye)
+
+        val acceptedGlobalAffine = globalAffine?.takeIf { fitAccepted }
+        val acceptedLocalLandmarks = localLandmarks?.takeIf { fitAccepted }
+        val mouthTransform = if (mouthUsesLocal) {
+            checkNotNull(acceptedGlobalAffine).reanchoredAtMidpoint(
+                source = checkNotNull(acceptedLocalLandmarks),
+                target = display,
+                firstIndex = upperInnerLipIndex,
+                secondIndex = lowerInnerLipIndex,
             )
         } else {
-            mapOf(
-                FaceRegion.LIPS_OUTER to copyGlobalRegion(
-                    FaceRegion.LIPS_OUTER,
-                    outerLipIndices,
-                    display,
-                ),
-                FaceRegion.LIPS_INNER to copyGlobalRegion(
-                    FaceRegion.LIPS_INNER,
-                    innerLipIndices,
-                    display,
-                ),
+            null
+        }
+        if (mouthTransform != null) {
+            regions[FaceRegion.LIPS_OUTER] = mapRegion(
+                FaceRegion.LIPS_OUTER,
+                outerLipIndices,
+                checkNotNull(acceptedLocalLandmarks),
+                mouthTransform,
+            )
+            regions[FaceRegion.LIPS_INNER] = mapRegion(
+                FaceRegion.LIPS_INNER,
+                innerLipIndices,
+                checkNotNull(acceptedLocalLandmarks),
+                mouthTransform,
+            )
+        } else {
+            regions[FaceRegion.LIPS_OUTER] = copyGlobalRegion(
+                FaceRegion.LIPS_OUTER,
+                outerLipIndices,
+                display,
+            )
+            regions[FaceRegion.LIPS_INNER] = copyGlobalRegion(
+                FaceRegion.LIPS_INNER,
+                innerLipIndices,
+                display,
             )
         }
+
+        val leftEyeTransform = mapOptionalFeatureRegion(
+            region = FaceRegion.LEFT_EYE,
+            indices = leftEyeIndices,
+            aperture = leftEyeAperture,
+            useLocal = leftEyeUsesLocal,
+            local = acceptedLocalLandmarks,
+            display = display,
+            globalAffine = acceptedGlobalAffine,
+            output = regions,
+        )
+        val rightEyeTransform = mapOptionalFeatureRegion(
+            region = FaceRegion.RIGHT_EYE,
+            indices = rightEyeIndices,
+            aperture = rightEyeAperture,
+            useLocal = rightEyeUsesLocal,
+            local = acceptedLocalLandmarks,
+            display = display,
+            globalAffine = acceptedGlobalAffine,
+            output = regions,
+        )
         val localAgeNs = local?.let {
             (globalObservation.sensorTimestampNs - it.sensorTimestampNs).coerceAtLeast(0L)
         }
+
+        val featureStates = FullFaceFeatureStates(
+            mouth = featureRenderState(
+                useLocal = mouthUsesLocal,
+                geometryAvailable = true,
+                localObservation = local,
+                globalObservation = globalObservation,
+                localFeature = local?.features?.mouth,
+                globalFeature = globalObservation.features.mouth,
+                apertureRatio = apertureRatio(
+                    source = if (mouthUsesLocal) checkNotNull(acceptedLocalLandmarks) else display,
+                    topology = mouthAperture,
+                    transform = mouthTransform,
+                ),
+            ),
+            leftEye = featureRenderState(
+                useLocal = leftEyeUsesLocal,
+                geometryAvailable = leftEyeIndices.isNotEmpty(),
+                localObservation = local,
+                globalObservation = globalObservation,
+                localFeature = local?.features?.leftEye,
+                globalFeature = globalObservation.features.leftEye,
+                apertureRatio = apertureRatio(
+                    source = if (leftEyeUsesLocal) checkNotNull(acceptedLocalLandmarks) else display,
+                    topology = leftEyeAperture,
+                    transform = leftEyeTransform,
+                ),
+            ),
+            rightEye = featureRenderState(
+                useLocal = rightEyeUsesLocal,
+                geometryAvailable = rightEyeIndices.isNotEmpty(),
+                localObservation = local,
+                globalObservation = globalObservation,
+                localFeature = local?.features?.rightEye,
+                globalFeature = globalObservation.features.rightEye,
+                apertureRatio = apertureRatio(
+                    source = if (rightEyeUsesLocal) checkNotNull(acceptedLocalLandmarks) else display,
+                    topology = rightEyeAperture,
+                    transform = rightEyeTransform,
+                ),
+            ),
+        )
 
         return FullFaceRenderState(
             renderTimestampNs = renderTimestampNs,
@@ -154,14 +234,121 @@ class HybridFullFaceStateComposer(
             canonicalLandmarks = canonical,
             displayLandmarks = display,
             lipAnchor = lipAnchor,
+            features = featureStates,
             regions = regions,
             attachmentQuality = FullFaceAttachmentQuality(
-                localDeformationApplied = fitAccepted,
+                localDeformationApplied = mouthUsesLocal || leftEyeUsesLocal || rightEyeUsesLocal,
                 localObservationAgeNs = localAgeNs,
                 affineFitResidualNormalized = globalAffine?.normalizedRmsResidual,
             ),
             localDiagnostics = local?.diagnostics,
         )
+    }
+
+    private fun localFeatureTracks(
+        observation: FaceObservation?,
+        feature: FaceFeatureObservationState?,
+    ): Boolean = observation != null && (feature?.tracking ?: observation.quality.tracking)
+
+    private fun mapOptionalFeatureRegion(
+        region: FaceRegion,
+        indices: IntArray,
+        aperture: FaceApertureTopology?,
+        useLocal: Boolean,
+        local: FaceLandmarkSet?,
+        display: FaceLandmarkSet,
+        globalAffine: FaceLocalAffineTransform?,
+        output: MutableMap<FaceRegion, FaceRegionGeometry>,
+    ): FaceLocalAffineTransform? {
+        if (indices.isEmpty()) return null
+        if (!useLocal || local == null || globalAffine == null || aperture == null) {
+            output[region] = copyGlobalRegion(region, indices, display)
+            return null
+        }
+        val transform = globalAffine.reanchoredAtMidpoint(
+            source = local,
+            target = display,
+            firstIndex = aperture.firstCornerIndex,
+            secondIndex = aperture.secondCornerIndex,
+        )
+        output[region] = mapRegion(region, indices, local, transform)
+        return transform
+    }
+
+    private fun FaceLocalAffineTransform.reanchoredAtMidpoint(
+        source: FaceLandmarkSet,
+        target: FaceLandmarkSet,
+        firstIndex: Int,
+        secondIndex: Int,
+    ): FaceLocalAffineTransform = reanchored(
+        sourceX = (source.x(firstIndex) + source.x(secondIndex)) * 0.5f,
+        sourceY = (source.y(firstIndex) + source.y(secondIndex)) * 0.5f,
+        targetX = (target.x(firstIndex) + target.x(secondIndex)) * 0.5f,
+        targetY = (target.y(firstIndex) + target.y(secondIndex)) * 0.5f,
+    )
+
+    private fun featureRenderState(
+        useLocal: Boolean,
+        geometryAvailable: Boolean,
+        localObservation: FaceObservation?,
+        globalObservation: FaceObservation,
+        localFeature: FaceFeatureObservationState?,
+        globalFeature: FaceFeatureObservationState?,
+        apertureRatio: Float?,
+    ): FaceFeatureRenderState {
+        if (!geometryAvailable) {
+            return FaceFeatureRenderState(
+                geometrySource = FaceFeatureGeometrySource.UNAVAILABLE,
+                observationTimestampNs = null,
+                tracking = false,
+            )
+        }
+        val observation = if (useLocal) checkNotNull(localObservation) else globalObservation
+        val feature = if (useLocal) localFeature else globalFeature
+        return FaceFeatureRenderState(
+            geometrySource = if (useLocal) {
+                FaceFeatureGeometrySource.LOCAL_DEFORMATION
+            } else {
+                FaceFeatureGeometrySource.GLOBAL_FALLBACK
+            },
+            observationTimestampNs = observation.sensorTimestampNs,
+            tracking = feature?.tracking ?: observation.quality.tracking,
+            confidence = feature?.confidence ?: observation.quality.trackingConfidence,
+            visibleFraction = feature?.visibleFraction ?: observation.quality.visibleFraction,
+            apertureRatio = apertureRatio,
+        )
+    }
+
+    private fun apertureRatio(
+        source: FaceLandmarkSet,
+        topology: FaceApertureTopology?,
+        transform: FaceLocalAffineTransform?,
+    ): Float? {
+        if (topology == null || source.pointCount <= topology.maximumIndex) return null
+        fun mapped(index: Int): NormalizedFacePoint {
+            val x = source.x(index)
+            val y = source.y(index)
+            return if (transform == null) {
+                NormalizedFacePoint(x, y)
+            } else {
+                NormalizedFacePoint(transform.mapX(x, y), transform.mapY(x, y))
+            }
+        }
+        val firstCorner = mapped(topology.firstCornerIndex)
+        val secondCorner = mapped(topology.secondCornerIndex)
+        val upper = mapped(topology.upperIndex)
+        val lower = mapped(topology.lowerIndex)
+        val width = distance(firstCorner, secondCorner)
+        if (!width.isFinite() || width <= MINIMUM_APERTURE_WIDTH) return null
+        val height = distance(upper, lower)
+        val ratio = height / width
+        return ratio.takeIf { it.isFinite() && it >= 0f }
+    }
+
+    private fun distance(first: NormalizedFacePoint, second: NormalizedFacePoint): Float {
+        val dx = second.x - first.x
+        val dy = second.y - first.y
+        return kotlin.math.sqrt(dx * dx + dy * dy)
     }
 
     private fun estimateAffine(
@@ -219,6 +406,7 @@ class HybridFullFaceStateComposer(
 
     private companion object {
         const val MINIMUM_AFFINE_POINT_COUNT = 3
+        const val MINIMUM_APERTURE_WIDTH = 1e-6f
         const val XY_COMPONENT_COUNT = 2
     }
 }

@@ -37,13 +37,23 @@ pose, camera matrices and current normalized-display projection into `FaceObserv
 `ArCoreMediaPipeLipTracker` is the local-deformation backend. It converts MediaPipe results into the
 same observation contract and exposes no MediaPipe result object outside the adapter.
 
+The contract extension keeps mouth, left-eye and right-eye state explicit at both boundaries.
+`FaceObservationFeatures` carries only quality actually reported by a backend. `FullFaceFeatureStates`
+adds the geometry source (`LOCAL_DEFORMATION`, `GLOBAL_FALLBACK` or `UNAVAILABLE`), the source
+observation timestamp and a scale-independent geometric aperture ratio. Confidence and visible
+fraction remain nullable: neither the current ARCore adapter nor the bundled Face Landmarker
+result exposes a calibrated per-feature value, so the domain layer must not manufacture one.
+
 The composer keeps current ARCore display landmarks authoritative for global attachment. It fits
 the same eight shared eye/nose/cheek anchors to obtain the rigid affine linear mapping, then changes
 only its translation so the MediaPipe mouth centre is pinned to the current ARCore centre from
 vertices `13/14`. It intentionally does not inherit scale from deforming ARCore mouth vertices:
 device A/B showed that this widened the contour for an open mouth and large yaw. An absent or
-rejected local result publishes current ARCore lip regions as a fallback. The global pose is never
-delayed to the MediaPipe timestamp.
+rejected local result publishes current ARCore regions as a fallback. Eyes use the same accepted
+global affine linear mapping but are reanchored independently at their current ARCore corner
+midpoints, so local blink shape does not inherit a stale global translation. A feature explicitly
+reported as untracked falls back independently instead of invalidating other local features. The
+global pose is never delayed to the MediaPipe timestamp.
 
 ARCore remains the only camera owner. This ADR does not authorize a second CameraX session, a
 production OpenGL cutover, or direct ARCore/MediaPipe types in Vulkan or makeup material APIs.
@@ -75,8 +85,10 @@ explicit, allows fake/replay/fallback backends, and gives Vulkan one renderer-fa
 - ARCore 468 and MediaPipe 478 are distinct topology descriptors even though the current shared
   indices are compatible. Future topology conversion must be explicit rather than inferred from
   point count.
-- The first `FullFaceRenderState` contains lip regions and the full global mesh, but eye/cheek
-  regions, visibility, occlusion and semantic probabilities remain later FF3/FF5 work.
+- `FullFaceRenderState` now contains lip and eye regions plus the full global mesh. Cheek regions,
+  calibrated visibility/occlusion and semantic probabilities remain later FF3/FF5 work.
+- Current per-feature confidence and visible fraction are deliberately `null`. Consumers must use
+  geometry provenance/timestamp and aperture without treating unknown quality as zero or one.
 - The accepted anchored affine mapping is still a diagnostic 2D bridge, not the final 3D
   deformation model. Large-pose correctness must be revalidated after canonical 3D cutover.
 
@@ -98,6 +110,7 @@ explicit, allows fake/replay/fallback backends, and gives Vulkan one renderer-fa
    accepted for sharp motion, open mouth and large yaw. Completed on SM-G990B with APK SHA-256
    `88453CDDD81DD63A265B9F668BA8634858923787536358E1F7BC7ADE2F88F229`.
 4. Add explicit mouth/left-eye/right-eye state and visibility fields before product full-face masks.
+   Implemented in shadow mode; device image remains unchanged because eye regions are not drawn.
 5. Feed `FullFaceRenderState` into the production Vulkan camera/render timeline.
 6. Add ARCore unsupported-device/fallback backend and controlled device matrix before default
    cutover.

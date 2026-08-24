@@ -52,6 +52,30 @@ class FaceTrackingContractTest {
         }
     }
 
+    @Test
+    fun `unavailable render feature cannot carry fabricated tracking data`() {
+        assertThrows(IllegalArgumentException::class.java) {
+            FaceFeatureRenderState(
+                geometrySource = FaceFeatureGeometrySource.UNAVAILABLE,
+                observationTimestampNs = 10L,
+                tracking = true,
+                confidence = 0.5f,
+            )
+        }
+    }
+
+    @Test
+    fun `unknown feature confidence and visibility remain nullable`() {
+        val state = FaceFeatureRenderState(
+            geometrySource = FaceFeatureGeometrySource.GLOBAL_FALLBACK,
+            observationTimestampNs = 10L,
+            tracking = true,
+        )
+
+        assertEquals(null, state.confidence)
+        assertEquals(null, state.visibleFraction)
+    }
+
     private fun identityMatrix(): FloatArray = floatArrayOf(
         1f, 0f, 0f, 0f,
         0f, 1f, 0f, 0f,
