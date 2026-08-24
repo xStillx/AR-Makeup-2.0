@@ -67,7 +67,8 @@ does not add an inference stage, and creates a shared depth contract for future 
 The infrastructure gate passed on SM-G990B/Adreno 660: Vulkan selected `D32_SFLOAT`,
 `faceDepthUpdates` increased with the current ARCore mesh, no camera drops were observed, and
 Home/resume recreated the runtime without the previous black screen/present failure. The exact APK
-SHA-256 is `013758091AA4D2C3A0E718BD22744B9955F488A0DC2B537D70BDE27924E2F9EA`.
+SHA-256 is `013758091AA4D2C3A0E718BD22744B9955F488A0DC2B537D70BDE27924E2F9EA`; checkpoint
+`18cf1e0` preserves the rejected candidate for controlled follow-up.
 
 The visual gate failed:
 
