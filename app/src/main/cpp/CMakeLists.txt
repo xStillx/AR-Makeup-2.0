@@ -19,6 +19,8 @@ set(retained_camera_fragment_spirv "${generated_shader_directory}/retained_camer
 set(camera_shader_header "${generated_shader_directory}/CameraShaders.generated.h")
 set(tracking_test_lip_vertex_spirv "${generated_shader_directory}/tracking_test_lip.vert.spv")
 set(tracking_test_lip_fragment_spirv "${generated_shader_directory}/tracking_test_lip.frag.spv")
+set(face_occluder_vertex_spirv "${generated_shader_directory}/face_occluder.vert.spv")
+set(face_occluder_fragment_spirv "${generated_shader_directory}/face_occluder.frag.spv")
 set(temporal_luma_spirv "${generated_shader_directory}/temporal_luma.comp.spv")
 set(temporal_downsample_spirv "${generated_shader_directory}/temporal_downsample.comp.spv")
 set(temporal_flow_spirv "${generated_shader_directory}/temporal_flow.comp.spv")
@@ -67,6 +69,22 @@ add_custom_command(
     VERBATIM
 )
 add_custom_command(
+    OUTPUT "${face_occluder_vertex_spirv}"
+    COMMAND "${GLSLC_EXECUTABLE}" -O -fshader-stage=vertex
+        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/face_occluder.vert"
+        -o "${face_occluder_vertex_spirv}"
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/face_occluder.vert"
+    VERBATIM
+)
+add_custom_command(
+    OUTPUT "${face_occluder_fragment_spirv}"
+    COMMAND "${GLSLC_EXECUTABLE}" -O -fshader-stage=fragment
+        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/face_occluder.frag"
+        -o "${face_occluder_fragment_spirv}"
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/face_occluder.frag"
+    VERBATIM
+)
+add_custom_command(
     OUTPUT "${temporal_luma_spirv}"
     COMMAND "${GLSLC_EXECUTABLE}" -O -fshader-stage=compute
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/temporal_luma.comp"
@@ -106,6 +124,8 @@ add_custom_command(
         -DRETAINED_CAMERA_FRAGMENT_SHADER=${retained_camera_fragment_spirv}
         -DTRACKING_TEST_LIP_VERTEX_SHADER=${tracking_test_lip_vertex_spirv}
         -DTRACKING_TEST_LIP_FRAGMENT_SHADER=${tracking_test_lip_fragment_spirv}
+        -DFACE_OCCLUDER_VERTEX_SHADER=${face_occluder_vertex_spirv}
+        -DFACE_OCCLUDER_FRAGMENT_SHADER=${face_occluder_fragment_spirv}
         -DTEMPORAL_LUMA_SHADER=${temporal_luma_spirv}
         -DTEMPORAL_DOWNSAMPLE_SHADER=${temporal_downsample_spirv}
         -DTEMPORAL_FLOW_SHADER=${temporal_flow_spirv}
@@ -118,6 +138,8 @@ add_custom_command(
         "${retained_camera_fragment_spirv}"
         "${tracking_test_lip_vertex_spirv}"
         "${tracking_test_lip_fragment_spirv}"
+        "${face_occluder_vertex_spirv}"
+        "${face_occluder_fragment_spirv}"
         "${temporal_luma_spirv}"
         "${temporal_downsample_spirv}"
         "${temporal_flow_spirv}"

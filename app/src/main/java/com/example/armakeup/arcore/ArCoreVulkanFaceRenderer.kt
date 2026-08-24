@@ -14,6 +14,8 @@ import com.example.armakeup.tracking.TrackingGeometryExtractor
 import com.example.armakeup.tracking.face.FaceMesh468RegionTopology
 import com.example.armakeup.tracking.face.FaceLocalGeometryPerspectivePolicy
 import com.example.armakeup.tracking.face.FaceRegion
+import com.example.armakeup.tracking.face.FaceSurfaceDepthSampler
+import com.example.armakeup.tracking.face.FaceSurfaceTopology
 import com.example.armakeup.tracking.face.FullFaceRenderState
 import com.example.armakeup.tracking.face.HybridFullFaceStateComposer
 import com.google.ar.core.AugmentedFace
@@ -37,6 +39,7 @@ import java.util.Locale
  */
 internal class ArCoreVulkanFaceRenderer(
     private val surfaceView: SurfaceView,
+    private val faceDepthEnabled: Boolean,
     private val displayRotation: () -> Int,
     private val imageRotationDegrees: () -> Int,
     private val onStatus: (String) -> Unit,
@@ -53,6 +56,9 @@ internal class ArCoreVulkanFaceRenderer(
     private val nativeProbe = NativeVulkanBootstrap.probe()
     private val lipTessellator = LipMeshTessellator()
     private val nativeLipVertices = FloatArray(lipTessellator.vertexCount * NATIVE_VERTEX_COMPONENTS)
+    private val nativeFaceVertices = FloatArray(
+        FaceMesh468RegionTopology.POINT_COUNT * FACE_VERTEX_COMPONENTS,
+    )
     private val transformedCameraCorners = directFloatBuffer(CAMERA_CORNER_COMPONENTS)
     private val transformedCameraCornerValues = FloatArray(CAMERA_CORNER_COMPONENTS)
     private val cameraUvTransform = FloatArray(UV_TRANSFORM_COMPONENTS)
@@ -82,6 +88,9 @@ internal class ArCoreVulkanFaceRenderer(
     private var lastObservedCameraTimestampNs = 0L
     private var lastAcceptedCameraTimestampNs = 0L
     private var lastValidLipTimestampNs = 0L
+    private var lastValidFaceTimestampNs = 0L
+    private var depthSamplerTopology: FaceSurfaceTopology? = null
+    private var depthSampler: FaceSurfaceDepthSampler? = null
     private var runtimeRecoveryAttempts = 0
     private var lastRenderState: FullFaceRenderState? = null
     private var statusWindowStartNs = 0L
@@ -177,6 +186,7 @@ internal class ArCoreVulkanFaceRenderer(
                 lastAcceptedCameraTimestampNs
             }
             if (retainedTimestampNs == timestampNs) {
+                uploadFaceSurface(activeRuntime, renderState, timestampNs)
                 uploadLip(activeRuntime, renderState, timestampNs)
                 lastRenderState = renderState
                 lastAcceptedCameraTimestampNs = timestampNs
@@ -293,6 +303,11 @@ internal class ArCoreVulkanFaceRenderer(
             upperProfile = ReferenceMatteLipstickProfile.upper,
             lowerProfile = ReferenceMatteLipstickProfile.lower,
         )
+        val surfaceDepthSampler = if (faceDepthEnabled) {
+            state.surfaceTopology?.let(::depthSamplerFor)
+        } else {
+            null
+        }
         var sourceIndex = 0
         var destinationIndex = 0
         while (sourceIndex < tessellated.size) {
@@ -304,6 +319,11 @@ internal class ArCoreVulkanFaceRenderer(
             nativeLipVertices[destinationIndex + 3] = y
             nativeLipVertices[destinationIndex + 4] =
                 tessellated[sourceIndex + LipMeshTessellator.COVERAGE_COMPONENT_OFFSET]
+            nativeLipVertices[destinationIndex + 5] = surfaceDepthSampler?.ndcDepthAt(
+                displayLandmarks = state.displayLandmarks,
+                x = x,
+                y = y,
+            ) ?: DEFAULT_LIP_NDC_DEPTH
             sourceIndex += LipMeshTessellator.VERTEX_COMPONENT_COUNT
             destinationIndex += NATIVE_VERTEX_COMPONENTS
         }
@@ -318,6 +338,66 @@ internal class ArCoreVulkanFaceRenderer(
         lastValidLipTimestampNs = timestampNs
     }
 
+    private fun uploadFaceSurface(
+        activeRuntime: NativeVulkanDiagnosticRuntime,
+        state: FullFaceRenderState?,
+        timestampNs: Long,
+    ) {
+        if (!faceDepthEnabled) {
+            activeRuntime.updateFaceOccluder(
+                vertices = EMPTY_FLOATS,
+                indices = EMPTY_SHORTS,
+                visible = false,
+            )
+            lastValidFaceTimestampNs = 0L
+            return
+        }
+        val display = state?.displayLandmarks
+        val topology = state?.surfaceTopology
+        if (display == null || topology == null ||
+            display.pointCount != FaceMesh468RegionTopology.POINT_COUNT
+        ) {
+            if (lastValidFaceTimestampNs > 0L &&
+                timestampNs - lastValidFaceTimestampNs <= TRACKING_LOSS_HOLD_NS
+            ) {
+                return
+            }
+            activeRuntime.updateFaceOccluder(
+                vertices = EMPTY_FLOATS,
+                indices = EMPTY_SHORTS,
+                visible = false,
+            )
+            lastValidFaceTimestampNs = 0L
+            return
+        }
+        var destination = 0
+        repeat(display.pointCount) { index ->
+            nativeFaceVertices[destination++] = display.x(index)
+            nativeFaceVertices[destination++] = display.y(index)
+            nativeFaceVertices[destination++] = display.z(index)
+        }
+        check(
+            activeRuntime.updateFaceOccluder(
+                vertices = nativeFaceVertices,
+                indices = topology.packedCopy(),
+                visible = true,
+            ),
+        ) { "ARCore Vulkan face-occluder upload failed" }
+        lastValidFaceTimestampNs = timestampNs
+    }
+
+    private fun depthSamplerFor(topology: FaceSurfaceTopology): FaceSurfaceDepthSampler {
+        if (depthSamplerTopology != topology || depthSampler == null) {
+            depthSamplerTopology = topology
+            depthSampler = FaceSurfaceDepthSampler(
+                topology = topology,
+                preferredLandmarkIndices =
+                    LipLandmarkTopology.outerContour + LipLandmarkTopology.innerContour,
+            )
+        }
+        return checkNotNull(depthSampler)
+    }
+
     private fun publishStatus(timestampNs: Long) {
         if (timestampNs <= 0L) return
         if (statusWindowStartNs == 0L) statusWindowStartNs = timestampNs
@@ -328,9 +408,11 @@ internal class ArCoreVulkanFaceRenderer(
         onStatus(
             String.format(
                 Locale.US,
-                "ARCore + Vulkan %.1f FPS\nsame Frame: camera + ARCore pose + hybrid lips\n" +
+                "ARCore + Vulkan %.1f FPS · depth=%s\n" +
+                    "same Frame: camera + ARCore pose + hybrid lips\n" +
                     "lipLocal=%.2f age=%s residual=%s\n%s",
                 fps,
+                if (faceDepthEnabled) "3D" else "2D",
                 lastRenderState?.attachmentQuality?.localDeformationWeight ?: 0f,
                 lastRenderState?.attachmentQuality?.localObservationAgeNs
                     ?.let { "${it / 1_000_000L}ms" } ?: "global",
@@ -387,6 +469,9 @@ internal class ArCoreVulkanFaceRenderer(
         lastObservedCameraTimestampNs = 0L
         lastAcceptedCameraTimestampNs = 0L
         lastValidLipTimestampNs = 0L
+        lastValidFaceTimestampNs = 0L
+        depthSamplerTopology = null
+        depthSampler = null
         lastRenderState = null
         statusWindowStartNs = 0L
         statusWindowFrames = 0
@@ -426,7 +511,9 @@ internal class ArCoreVulkanFaceRenderer(
         const val MAXIMUM_LOCAL_OBSERVATION_AGE_NS = 120_000_000L
         const val TRACKING_LOSS_HOLD_NS = 100_000_000L
         const val MAXIMUM_RUNTIME_RECOVERY_ATTEMPTS = 1
-        const val NATIVE_VERTEX_COMPONENTS = 5
+        const val NATIVE_VERTEX_COMPONENTS = 6
+        const val FACE_VERTEX_COMPONENTS = 3
+        const val DEFAULT_LIP_NDC_DEPTH = -1f
         const val LIP_CONTOUR_POINT_COUNT = 20
         const val CAMERA_CORNER_COMPONENTS = 6
         const val UV_TRANSFORM_COMPONENTS = 16

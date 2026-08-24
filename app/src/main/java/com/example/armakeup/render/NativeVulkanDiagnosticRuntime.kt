@@ -256,6 +256,16 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
         )
     }
 
+    fun updateFaceOccluder(
+        vertices: FloatArray,
+        indices: ShortArray,
+        visible: Boolean,
+    ): Boolean {
+        val handle = nativeHandle
+        if (handle == 0L) return false
+        return nativeUpdateFaceOccluder(handle, vertices, indices, visible)
+    }
+
     fun latestPresentationSample(): NativeVulkanPresentationSample? {
         val handle = nativeHandle
         if (handle == 0L) return null
@@ -420,6 +430,12 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
         indices: ShortArray,
         displayToScreen: FloatArray,
         temporalFlowEnabled: Boolean,
+        visible: Boolean,
+    ): Boolean
+    private external fun nativeUpdateFaceOccluder(
+        handle: Long,
+        vertices: FloatArray,
+        indices: ShortArray,
         visible: Boolean,
     ): Boolean
     private external fun nativeReadLatestPresentationTiming(

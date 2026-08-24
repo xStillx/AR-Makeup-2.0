@@ -80,6 +80,10 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
                         EXTRA_ENABLE_NATIVE_VULKAN_VISIBLE,
                         intent.getBooleanExtra(EXTRA_ENABLE_NATIVE_VULKAN_VISIBLE, false),
                     )
+                    putExtra(
+                        EXTRA_ENABLE_VULKAN_FACE_DEPTH,
+                        intent.getBooleanExtra(EXTRA_ENABLE_VULKAN_FACE_DEPTH, false),
+                    )
                 },
             )
             finish()
@@ -547,6 +551,8 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
             "com.example.armakeup.extra.CAMERA_EXPOSURE_COMPENSATION_INDEX"
         const val EXTRA_ENABLE_ARCORE_FACE_ANCHOR_PROOF =
             "com.example.armakeup.extra.ENABLE_ARCORE_FACE_ANCHOR_PROOF"
+        const val EXTRA_ENABLE_VULKAN_FACE_DEPTH =
+            "com.example.armakeup.extra.ENABLE_VULKAN_FACE_DEPTH"
         private const val MIN_CAMERA_FPS = 30
         private const val MAX_CAMERA_FPS = 60
         private const val PERFORMANCE_LOG_TAG = "ARMakeupPerf"

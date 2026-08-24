@@ -31,6 +31,23 @@ class FaceTrackingContractTest {
     }
 
     @Test
+    fun `surface topology is immutable and validates indices`() {
+        val topology = FaceTopologyDescriptor("surface", 1, 4)
+        val indices = shortArrayOf(0, 1, 2, 0, 2, 3)
+        val surface = FaceSurfaceTopology.of(topology, indices)
+
+        indices[0] = 3
+        val exported = surface.packedCopy().also { it[1] = 3 }
+
+        assertEquals(0, surface[0])
+        assertEquals(2, surface.triangleCount)
+        assertNotEquals(exported[1].toInt(), surface[1])
+        assertThrows(IllegalArgumentException::class.java) {
+            FaceSurfaceTopology.of(topology, shortArrayOf(0, 1, 4))
+        }
+    }
+
+    @Test
     fun `observation rejects landmarks from another topology`() {
         val declaredTopology = FaceTopologyDescriptor("declared", 1, 1)
         val actualTopology = FaceTopologyDescriptor("actual", 1, 1)

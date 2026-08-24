@@ -20,6 +20,16 @@ Device A/B 2026-08-24 уточнил composition. Stable eye/nose/cheek affine �
 
 Checkpoint остаётся debug-only и пока рисует screen-space tracking-test lips без canonical face depth/occlusion, production matte/satin/gloss или unsupported-device fallback. На экстремальном yaw/pitch остаётся небольшой residual, потому что lip vertices имеют `z=0`, а Vulkan render pass не использует depth attachment/face occluder. Запуск: debug `MainActivity` с extras `com.example.armakeup.extra.ENABLE_ARCORE_FACE_ANCHOR_PROOF=true` и `com.example.armakeup.extra.ENABLE_NATIVE_VULKAN_VISIBLE=true`. Старый predictor/gyro не возвращать без измеримого основания.
 
+## Последний сохранённый эксперимент — FF5 canonical Vulkan depth, визуально отклонён
+
+FF5 передаёт ARCore 468-point triangle topology и projected NDC depth через model-independent `FaceObservation`/`FullFaceRenderState`. Vulkan выбирает D32/D24/D16, выделяет depth image на каждый swapchain image и рисует в одном pass: camera → depth-only face occluder → depth-tested tracking-test lipstick. Lip vertices получают глубину через barycentric sampling треугольников вокруг lip landmarks; temporal flow выключен. A/B extra: `com.example.armakeup.extra.ENABLE_VULKAN_FACE_DEPTH=true/false`. ADR: `docs/adr/003-vulkan-canonical-face-depth-occlusion.md`.
+
+Технический gate пройден: `177` unit-тестов, `0` failures/errors, lint, assemble и native/SPIR-V четыре ABI. APK SHA-256 `013758091AA4D2C3A0E718BD22744B9955F488A0DC2B537D70BDE27924E2F9EA`. На SM-G990B/Adreno 660: `D32_SFLOAT`, `faceDepthUpdates` растёт, camera drops не замечены; Home/resume пересоздаёт runtime без black screen и `Vulkan retained-camera present failed`.
+
+Пользовательский visual verdict отрицательный: при сильном yaw маска немного уезжает вперёд; часть маски проваливается в губы и открывает исходную кожу; при сильном pitch вниз маска съезжает и мигает. Поэтому FF5 candidate сохранён для продолжения, но не принят и не включён по умолчанию. Rollback/visual baseline — `80aaf7e` + context `92fc514`.
+
+Следующий чат должен начать с controlled 2D/3D A/B на новом устройстве. Не тюнить predictor/gyro. Сначала разделить XY composition, sampled depth/depth bias и visibility/loss gating; полезно добавить debug-визуализацию face/lip depth и telemetry yaw/pitch/local weight/residual/age. Рассмотреть полноценную camera-space 3D local lip deformation/canonical UV attachment вместо текущей 2D affine geometry с навешанной глубиной. До устранения forward drift, skin holes и pitch flicker не переходить к FF6/material tuning.
+
 ## FF3 contract и следующий этап
 
 Первый FF3 slice реализован поверх `782778c` и принят на устройстве. Добавлены explicit topology/coordinate/camera metadata, ARCore global adapter, MediaPipe local-deformation backend, pure composer, current ARCore contour fallback и JVM regressions на заменяемость/immutability/anchored composition. Архитектурное решение: `docs/adr/002-model-independent-full-face-contract.md`.
@@ -28,7 +38,7 @@ Checkpoint остаётся debug-only и пока рисует screen-space tra
 
 Локальный gate shadow slice пройден: `164` unit-теста, `0` failures/errors, lint, debug APK и native build четырёх ABI. Candidate APK SHA-256 `90BCC7F81E181F0E2598294A52F5536805318950E385C868532AA2B2F67E56BF`; device acceptance для него не выполнялся и не требуется для невидимых eye fields до checkpoint, если lip output действительно не менялся.
 
-Следующий обязательный шаг после checkpoint — FF5 canonical 3D Vulkan vertical slice: передать 468-point face topology/clip-space depth, добавить depth attachment и depth-only face occluder, затем рисовать губы с корректной глубиной. Сохранить A/B `принятый 2D baseline / 3D candidate`. После visual acceptance выполнить thermal/dropout gate, reusable replay и unsupported-device fallback; IMU/flow возвращать только при измеримом residual.
+Следующий обязательный шаг — продолжить уже сохранённый FF5 candidate на новом устройстве: controlled A/B `принятый 2D baseline / 3D candidate`, локализация XY/depth/visibility причины и исправление yaw/pitch/depth artifacts. После visual acceptance выполнить thermal/dropout gate, reusable replay и unsupported-device fallback; IMU/flow возвращать только при измеримом residual.
 
 ## Репозиторий и состояние
 
@@ -36,7 +46,7 @@ Checkpoint остаётся debug-only и пока рисует screen-space tra
 - Ветка: `master`; checkpoint `80aaf7e` сохраняет device-accepted ARCore→Vulkan hybrid, предыдущий `2568a67` — mouth/eye contract. Исторические точки отката: `cc82370` / `tracking-v6.2-stable-2026-08-17`, `d4636ac` / `tracking-v6.2-fast-motion-2026-08-17`, `ab8796a` / `material-temporal-v1-candidate-2026-08-17`, `dd095f7` / `tracking-v6.3-gyro-experimental-2026-08-17`; FF1/FF2/native commits `0554924`, `19a2280`, `3419063`, `7bd498f`, `6be330f`, `9bc3efb`, `2fb7cd7`, `082d88e`, `be35764`, `1406c24`. Обычный запуск всё ещё использует Filament; ARCore+Vulkan hybrid включается debug-extras.
 - Основные коммиты: `cc82370 [V6.2]`, `cd1a560 [UpdateContext]`, `8d48b46 [V6]`, `4f8039b [V5]`, `3d3572e [V4]`, `395d3f3 [V3]`.
 - Kotlin, XML/View UI, один модуль `:app`; `minSdk 24`, `targetSdk/compileSdk 37`.
-- Последняя проверка: `173` unit-теста без failures/errors, lint и debug APK успешны; native код/SPIR-V собираются для `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`; exact ARCore+Vulkan APK установлен и визуально принят на SM-G990B. Production material/depth cutover не начат.
+- Последняя проверка FF5: `177` unit-тестов без failures/errors, lint и debug APK успешны; native код/SPIR-V собираются для `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`; exact FF5 APK установлен на SM-G990B, infrastructure/lifecycle gate пройден, visual gate отклонён. Принятый 2D checkpoint остаётся `80aaf7e`.
 
 ## Текущий pipeline
 

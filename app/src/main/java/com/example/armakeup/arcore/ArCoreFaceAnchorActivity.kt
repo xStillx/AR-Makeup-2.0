@@ -39,6 +39,7 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
     private var glRenderer: ArCoreFaceAnchorRenderer? = null
     private var vulkanRenderer: ArCoreVulkanFaceRenderer? = null
     private var useVulkan = false
+    private var faceDepthEnabled = false
 
     private var session: Session? = null
     private var mediaPipeTracker: ArCoreMediaPipeLipTracker? = null
@@ -64,10 +65,13 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
         val vulkanRequested =
             intent.getBooleanExtra(MainActivity.EXTRA_ENABLE_NATIVE_VULKAN_VISIBLE, false)
         useVulkan = vulkanRequested && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+        faceDepthEnabled = useVulkan &&
+            intent.getBooleanExtra(MainActivity.EXTRA_ENABLE_VULKAN_FACE_DEPTH, false)
         surfaceView = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && useVulkan) {
             SurfaceView(this).also { view ->
                 vulkanRenderer = ArCoreVulkanFaceRenderer(
                     surfaceView = view,
+                    faceDepthEnabled = faceDepthEnabled,
                     displayRotation = { currentDisplayRotation() },
                     imageRotationDegrees = { mediaPipeImageRotationDegrees },
                     onStatus = { status -> runOnUiThread { statusView.text = status } },
@@ -206,7 +210,11 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
             glSurfaceView?.onResume()
             vulkanRenderer?.resume()
             statusView.text = if (useVulkan) {
-                "ARCore + Vulkan: point the front camera at your face"
+                if (faceDepthEnabled) {
+                    "ARCore + Vulkan 3D depth: point the front camera at your face"
+                } else {
+                    "ARCore + Vulkan 2D baseline: point the front camera at your face"
+                }
             } else {
                 "ARCore: point the front camera at your face"
             }

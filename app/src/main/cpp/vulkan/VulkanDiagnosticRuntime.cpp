@@ -48,9 +48,12 @@ constexpr std::size_t kTemporalResultElementCount = 8;
 constexpr std::uint32_t kTemporalPyramidLevels = 4;
 constexpr std::uint32_t kTemporalPyramidSize = 256;
 constexpr std::uint32_t kTemporalFlowPointCount = 108;
-constexpr std::size_t kTrackingTestLipVertexComponentCount = 5;
+constexpr std::size_t kTrackingTestLipVertexComponentCount = 6;
 constexpr std::size_t kTrackingTestLipMaxVertexCount = 1024;
 constexpr std::size_t kTrackingTestLipMaxIndexCount = 6000;
+constexpr std::size_t kFaceOccluderVertexComponentCount = 3;
+constexpr std::size_t kFaceOccluderMaxVertexCount = 468;
+constexpr std::size_t kFaceOccluderMaxIndexCount = 3000;
 constexpr std::size_t kPresentationMetadataCount = 7;
 constexpr std::size_t kMaxPendingPresentationSamples = 256;
 
@@ -305,6 +308,8 @@ public:
                << " temporalComputed=" << temporalComputedFrames_.load()
                << " temporalAccepted=" << temporalAcceptedFrames_.load()
                << " temporalRejected=" << temporalRejectedFrames_.load()
+               << " faceDepthUpdates=" << faceOccluderUpdates_.load()
+               << " depthFormat=" << formatName(depthFormat_)
                << " displayTiming=" << (displayTimingSupported_ ? "true" : "false")
                << " actualPresentId=" << latestPresentationId_.load();
         if (lastCameraWidth_.load() > 0U) {
@@ -744,6 +749,64 @@ public:
         return true;
     }
 
+    bool updateFaceOccluder(
+        JNIEnv* environment,
+        jfloatArray vertices,
+        jshortArray indices,
+        bool visible
+    ) {
+        if (!ready_.load()) {
+            return false;
+        }
+        if (!visible) {
+            std::lock_guard lock(faceMutex_);
+            faceOccluderVisible_ = false;
+            faceOccluderVertices_.clear();
+            faceOccluderIndices_.clear();
+            return true;
+        }
+        if (vertices == nullptr || indices == nullptr) {
+            return false;
+        }
+        const jsize vertexValueCount = environment->GetArrayLength(vertices);
+        const jsize indexCount = environment->GetArrayLength(indices);
+        if (vertexValueCount <= 0 || indexCount <= 0 ||
+            vertexValueCount % static_cast<jsize>(kFaceOccluderVertexComponentCount) != 0) {
+            return false;
+        }
+        const std::size_t vertexCount = static_cast<std::size_t>(vertexValueCount) /
+            kFaceOccluderVertexComponentCount;
+        if (vertexCount > kFaceOccluderMaxVertexCount ||
+            static_cast<std::size_t>(indexCount) > kFaceOccluderMaxIndexCount ||
+            indexCount % 3 != 0) {
+            return false;
+        }
+        std::vector<float> copiedVertices(static_cast<std::size_t>(vertexValueCount));
+        std::vector<jshort> copiedIndices(static_cast<std::size_t>(indexCount));
+        environment->GetFloatArrayRegion(vertices, 0, vertexValueCount, copiedVertices.data());
+        environment->GetShortArrayRegion(indices, 0, indexCount, copiedIndices.data());
+        if (environment->ExceptionCheck() == JNI_TRUE ||
+            !std::all_of(copiedVertices.begin(), copiedVertices.end(), [](float value) {
+                return std::isfinite(value);
+            })) {
+            return false;
+        }
+        std::vector<std::uint16_t> unsignedIndices(copiedIndices.size());
+        for (std::size_t index = 0; index < copiedIndices.size(); ++index) {
+            const std::uint16_t value = static_cast<std::uint16_t>(copiedIndices[index]);
+            if (value >= vertexCount) {
+                return false;
+            }
+            unsignedIndices[index] = value;
+        }
+        std::lock_guard lock(faceMutex_);
+        faceOccluderVertices_ = std::move(copiedVertices);
+        faceOccluderIndices_ = std::move(unsignedIndices);
+        faceOccluderVisible_ = true;
+        faceOccluderUpdates_.fetch_add(1);
+        return true;
+    }
+
     bool readLatestPresentationTiming(JNIEnv* environment, jlongArray values) const {
         if (values == nullptr ||
             environment->GetArrayLength(values) < static_cast<jsize>(kPresentationMetadataCount)) {
@@ -934,6 +997,9 @@ private:
         if (!createTrackingTestLipPipeline()) {
             return;
         }
+        if (!createFaceOccluderPipeline()) {
+            return;
+        }
         if (!createRetainedCameraResources()) {
             return;
         }
@@ -958,6 +1024,10 @@ private:
         getPhysicalDeviceMemoryProperties_ =
             loadInstance<PFN_vkGetPhysicalDeviceMemoryProperties>(
                 "vkGetPhysicalDeviceMemoryProperties"
+            );
+        getPhysicalDeviceFormatProperties_ =
+            loadInstance<PFN_vkGetPhysicalDeviceFormatProperties>(
+                "vkGetPhysicalDeviceFormatProperties"
             );
         getPhysicalDeviceQueueFamilyProperties_ =
             loadInstance<PFN_vkGetPhysicalDeviceQueueFamilyProperties>(
@@ -992,6 +1062,7 @@ private:
             enumeratePhysicalDevices_ == nullptr ||
             getPhysicalDeviceProperties_ == nullptr ||
             getPhysicalDeviceMemoryProperties_ == nullptr ||
+            getPhysicalDeviceFormatProperties_ == nullptr ||
             getPhysicalDeviceQueueFamilyProperties_ == nullptr ||
             getPhysicalDeviceSurfaceSupport_ == nullptr ||
             getPhysicalDeviceSurfaceCapabilities_ == nullptr ||
@@ -1450,7 +1521,8 @@ private:
             setVulkanError("read_swapchain_images", result);
             return false;
         }
-        if (!createImageViews() || !createRenderPass() || !createFramebuffers()) {
+        if (!createImageViews() || !createDepthResources() ||
+            !createRenderPass() || !createFramebuffers()) {
             return false;
         }
         if (displayTimingSupported_ && getRefreshCycleDuration_ != nullptr) {
@@ -1586,6 +1658,124 @@ private:
         return true;
     }
 
+    bool createDepthResources() {
+        constexpr std::array<VkFormat, 3> candidates{
+            VK_FORMAT_D32_SFLOAT,
+            VK_FORMAT_D24_UNORM_S8_UINT,
+            VK_FORMAT_D16_UNORM,
+        };
+        depthFormat_ = VK_FORMAT_UNDEFINED;
+        for (const VkFormat candidate : candidates) {
+            VkFormatProperties properties{};
+            getPhysicalDeviceFormatProperties_(physicalDevice_, candidate, &properties);
+            if ((properties.optimalTilingFeatures &
+                 VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) != 0U) {
+                depthFormat_ = candidate;
+                break;
+            }
+        }
+        if (depthFormat_ == VK_FORMAT_UNDEFINED) {
+            setError("depth_format_unavailable");
+            return false;
+        }
+        depthImages_.resize(swapchainImages_.size(), VK_NULL_HANDLE);
+        depthMemories_.resize(swapchainImages_.size(), VK_NULL_HANDLE);
+        depthImageViews_.resize(swapchainImages_.size(), VK_NULL_HANDLE);
+        for (std::size_t index = 0; index < swapchainImages_.size(); ++index) {
+            const VkImageCreateInfo imageInfo{
+                .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+                .pNext = nullptr,
+                .flags = 0,
+                .imageType = VK_IMAGE_TYPE_2D,
+                .format = depthFormat_,
+                .extent =
+                    VkExtent3D{.width = extent_.width, .height = extent_.height, .depth = 1},
+                .mipLevels = 1,
+                .arrayLayers = 1,
+                .samples = VK_SAMPLE_COUNT_1_BIT,
+                .tiling = VK_IMAGE_TILING_OPTIMAL,
+                .usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+                .queueFamilyIndexCount = 0,
+                .pQueueFamilyIndices = nullptr,
+                .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+            };
+            VkResult result = createImage_(
+                device_,
+                &imageInfo,
+                nullptr,
+                &depthImages_[index]
+            );
+            if (result != VK_SUCCESS) {
+                setVulkanError("create_depth_image", result);
+                return false;
+            }
+            VkMemoryRequirements requirements{};
+            getImageMemoryRequirements_(device_, depthImages_[index], &requirements);
+            const std::uint32_t memoryType = findMemoryType(
+                requirements.memoryTypeBits,
+                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+            );
+            if (memoryType == std::numeric_limits<std::uint32_t>::max()) {
+                setError("depth_memory_type_unavailable");
+                return false;
+            }
+            const VkMemoryAllocateInfo allocateInfo{
+                .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                .pNext = nullptr,
+                .allocationSize = requirements.size,
+                .memoryTypeIndex = memoryType,
+            };
+            result = allocateMemory_(device_, &allocateInfo, nullptr, &depthMemories_[index]);
+            if (result != VK_SUCCESS) {
+                setVulkanError("allocate_depth_memory", result);
+                return false;
+            }
+            result = bindImageMemory_(
+                device_,
+                depthImages_[index],
+                depthMemories_[index],
+                0
+            );
+            if (result != VK_SUCCESS) {
+                setVulkanError("bind_depth_memory", result);
+                return false;
+            }
+            const VkImageViewCreateInfo viewInfo{
+                .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+                .pNext = nullptr,
+                .flags = 0,
+                .image = depthImages_[index],
+                .viewType = VK_IMAGE_VIEW_TYPE_2D,
+                .format = depthFormat_,
+                .components = VkComponentMapping{
+                    .r = VK_COMPONENT_SWIZZLE_IDENTITY,
+                    .g = VK_COMPONENT_SWIZZLE_IDENTITY,
+                    .b = VK_COMPONENT_SWIZZLE_IDENTITY,
+                    .a = VK_COMPONENT_SWIZZLE_IDENTITY,
+                },
+                .subresourceRange = VkImageSubresourceRange{
+                    .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+                    .baseMipLevel = 0,
+                    .levelCount = 1,
+                    .baseArrayLayer = 0,
+                    .layerCount = 1,
+                },
+            };
+            result = createImageView_(
+                device_,
+                &viewInfo,
+                nullptr,
+                &depthImageViews_[index]
+            );
+            if (result != VK_SUCCESS) {
+                setVulkanError("create_depth_view", result);
+                return false;
+            }
+        }
+        return true;
+    }
+
     bool createRenderPass() {
         const VkAttachmentDescription colorAttachment{
             .flags = 0,
@@ -1602,6 +1792,21 @@ private:
             .attachment = 0,
             .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         };
+        const VkAttachmentDescription depthAttachment{
+            .flags = 0,
+            .format = depthFormat_,
+            .samples = VK_SAMPLE_COUNT_1_BIT,
+            .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+            .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+            .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+            .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+            .finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+        };
+        const VkAttachmentReference depthReference{
+            .attachment = 1,
+            .layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+        };
         const VkSubpassDescription subpass{
             .flags = 0,
             .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -1610,25 +1815,34 @@ private:
             .colorAttachmentCount = 1,
             .pColorAttachments = &colorReference,
             .pResolveAttachments = nullptr,
-            .pDepthStencilAttachment = nullptr,
+            .pDepthStencilAttachment = &depthReference,
             .preserveAttachmentCount = 0,
             .pPreserveAttachments = nullptr,
         };
         const VkSubpassDependency dependency{
             .srcSubpass = VK_SUBPASS_EXTERNAL,
             .dstSubpass = 0,
-            .srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-            .dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            .srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+            .dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
             .srcAccessMask = 0,
-            .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
             .dependencyFlags = 0,
+        };
+        const std::array<VkAttachmentDescription, 2> attachments{
+            colorAttachment,
+            depthAttachment,
         };
         const VkRenderPassCreateInfo createInfo{
             .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
             .pNext = nullptr,
             .flags = 0,
-            .attachmentCount = 1,
-            .pAttachments = &colorAttachment,
+            .attachmentCount = static_cast<std::uint32_t>(attachments.size()),
+            .pAttachments = attachments.data(),
             .subpassCount = 1,
             .pSubpasses = &subpass,
             .dependencyCount = 1,
@@ -1645,14 +1859,17 @@ private:
     bool createFramebuffers() {
         framebuffers_.resize(imageViews_.size(), VK_NULL_HANDLE);
         for (std::size_t index = 0; index < imageViews_.size(); ++index) {
-            const VkImageView attachment = imageViews_[index];
+            const std::array<VkImageView, 2> attachments{
+                imageViews_[index],
+                depthImageViews_[index],
+            };
             const VkFramebufferCreateInfo createInfo{
                 .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
                 .pNext = nullptr,
                 .flags = 0,
                 .renderPass = renderPass_,
-                .attachmentCount = 1,
-                .pAttachments = &attachment,
+                .attachmentCount = static_cast<std::uint32_t>(attachments.size()),
+                .pAttachments = attachments.data(),
                 .width = extent_.width,
                 .height = extent_.height,
                 .layers = 1,
@@ -1725,10 +1942,13 @@ private:
             setVulkanError("begin_clear_command_buffer", result);
             return false;
         }
-        const VkClearValue clearValue{
-            .color = VkClearColorValue{
-                .float32 = {0.82F, 0.12F, 0.34F, 1.0F},
+        const std::array<VkClearValue, 2> clearValues{
+            VkClearValue{
+                .color = VkClearColorValue{
+                    .float32 = {0.82F, 0.12F, 0.34F, 1.0F},
+                },
             },
+            VkClearValue{.depthStencil = VkClearDepthStencilValue{.depth = 1.0F, .stencil = 0}},
         };
         const VkRenderPassBeginInfo renderPassInfo{
             .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
@@ -1739,8 +1959,8 @@ private:
                 .offset = VkOffset2D{.x = 0, .y = 0},
                 .extent = extent_,
             },
-            .clearValueCount = 1,
-            .pClearValues = &clearValue,
+            .clearValueCount = static_cast<std::uint32_t>(clearValues.size()),
+            .pClearValues = clearValues.data(),
         };
         cmdBeginRenderPass_(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
         cmdEndRenderPass_(commandBuffer);
@@ -1894,7 +2114,7 @@ private:
             ),
             .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
         };
-        const std::array<VkVertexInputAttributeDescription, 3> attributes{
+        const std::array<VkVertexInputAttributeDescription, 4> attributes{
             VkVertexInputAttributeDescription{
                 .location = 0,
                 .binding = 0,
@@ -1912,6 +2132,12 @@ private:
                 .binding = 0,
                 .format = VK_FORMAT_R32_SFLOAT,
                 .offset = static_cast<std::uint32_t>(sizeof(float) * 4U),
+            },
+            VkVertexInputAttributeDescription{
+                .location = 3,
+                .binding = 0,
+                .format = VK_FORMAT_R32_SFLOAT,
+                .offset = static_cast<std::uint32_t>(sizeof(float) * 5U),
             },
         };
         const VkPipelineVertexInputStateCreateInfo vertexInput{
@@ -2000,6 +2226,20 @@ private:
             .pAttachments = &blendAttachment,
             .blendConstants = {0.0F, 0.0F, 0.0F, 0.0F},
         };
+        const VkPipelineDepthStencilStateCreateInfo depthStencil{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .depthTestEnable = VK_TRUE,
+            .depthWriteEnable = VK_FALSE,
+            .depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL,
+            .depthBoundsTestEnable = VK_FALSE,
+            .stencilTestEnable = VK_FALSE,
+            .front = VkStencilOpState{},
+            .back = VkStencilOpState{},
+            .minDepthBounds = 0.0F,
+            .maxDepthBounds = 1.0F,
+        };
         const VkGraphicsPipelineCreateInfo pipelineInfo{
             .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
             .pNext = nullptr,
@@ -2012,7 +2252,7 @@ private:
             .pViewportState = &viewportState,
             .pRasterizationState = &rasterization,
             .pMultisampleState = &multisample,
-            .pDepthStencilState = nullptr,
+            .pDepthStencilState = &depthStencil,
             .pColorBlendState = &blend,
             .pDynamicState = nullptr,
             .layout = trackingTestLipPipelineLayout_,
@@ -2111,6 +2351,214 @@ private:
             .pTexelBufferView = nullptr,
         };
         updateDescriptorSets_(device_, 1, &write, 0, nullptr);
+    }
+
+    bool createFaceOccluderPipeline() {
+        const VkPipelineLayoutCreateInfo layoutInfo{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .setLayoutCount = 0,
+            .pSetLayouts = nullptr,
+            .pushConstantRangeCount = 0,
+            .pPushConstantRanges = nullptr,
+        };
+        VkResult result = createPipelineLayout_(
+            device_,
+            &layoutInfo,
+            nullptr,
+            &faceOccluderPipelineLayout_
+        );
+        if (result != VK_SUCCESS) {
+            setVulkanError("create_face_occluder_pipeline_layout", result);
+            return false;
+        }
+        VkShaderModule vertexModule = VK_NULL_HANDLE;
+        VkShaderModule fragmentModule = VK_NULL_HANDLE;
+        if (!createShaderModule(
+                armakeup::shaders::kFaceOccluderVertex,
+                sizeof(armakeup::shaders::kFaceOccluderVertex),
+                &vertexModule
+            ) ||
+            !createShaderModule(
+                armakeup::shaders::kFaceOccluderFragment,
+                sizeof(armakeup::shaders::kFaceOccluderFragment),
+                &fragmentModule
+            )) {
+            if (vertexModule != VK_NULL_HANDLE) {
+                destroyShaderModule_(device_, vertexModule, nullptr);
+            }
+            if (fragmentModule != VK_NULL_HANDLE) {
+                destroyShaderModule_(device_, fragmentModule, nullptr);
+            }
+            return false;
+        }
+        const std::array<VkPipelineShaderStageCreateInfo, 2> shaderStages{
+            VkPipelineShaderStageCreateInfo{
+                .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                .pNext = nullptr,
+                .flags = 0,
+                .stage = VK_SHADER_STAGE_VERTEX_BIT,
+                .module = vertexModule,
+                .pName = "main",
+                .pSpecializationInfo = nullptr,
+            },
+            VkPipelineShaderStageCreateInfo{
+                .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                .pNext = nullptr,
+                .flags = 0,
+                .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+                .module = fragmentModule,
+                .pName = "main",
+                .pSpecializationInfo = nullptr,
+            },
+        };
+        const VkVertexInputBindingDescription binding{
+            .binding = 0,
+            .stride = static_cast<std::uint32_t>(
+                sizeof(float) * kFaceOccluderVertexComponentCount
+            ),
+            .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+        };
+        const VkVertexInputAttributeDescription attribute{
+            .location = 0,
+            .binding = 0,
+            .format = VK_FORMAT_R32G32B32_SFLOAT,
+            .offset = 0,
+        };
+        const VkPipelineVertexInputStateCreateInfo vertexInput{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .vertexBindingDescriptionCount = 1,
+            .pVertexBindingDescriptions = &binding,
+            .vertexAttributeDescriptionCount = 1,
+            .pVertexAttributeDescriptions = &attribute,
+        };
+        const VkPipelineInputAssemblyStateCreateInfo inputAssembly{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+            .primitiveRestartEnable = VK_FALSE,
+        };
+        const VkViewport viewport{
+            .x = 0.0F,
+            .y = 0.0F,
+            .width = static_cast<float>(extent_.width),
+            .height = static_cast<float>(extent_.height),
+            .minDepth = 0.0F,
+            .maxDepth = 1.0F,
+        };
+        const VkRect2D scissor{
+            .offset = VkOffset2D{.x = 0, .y = 0},
+            .extent = extent_,
+        };
+        const VkPipelineViewportStateCreateInfo viewportState{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .viewportCount = 1,
+            .pViewports = &viewport,
+            .scissorCount = 1,
+            .pScissors = &scissor,
+        };
+        const VkPipelineRasterizationStateCreateInfo rasterization{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .depthClampEnable = VK_FALSE,
+            .rasterizerDiscardEnable = VK_FALSE,
+            .polygonMode = VK_POLYGON_MODE_FILL,
+            .cullMode = VK_CULL_MODE_NONE,
+            .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+            .depthBiasEnable = VK_FALSE,
+            .depthBiasConstantFactor = 0.0F,
+            .depthBiasClamp = 0.0F,
+            .depthBiasSlopeFactor = 0.0F,
+            .lineWidth = 1.0F,
+        };
+        const VkPipelineMultisampleStateCreateInfo multisample{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+            .sampleShadingEnable = VK_FALSE,
+            .minSampleShading = 0.0F,
+            .pSampleMask = nullptr,
+            .alphaToCoverageEnable = VK_FALSE,
+            .alphaToOneEnable = VK_FALSE,
+        };
+        const VkPipelineDepthStencilStateCreateInfo depthStencil{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .depthTestEnable = VK_TRUE,
+            .depthWriteEnable = VK_TRUE,
+            .depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL,
+            .depthBoundsTestEnable = VK_FALSE,
+            .stencilTestEnable = VK_FALSE,
+            .front = VkStencilOpState{},
+            .back = VkStencilOpState{},
+            .minDepthBounds = 0.0F,
+            .maxDepthBounds = 1.0F,
+        };
+        const VkPipelineColorBlendAttachmentState blendAttachment{
+            .blendEnable = VK_FALSE,
+            .srcColorBlendFactor = VK_BLEND_FACTOR_ONE,
+            .dstColorBlendFactor = VK_BLEND_FACTOR_ZERO,
+            .colorBlendOp = VK_BLEND_OP_ADD,
+            .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+            .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
+            .alphaBlendOp = VK_BLEND_OP_ADD,
+            .colorWriteMask = 0,
+        };
+        const VkPipelineColorBlendStateCreateInfo blend{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .logicOpEnable = VK_FALSE,
+            .logicOp = VK_LOGIC_OP_COPY,
+            .attachmentCount = 1,
+            .pAttachments = &blendAttachment,
+            .blendConstants = {0.0F, 0.0F, 0.0F, 0.0F},
+        };
+        const VkGraphicsPipelineCreateInfo pipelineInfo{
+            .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .stageCount = static_cast<std::uint32_t>(shaderStages.size()),
+            .pStages = shaderStages.data(),
+            .pVertexInputState = &vertexInput,
+            .pInputAssemblyState = &inputAssembly,
+            .pTessellationState = nullptr,
+            .pViewportState = &viewportState,
+            .pRasterizationState = &rasterization,
+            .pMultisampleState = &multisample,
+            .pDepthStencilState = &depthStencil,
+            .pColorBlendState = &blend,
+            .pDynamicState = nullptr,
+            .layout = faceOccluderPipelineLayout_,
+            .renderPass = renderPass_,
+            .subpass = 0,
+            .basePipelineHandle = VK_NULL_HANDLE,
+            .basePipelineIndex = -1,
+        };
+        result = createGraphicsPipelines_(
+            device_,
+            VK_NULL_HANDLE,
+            1,
+            &pipelineInfo,
+            nullptr,
+            &faceOccluderPipeline_
+        );
+        destroyShaderModule_(device_, fragmentModule, nullptr);
+        destroyShaderModule_(device_, vertexModule, nullptr);
+        if (result != VK_SUCCESS) {
+            setVulkanError("create_face_occluder_pipeline", result);
+            return false;
+        }
+        return true;
     }
 
     bool createRetainedCameraResources() {
@@ -2701,6 +3149,93 @@ private:
         );
         *outputIndexCount = static_cast<std::uint32_t>(trackingTestLipIndices_.size());
         return true;
+    }
+
+    bool ensureFaceOccluderBuffers() {
+        if (faceOccluderVertexBuffers_[0] != VK_NULL_HANDLE) {
+            return true;
+        }
+        const VkDeviceSize vertexBytes = static_cast<VkDeviceSize>(
+            kFaceOccluderMaxVertexCount * kFaceOccluderVertexComponentCount * sizeof(float)
+        );
+        const VkDeviceSize indexBytes = static_cast<VkDeviceSize>(
+            kFaceOccluderMaxIndexCount * sizeof(std::uint16_t)
+        );
+        for (std::size_t index = 0; index < kFramesInFlight; ++index) {
+            if (!createTrackingTestLipBuffer(
+                    vertexBytes,
+                    VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                    &faceOccluderVertexBuffers_[index],
+                    &faceOccluderVertexMemories_[index],
+                    &faceOccluderVertexMapped_[index]
+                ) ||
+                !createTrackingTestLipBuffer(
+                    indexBytes,
+                    VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                    &faceOccluderIndexBuffers_[index],
+                    &faceOccluderIndexMemories_[index],
+                    &faceOccluderIndexMapped_[index]
+                )) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool prepareFaceOccluderFrame(
+        std::uint32_t frameIndex,
+        std::uint32_t* outputIndexCount
+    ) {
+        if (outputIndexCount == nullptr || frameIndex >= kFramesInFlight) {
+            return false;
+        }
+        *outputIndexCount = 0;
+        std::lock_guard lock(faceMutex_);
+        if (!faceOccluderVisible_ || faceOccluderVertices_.empty() ||
+            faceOccluderIndices_.empty()) {
+            return true;
+        }
+        if (!ensureFaceOccluderBuffers()) {
+            return false;
+        }
+        std::memcpy(
+            faceOccluderVertexMapped_[frameIndex],
+            faceOccluderVertices_.data(),
+            faceOccluderVertices_.size() * sizeof(float)
+        );
+        std::memcpy(
+            faceOccluderIndexMapped_[frameIndex],
+            faceOccluderIndices_.data(),
+            faceOccluderIndices_.size() * sizeof(std::uint16_t)
+        );
+        *outputIndexCount = static_cast<std::uint32_t>(faceOccluderIndices_.size());
+        return true;
+    }
+
+    void drawFaceOccluder(
+        VkCommandBuffer commandBuffer,
+        std::uint32_t frameIndex,
+        std::uint32_t indexCount
+    ) {
+        if (indexCount == 0U) {
+            return;
+        }
+        const VkDeviceSize vertexOffset = 0;
+        cmdBindPipeline_(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, faceOccluderPipeline_);
+        cmdBindVertexBuffers_(
+            commandBuffer,
+            0,
+            1,
+            &faceOccluderVertexBuffers_[frameIndex],
+            &vertexOffset
+        );
+        cmdBindIndexBuffer_(
+            commandBuffer,
+            faceOccluderIndexBuffers_[frameIndex],
+            0,
+            VK_INDEX_TYPE_UINT16
+        );
+        cmdDrawIndexed_(commandBuffer, indexCount, 1, 0, 0, 0);
     }
 
     void bindTrackingTestLipTemporalState(
@@ -4236,6 +4771,10 @@ private:
             }
         }
         imageFences_[imageIndex] = frameFences_[frameIndex];
+        std::uint32_t faceOccluderIndexCount = 0;
+        if (!prepareFaceOccluderFrame(frameIndex, &faceOccluderIndexCount)) {
+            return -1;
+        }
         std::uint32_t trackingTestLipIndexCount = 0;
         if (!prepareTrackingTestLipFrame(frameIndex, &trackingTestLipIndexCount)) {
             return -1;
@@ -4248,6 +4787,7 @@ private:
         if (!recordRetainedCameraCommandBuffer(
                 imageIndex,
                 frameIndex,
+                faceOccluderIndexCount,
                 trackingTestLipIndexCount
             )) {
             return -1;
@@ -4319,6 +4859,7 @@ private:
     bool recordRetainedCameraCommandBuffer(
         std::uint32_t imageIndex,
         std::uint32_t frameIndex,
+        std::uint32_t faceOccluderIndexCount,
         std::uint32_t trackingTestLipIndexCount
     ) {
         VkCommandBuffer commandBuffer = commandBuffers_[imageIndex];
@@ -4338,8 +4879,11 @@ private:
             setCameraVulkanError("begin_retained_command_buffer", result);
             return false;
         }
-        const VkClearValue clearValue{
-            .color = VkClearColorValue{.float32 = {0.0F, 0.0F, 0.0F, 1.0F}},
+        const std::array<VkClearValue, 2> clearValues{
+            VkClearValue{
+                .color = VkClearColorValue{.float32 = {0.0F, 0.0F, 0.0F, 1.0F}},
+            },
+            VkClearValue{.depthStencil = VkClearDepthStencilValue{.depth = 1.0F, .stencil = 0}},
         };
         const VkRenderPassBeginInfo renderPassInfo{
             .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
@@ -4350,8 +4894,8 @@ private:
                 .offset = VkOffset2D{.x = 0, .y = 0},
                 .extent = extent_,
             },
-            .clearValueCount = 1,
-            .pClearValues = &clearValue,
+            .clearValueCount = static_cast<std::uint32_t>(clearValues.size()),
+            .pClearValues = clearValues.data(),
         };
         cmdBeginRenderPass_(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
         cmdBindPipeline_(
@@ -4370,6 +4914,7 @@ private:
             nullptr
         );
         cmdDraw_(commandBuffer, 3, 1, 0, 0);
+        drawFaceOccluder(commandBuffer, frameIndex, faceOccluderIndexCount);
         if (trackingTestLipIndexCount > 0U) {
             const VkDeviceSize vertexOffset = 0;
             cmdBindPipeline_(
@@ -4451,6 +4996,10 @@ private:
             }
         }
         imageFences_[imageIndex] = frameFences_[frameIndex];
+        std::uint32_t faceOccluderIndexCount = 0;
+        if (!prepareFaceOccluderFrame(frameIndex, &faceOccluderIndexCount)) {
+            return false;
+        }
         std::uint32_t trackingTestLipIndexCount = 0;
         if (!prepareTrackingTestLipFrame(frameIndex, &trackingTestLipIndexCount)) {
             return false;
@@ -4460,7 +5009,12 @@ private:
             setCameraVulkanError("reset_camera_frame_fence", result);
             return false;
         }
-        if (!recordCameraCommandBuffer(imageIndex, frameIndex, trackingTestLipIndexCount)) {
+        if (!recordCameraCommandBuffer(
+                imageIndex,
+                frameIndex,
+                faceOccluderIndexCount,
+                trackingTestLipIndexCount
+            )) {
             return false;
         }
 
@@ -4543,6 +5097,7 @@ private:
     bool recordCameraCommandBuffer(
         std::uint32_t imageIndex,
         std::uint32_t frameIndex,
+        std::uint32_t faceOccluderIndexCount,
         std::uint32_t trackingTestLipIndexCount
     ) {
         VkCommandBuffer commandBuffer = commandBuffers_[imageIndex];
@@ -4595,8 +5150,11 @@ private:
         if (!recordTemporalCommands(commandBuffer)) {
             return false;
         }
-        const VkClearValue clearValue{
-            .color = VkClearColorValue{.float32 = {0.0F, 0.0F, 0.0F, 1.0F}},
+        const std::array<VkClearValue, 2> clearValues{
+            VkClearValue{
+                .color = VkClearColorValue{.float32 = {0.0F, 0.0F, 0.0F, 1.0F}},
+            },
+            VkClearValue{.depthStencil = VkClearDepthStencilValue{.depth = 1.0F, .stencil = 0}},
         };
         const VkRenderPassBeginInfo renderPassInfo{
             .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
@@ -4607,8 +5165,8 @@ private:
                 .offset = VkOffset2D{.x = 0, .y = 0},
                 .extent = extent_,
             },
-            .clearValueCount = 1,
-            .pClearValues = &clearValue,
+            .clearValueCount = static_cast<std::uint32_t>(clearValues.size()),
+            .pClearValues = clearValues.data(),
         };
         cmdBeginRenderPass_(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
         cmdBindPipeline_(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, cameraPipeline_);
@@ -4631,6 +5189,7 @@ private:
             pendingCameraFrame_.transform.data()
         );
         cmdDraw_(commandBuffer, 3, 1, 0, 0);
+        drawFaceOccluder(commandBuffer, frameIndex, faceOccluderIndexCount);
         if (trackingTestLipIndexCount > 0U) {
             const VkDeviceSize vertexOffset = 0;
             cmdBindPipeline_(
@@ -5422,6 +5981,15 @@ private:
         }
         if (device_ != VK_NULL_HANDLE) {
             destroyRetainedCameraResources();
+            if (faceOccluderPipeline_ != VK_NULL_HANDLE && destroyPipeline_ != nullptr) {
+                destroyPipeline_(device_, faceOccluderPipeline_, nullptr);
+                faceOccluderPipeline_ = VK_NULL_HANDLE;
+            }
+            if (faceOccluderPipelineLayout_ != VK_NULL_HANDLE &&
+                destroyPipelineLayout_ != nullptr) {
+                destroyPipelineLayout_(device_, faceOccluderPipelineLayout_, nullptr);
+                faceOccluderPipelineLayout_ = VK_NULL_HANDLE;
+            }
             if (trackingTestLipPipeline_ != VK_NULL_HANDLE && destroyPipeline_ != nullptr) {
                 destroyPipeline_(device_, trackingTestLipPipeline_, nullptr);
                 trackingTestLipPipeline_ = VK_NULL_HANDLE;
@@ -5460,6 +6028,34 @@ private:
                 trackingTestLipFallbackFitMemory_ = VK_NULL_HANDLE;
             }
             for (std::size_t index = 0; index < kFramesInFlight; ++index) {
+                if (faceOccluderVertexMapped_[index] != nullptr && unmapMemory_ != nullptr) {
+                    unmapMemory_(device_, faceOccluderVertexMemories_[index]);
+                    faceOccluderVertexMapped_[index] = nullptr;
+                }
+                if (faceOccluderIndexMapped_[index] != nullptr && unmapMemory_ != nullptr) {
+                    unmapMemory_(device_, faceOccluderIndexMemories_[index]);
+                    faceOccluderIndexMapped_[index] = nullptr;
+                }
+                if (faceOccluderVertexBuffers_[index] != VK_NULL_HANDLE &&
+                    destroyBuffer_ != nullptr) {
+                    destroyBuffer_(device_, faceOccluderVertexBuffers_[index], nullptr);
+                    faceOccluderVertexBuffers_[index] = VK_NULL_HANDLE;
+                }
+                if (faceOccluderIndexBuffers_[index] != VK_NULL_HANDLE &&
+                    destroyBuffer_ != nullptr) {
+                    destroyBuffer_(device_, faceOccluderIndexBuffers_[index], nullptr);
+                    faceOccluderIndexBuffers_[index] = VK_NULL_HANDLE;
+                }
+                if (faceOccluderVertexMemories_[index] != VK_NULL_HANDLE &&
+                    freeMemory_ != nullptr) {
+                    freeMemory_(device_, faceOccluderVertexMemories_[index], nullptr);
+                    faceOccluderVertexMemories_[index] = VK_NULL_HANDLE;
+                }
+                if (faceOccluderIndexMemories_[index] != VK_NULL_HANDLE &&
+                    freeMemory_ != nullptr) {
+                    freeMemory_(device_, faceOccluderIndexMemories_[index], nullptr);
+                    faceOccluderIndexMemories_[index] = VK_NULL_HANDLE;
+                }
                 if (trackingTestLipVertexMapped_[index] != nullptr && unmapMemory_ != nullptr) {
                     unmapMemory_(device_, trackingTestLipVertexMemories_[index]);
                     trackingTestLipVertexMapped_[index] = nullptr;
@@ -5511,6 +6107,24 @@ private:
             for (const VkFramebuffer framebuffer : framebuffers_) {
                 if (framebuffer != VK_NULL_HANDLE && destroyFramebuffer_ != nullptr) {
                     destroyFramebuffer_(device_, framebuffer, nullptr);
+                }
+            }
+            for (VkImageView& depthView : depthImageViews_) {
+                if (depthView != VK_NULL_HANDLE && destroyImageView_ != nullptr) {
+                    destroyImageView_(device_, depthView, nullptr);
+                    depthView = VK_NULL_HANDLE;
+                }
+            }
+            for (VkImage& depthImage : depthImages_) {
+                if (depthImage != VK_NULL_HANDLE && destroyImage_ != nullptr) {
+                    destroyImage_(device_, depthImage, nullptr);
+                    depthImage = VK_NULL_HANDLE;
+                }
+            }
+            for (VkDeviceMemory& depthMemory : depthMemories_) {
+                if (depthMemory != VK_NULL_HANDLE && freeMemory_ != nullptr) {
+                    freeMemory_(device_, depthMemory, nullptr);
+                    depthMemory = VK_NULL_HANDLE;
                 }
             }
             if (renderPass_ != VK_NULL_HANDLE && destroyRenderPass_ != nullptr) {
@@ -5591,6 +6205,12 @@ private:
                 return "BGRA8_UNORM";
             case VK_FORMAT_B8G8R8A8_SRGB:
                 return "BGRA8_SRGB";
+            case VK_FORMAT_D32_SFLOAT:
+                return "D32_SFLOAT";
+            case VK_FORMAT_D24_UNORM_S8_UINT:
+                return "D24_UNORM_S8_UINT";
+            case VK_FORMAT_D16_UNORM:
+                return "D16_UNORM";
             case VK_FORMAT_UNDEFINED:
                 return "UNDEFINED";
             default:
@@ -5616,6 +6236,10 @@ private:
     std::uint32_t surfaceMaximumImageCount_ = 0;
     VkExtent2D extent_{};
     VkRenderPass renderPass_ = VK_NULL_HANDLE;
+    VkFormat depthFormat_ = VK_FORMAT_UNDEFINED;
+    std::vector<VkImage> depthImages_;
+    std::vector<VkDeviceMemory> depthMemories_;
+    std::vector<VkImageView> depthImageViews_;
     VkCommandPool commandPool_ = VK_NULL_HANDLE;
     std::vector<VkImage> swapchainImages_;
     std::vector<VkImageView> imageViews_;
@@ -5684,6 +6308,17 @@ private:
     void* temporalFitMapped_ = nullptr;
     VkPipelineLayout trackingTestLipPipelineLayout_ = VK_NULL_HANDLE;
     VkPipeline trackingTestLipPipeline_ = VK_NULL_HANDLE;
+    VkPipelineLayout faceOccluderPipelineLayout_ = VK_NULL_HANDLE;
+    VkPipeline faceOccluderPipeline_ = VK_NULL_HANDLE;
+    std::array<VkBuffer, kFramesInFlight> faceOccluderVertexBuffers_{};
+    std::array<VkDeviceMemory, kFramesInFlight> faceOccluderVertexMemories_{};
+    std::array<void*, kFramesInFlight> faceOccluderVertexMapped_{};
+    std::array<VkBuffer, kFramesInFlight> faceOccluderIndexBuffers_{};
+    std::array<VkDeviceMemory, kFramesInFlight> faceOccluderIndexMemories_{};
+    std::array<void*, kFramesInFlight> faceOccluderIndexMapped_{};
+    std::vector<float> faceOccluderVertices_;
+    std::vector<std::uint16_t> faceOccluderIndices_;
+    bool faceOccluderVisible_ = false;
     VkDescriptorSetLayout trackingTestLipDescriptorSetLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool trackingTestLipDescriptorPool_ = VK_NULL_HANDLE;
     VkDescriptorSet trackingTestLipDescriptorSet_ = VK_NULL_HANDLE;
@@ -5725,6 +6360,7 @@ private:
     std::atomic<std::uint64_t> temporalComputedFrames_{0};
     std::atomic<std::uint64_t> temporalAcceptedFrames_{0};
     std::atomic<std::uint64_t> temporalRejectedFrames_{0};
+    std::atomic<std::uint64_t> faceOccluderUpdates_{0};
     std::atomic<std::uint64_t> latestPresentationId_{0};
     std::atomic<std::uint32_t> lastCameraWidth_{0};
     std::atomic<std::uint32_t> lastCameraHeight_{0};
@@ -5737,6 +6373,7 @@ private:
     mutable std::mutex statusMutex_;
     mutable std::mutex cameraMutex_;
     mutable std::mutex lipMutex_;
+    mutable std::mutex faceMutex_;
     mutable std::mutex presentationMutex_;
     std::mutex renderMutex_;
     std::mutex waitMutex_;
@@ -5757,6 +6394,7 @@ private:
     PFN_vkEnumeratePhysicalDevices enumeratePhysicalDevices_ = nullptr;
     PFN_vkGetPhysicalDeviceProperties getPhysicalDeviceProperties_ = nullptr;
     PFN_vkGetPhysicalDeviceMemoryProperties getPhysicalDeviceMemoryProperties_ = nullptr;
+    PFN_vkGetPhysicalDeviceFormatProperties getPhysicalDeviceFormatProperties_ = nullptr;
     PFN_vkGetPhysicalDeviceQueueFamilyProperties getPhysicalDeviceQueueFamilyProperties_ = nullptr;
     PFN_vkGetPhysicalDeviceSurfaceSupportKHR getPhysicalDeviceSurfaceSupport_ = nullptr;
     PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR getPhysicalDeviceSurfaceCapabilities_ = nullptr;
@@ -6069,6 +6707,24 @@ Java_com_example_armakeup_render_NativeVulkanDiagnosticRuntime_nativeUpdateTrack
         indices,
         displayToScreen,
         temporalFlowEnabled == JNI_TRUE,
+        visible == JNI_TRUE
+    ) ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_example_armakeup_render_NativeVulkanDiagnosticRuntime_nativeUpdateFaceOccluder(
+    JNIEnv* environment,
+    jobject /* runtime */,
+    jlong handle,
+    jfloatArray vertices,
+    jshortArray indices,
+    jboolean visible
+) {
+    VulkanDiagnosticRuntime* runtime = fromHandle(handle);
+    return runtime != nullptr && runtime->updateFaceOccluder(
+        environment,
+        vertices,
+        indices,
         visible == JNI_TRUE
     ) ? JNI_TRUE : JNI_FALSE;
 }

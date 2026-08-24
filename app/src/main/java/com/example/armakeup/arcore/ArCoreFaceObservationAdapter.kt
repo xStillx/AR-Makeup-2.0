@@ -14,6 +14,7 @@ import com.example.armakeup.tracking.face.FaceObservationRole
 import com.example.armakeup.tracking.face.FacePose
 import com.example.armakeup.tracking.face.FaceTopologies
 import com.example.armakeup.tracking.face.FaceTrackingBackend
+import com.example.armakeup.tracking.face.FaceSurfaceTopology
 import com.google.ar.core.AugmentedFace
 import com.google.ar.core.Camera
 import java.util.concurrent.atomic.AtomicReference
@@ -30,6 +31,7 @@ internal class ArCoreFaceObservationAdapter : FaceTrackingBackend {
     private val model = FloatArray(FaceMatrix4.ELEMENT_COUNT)
     private val viewModel = FloatArray(FaceMatrix4.ELEMENT_COUNT)
     private val modelViewProjection = FloatArray(FaceMatrix4.ELEMENT_COUNT)
+    private var cachedSurfaceTopology: FaceSurfaceTopology? = null
 
     fun create(
         sensorTimestampNs: Long,
@@ -43,6 +45,16 @@ internal class ArCoreFaceObservationAdapter : FaceTrackingBackend {
         if (sensorTimestampNs <= 0L) return null
         val vertices = face.meshVertices
         if (vertices.limit() < topology.pointCount * FaceLandmarkSet.COMPONENT_COUNT) return null
+        val surfaceTopology = cachedSurfaceTopology ?: face.meshTriangleIndices.let { indices ->
+            if (indices.limit() <= 0 ||
+                indices.limit() % FaceSurfaceTopology.INDICES_PER_TRIANGLE != 0
+            ) {
+                return null
+            }
+            ShortArray(indices.limit()) { index -> indices[index] }
+                .let { FaceSurfaceTopology.takeOwnership(topology, it) }
+                .also { cachedSurfaceTopology = it }
+        }
 
         camera.getProjectionMatrix(projection, 0, NEAR_METERS, FAR_METERS)
         camera.getViewMatrix(view, 0)
@@ -90,6 +102,7 @@ internal class ArCoreFaceObservationAdapter : FaceTrackingBackend {
                 FaceCoordinateSpace.NORMALIZED_DISPLAY_TOP_LEFT,
                 displayCoordinates,
             ),
+            surfaceTopology = surfaceTopology,
             pose = FacePose(FaceMatrix4.columnMajor(model)),
             cameraFrame = FaceCameraFrameMetadata(
                 sensorTimestampNs = sensorTimestampNs,

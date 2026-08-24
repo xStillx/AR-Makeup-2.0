@@ -3,6 +3,7 @@
 layout(location = 0) in vec2 predictorDisplayPosition;
 layout(location = 1) in vec2 previousDisplayUv;
 layout(location = 2) in float coverage;
+layout(location = 3) in float faceNdcDepth;
 
 layout(std430, set = 0, binding = 0) readonly buffer TemporalFitResult {
     vec4 values[2];
@@ -51,7 +52,7 @@ void main() {
     gl_Position = vec4(
         displayPosition.x * 2.0 - 1.0,
         displayPosition.y * 2.0 - 1.0,
-        0.0,
+        clamp(faceNdcDepth * 0.5 + 0.5 - 0.0005, 0.0, 1.0),
         1.0
     );
     fragmentCoverage = coverage;

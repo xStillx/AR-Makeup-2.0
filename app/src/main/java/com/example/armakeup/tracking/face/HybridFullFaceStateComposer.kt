@@ -263,6 +263,7 @@ class HybridFullFaceStateComposer(
             cameraFrame = cameraFrame,
             canonicalLandmarks = canonical,
             displayLandmarks = display,
+            surfaceTopology = globalObservation.surfaceTopology,
             lipAnchor = lipAnchor,
             features = featureStates,
             regions = regions,

@@ -20,6 +20,7 @@ data class FaceApertureTopology(
 
 /** Semantic regions in the 468-point topology shared by ARCore and MediaPipe Face Landmarker. */
 object FaceMesh468RegionTopology {
+    const val POINT_COUNT = 468
     val leftEyeContour = intArrayOf(
         362, 382, 381, 380, 374, 373, 390, 249,
         263, 466, 388, 387, 386, 385, 384, 398,

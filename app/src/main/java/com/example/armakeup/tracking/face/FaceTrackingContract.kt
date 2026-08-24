@@ -95,6 +95,55 @@ class FaceLandmarkSet private constructor(
     }
 }
 
+/** Immutable triangle indices for one landmark topology. */
+class FaceSurfaceTopology private constructor(
+    val topology: FaceTopologyDescriptor,
+    private val packedTriangleIndices: ShortArray,
+) {
+    val indexCount: Int
+        get() = packedTriangleIndices.size
+
+    val triangleCount: Int
+        get() = indexCount / INDICES_PER_TRIANGLE
+
+    init {
+        require(packedTriangleIndices.isNotEmpty())
+        require(packedTriangleIndices.size % INDICES_PER_TRIANGLE == 0)
+        require(packedTriangleIndices.all { index -> index.toInt() in 0 until topology.pointCount })
+    }
+
+    operator fun get(index: Int): Int {
+        require(index in packedTriangleIndices.indices)
+        return packedTriangleIndices[index].toInt()
+    }
+
+    fun packedCopy(): ShortArray = packedTriangleIndices.copyOf()
+
+    override fun equals(other: Any?): Boolean = other is FaceSurfaceTopology &&
+        topology == other.topology &&
+        packedTriangleIndices.contentEquals(other.packedTriangleIndices)
+
+    override fun hashCode(): Int = 31 * topology.hashCode() +
+        packedTriangleIndices.contentHashCode()
+
+    companion object {
+        const val INDICES_PER_TRIANGLE = 3
+
+        fun of(
+            topology: FaceTopologyDescriptor,
+            packedTriangleIndices: ShortArray,
+        ): FaceSurfaceTopology = FaceSurfaceTopology(
+            topology = topology,
+            packedTriangleIndices = packedTriangleIndices.copyOf(),
+        )
+
+        internal fun takeOwnership(
+            topology: FaceTopologyDescriptor,
+            packedTriangleIndices: ShortArray,
+        ): FaceSurfaceTopology = FaceSurfaceTopology(topology, packedTriangleIndices)
+    }
+}
+
 /** Immutable column-major 4x4 matrix. */
 class FaceMatrix4 private constructor(private val values: FloatArray) {
     init {
@@ -212,6 +261,7 @@ data class FaceObservation(
     val canonicalLandmarks: FaceLandmarkSet? = null,
     val imageLandmarks: FaceLandmarkSet? = null,
     val displayLandmarks: FaceLandmarkSet? = null,
+    val surfaceTopology: FaceSurfaceTopology? = null,
     val pose: FacePose? = null,
     val cameraFrame: FaceCameraFrameMetadata? = null,
     val quality: FaceObservationQuality,
@@ -225,6 +275,7 @@ data class FaceObservation(
         listOfNotNull(canonicalLandmarks, imageLandmarks, displayLandmarks).forEach { landmarks ->
             require(landmarks.topology == topology)
         }
+        surfaceTopology?.let { require(it.topology == topology) }
         cameraFrame?.let { require(it.sensorTimestampNs == sensorTimestampNs) }
     }
 }
@@ -363,6 +414,7 @@ class FullFaceRenderState(
     val cameraFrame: FaceCameraFrameMetadata,
     val canonicalLandmarks: FaceLandmarkSet,
     val displayLandmarks: FaceLandmarkSet,
+    val surfaceTopology: FaceSurfaceTopology?,
     val lipAnchor: NormalizedFacePoint?,
     val features: FullFaceFeatureStates,
     regions: Map<FaceRegion, FaceRegionGeometry>,
@@ -376,6 +428,7 @@ class FullFaceRenderState(
         require(cameraSensorTimestampNs == cameraFrame.sensorTimestampNs)
         require(canonicalLandmarks.topology == globalTopology)
         require(displayLandmarks.topology == globalTopology)
+        surfaceTopology?.let { require(it.topology == globalTopology) }
         require(canonicalLandmarks.coordinateSpace == FaceCoordinateSpace.FACE_LOCAL_METERS)
         require(displayLandmarks.coordinateSpace == FaceCoordinateSpace.NORMALIZED_DISPLAY_TOP_LEFT)
     }
