@@ -84,6 +84,21 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
                         EXTRA_ENABLE_VULKAN_FACE_DEPTH,
                         intent.getBooleanExtra(EXTRA_ENABLE_VULKAN_FACE_DEPTH, false),
                     )
+                    putExtra(
+                        EXTRA_VULKAN_LIP_DEPTH_BIAS,
+                        intent.getFloatExtra(
+                            EXTRA_VULKAN_LIP_DEPTH_BIAS,
+                            DEFAULT_VULKAN_LIP_DEPTH_BIAS,
+                        ),
+                    )
+                    putExtra(
+                        EXTRA_VISUALIZE_VULKAN_FACE_DEPTH,
+                        intent.getBooleanExtra(EXTRA_VISUALIZE_VULKAN_FACE_DEPTH, false),
+                    )
+                    putExtra(
+                        EXTRA_VISUALIZE_VULKAN_LIP_DEPTH,
+                        intent.getBooleanExtra(EXTRA_VISUALIZE_VULKAN_LIP_DEPTH, false),
+                    )
                 },
             )
             finish()
@@ -553,6 +568,13 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
             "com.example.armakeup.extra.ENABLE_ARCORE_FACE_ANCHOR_PROOF"
         const val EXTRA_ENABLE_VULKAN_FACE_DEPTH =
             "com.example.armakeup.extra.ENABLE_VULKAN_FACE_DEPTH"
+        const val EXTRA_VULKAN_LIP_DEPTH_BIAS =
+            "com.example.armakeup.extra.VULKAN_LIP_DEPTH_BIAS"
+        const val EXTRA_VISUALIZE_VULKAN_FACE_DEPTH =
+            "com.example.armakeup.extra.VISUALIZE_VULKAN_FACE_DEPTH"
+        const val EXTRA_VISUALIZE_VULKAN_LIP_DEPTH =
+            "com.example.armakeup.extra.VISUALIZE_VULKAN_LIP_DEPTH"
+        const val DEFAULT_VULKAN_LIP_DEPTH_BIAS = -0.0005f
         private const val MIN_CAMERA_FPS = 30
         private const val MAX_CAMERA_FPS = 60
         private const val PERFORMANCE_LOG_TAG = "ARMakeupPerf"

@@ -28,13 +28,21 @@ internal class FaceSurfaceDepthSampler(
         displayLandmarks: FaceLandmarkSet,
         x: Float,
         y: Float,
-    ): Float? {
+    ): Float? = sampleAt(displayLandmarks, x, y)?.ndcDepth
+
+    fun sampleAt(
+        displayLandmarks: FaceLandmarkSet,
+        x: Float,
+        y: Float,
+    ): FaceSurfaceDepthSample? {
         require(displayLandmarks.topology == topology.topology)
         require(displayLandmarks.coordinateSpace ==
             FaceCoordinateSpace.NORMALIZED_DISPLAY_TOP_LEFT)
         if (!x.isFinite() || !y.isFinite()) return null
 
         var nearestDepth: Float? = null
+        var farthestDepth: Float? = null
+        var triangleHitCount = 0
         candidateTriangleOffsets.forEach { offset ->
             val first = topology[offset]
             val second = topology[offset + 1]
@@ -47,11 +55,30 @@ internal class FaceSurfaceDepthSampler(
                 x = x,
                 y = y,
             ) ?: return@forEach
+            triangleHitCount++
             if (nearestDepth == null || depth < checkNotNull(nearestDepth)) {
                 nearestDepth = depth
             }
+            if (farthestDepth == null || depth > checkNotNull(farthestDepth)) {
+                farthestDepth = depth
+            }
         }
-        return nearestDepth ?: nearestLandmarkDepth(displayLandmarks, x, y)
+        if (nearestDepth != null) {
+            return FaceSurfaceDepthSample(
+                ndcDepth = checkNotNull(nearestDepth),
+                triangleHitCount = triangleHitCount,
+                overlappingDepthSpread = checkNotNull(farthestDepth) - checkNotNull(nearestDepth),
+                usedNearestLandmarkFallback = false,
+            )
+        }
+        return nearestLandmarkDepth(displayLandmarks, x, y)?.let { depth ->
+            FaceSurfaceDepthSample(
+                ndcDepth = depth,
+                triangleHitCount = 0,
+                overlappingDepthSpread = 0f,
+                usedNearestLandmarkFallback = true,
+            )
+        }
     }
 
     private fun buildCandidateTriangleOffsets(): IntArray {
@@ -132,5 +159,19 @@ internal class FaceSurfaceDepthSampler(
     private companion object {
         const val MINIMUM_TRIANGLE_AREA = 1e-9f
         const val BARYCENTRIC_EDGE_TOLERANCE = 0.015f
+    }
+}
+
+internal data class FaceSurfaceDepthSample(
+    val ndcDepth: Float,
+    val triangleHitCount: Int,
+    val overlappingDepthSpread: Float,
+    val usedNearestLandmarkFallback: Boolean,
+) {
+    init {
+        require(ndcDepth.isFinite())
+        require(triangleHitCount >= 0)
+        require(overlappingDepthSpread.isFinite() && overlappingDepthSpread >= 0f)
+        require(usedNearestLandmarkFallback == (triangleHitCount == 0))
     }
 }

@@ -77,10 +77,11 @@ static_assert(sizeof(TemporalPushConstants) == 96U);
 
 struct alignas(16) TrackingLipPushConstants final {
     std::array<float, 4> displayToScreen{};
+    std::array<float, 4> depthParameters{};
     std::array<std::int32_t, 4> flags{};
 };
 
-static_assert(sizeof(TrackingLipPushConstants) == 32U);
+static_assert(sizeof(TrackingLipPushConstants) == 48U);
 
 struct MediaDispatch final {
     using NewWithUsage = media_status_t (*)(
@@ -678,6 +679,10 @@ public:
         jshortArray indices,
         jfloatArray displayToScreen,
         bool temporalFlowEnabled,
+        float lipDepthBias,
+        float sampledDepthMinimum,
+        float sampledDepthMaximum,
+        bool visualizeSampledDepth,
         bool visible
     ) {
         if (!ready_.load()) {
@@ -691,6 +696,9 @@ public:
             return true;
         }
         if (vertices == nullptr || indices == nullptr || displayToScreen == nullptr ||
+            !std::isfinite(lipDepthBias) || !std::isfinite(sampledDepthMinimum) ||
+            !std::isfinite(sampledDepthMaximum) ||
+            sampledDepthMaximum < sampledDepthMinimum ||
             environment->GetArrayLength(displayToScreen) < 4) {
             return false;
         }
@@ -745,6 +753,10 @@ public:
         trackingTestLipIndices_ = std::move(unsignedIndices);
         trackingTestLipDisplayToScreen_ = copiedDisplayToScreen;
         trackingTestLipTemporalFlowEnabled_ = temporalFlowEnabled;
+        trackingTestLipDepthBias_ = lipDepthBias;
+        trackingTestLipSampledDepthMinimum_ = sampledDepthMinimum;
+        trackingTestLipSampledDepthMaximum_ = sampledDepthMaximum;
+        trackingTestLipSampledDepthVisualizationEnabled_ = visualizeSampledDepth;
         trackingTestLipVisible_ = true;
         return true;
     }
@@ -753,6 +765,7 @@ public:
         JNIEnv* environment,
         jfloatArray vertices,
         jshortArray indices,
+        bool visualizeDepth,
         bool visible
     ) {
         if (!ready_.load()) {
@@ -761,6 +774,7 @@ public:
         if (!visible) {
             std::lock_guard lock(faceMutex_);
             faceOccluderVisible_ = false;
+            faceDepthVisualizationEnabled_.store(false);
             faceOccluderVertices_.clear();
             faceOccluderIndices_.clear();
             return true;
@@ -802,6 +816,7 @@ public:
         std::lock_guard lock(faceMutex_);
         faceOccluderVertices_ = std::move(copiedVertices);
         faceOccluderIndices_ = std::move(unsignedIndices);
+        faceDepthVisualizationEnabled_.store(visualizeDepth);
         faceOccluderVisible_ = true;
         faceOccluderUpdates_.fetch_add(1);
         return true;
@@ -2552,10 +2567,45 @@ private:
             nullptr,
             &faceOccluderPipeline_
         );
+        if (result == VK_SUCCESS) {
+            const VkPipelineColorBlendAttachmentState visualizationBlendAttachment{
+                .blendEnable = VK_TRUE,
+                .srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
+                .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+                .colorBlendOp = VK_BLEND_OP_ADD,
+                .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+                .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+                .alphaBlendOp = VK_BLEND_OP_ADD,
+                .colorWriteMask = VK_COLOR_COMPONENT_R_BIT |
+                    VK_COLOR_COMPONENT_G_BIT |
+                    VK_COLOR_COMPONENT_B_BIT |
+                    VK_COLOR_COMPONENT_A_BIT,
+            };
+            const VkPipelineColorBlendStateCreateInfo visualizationBlend{
+                .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+                .pNext = nullptr,
+                .flags = 0,
+                .logicOpEnable = VK_FALSE,
+                .logicOp = VK_LOGIC_OP_COPY,
+                .attachmentCount = 1,
+                .pAttachments = &visualizationBlendAttachment,
+                .blendConstants = {0.0F, 0.0F, 0.0F, 0.0F},
+            };
+            VkGraphicsPipelineCreateInfo visualizationPipelineInfo = pipelineInfo;
+            visualizationPipelineInfo.pColorBlendState = &visualizationBlend;
+            result = createGraphicsPipelines_(
+                device_,
+                VK_NULL_HANDLE,
+                1,
+                &visualizationPipelineInfo,
+                nullptr,
+                &faceDepthVisualizationPipeline_
+            );
+        }
         destroyShaderModule_(device_, fragmentModule, nullptr);
         destroyShaderModule_(device_, vertexModule, nullptr);
         if (result != VK_SUCCESS) {
-            setVulkanError("create_face_occluder_pipeline", result);
+            setVulkanError("create_face_occluder_pipelines", result);
             return false;
         }
         return true;
@@ -3221,7 +3271,13 @@ private:
             return;
         }
         const VkDeviceSize vertexOffset = 0;
-        cmdBindPipeline_(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, faceOccluderPipeline_);
+        cmdBindPipeline_(
+            commandBuffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            faceDepthVisualizationEnabled_.load()
+                ? faceDepthVisualizationPipeline_
+                : faceOccluderPipeline_
+        );
         cmdBindVertexBuffers_(
             commandBuffer,
             0,
@@ -3254,9 +3310,13 @@ private:
         );
         TrackingLipPushConstants pushConstants{};
         pushConstants.displayToScreen = trackingTestLipDisplayToScreen_;
+        pushConstants.depthParameters[0] = trackingTestLipDepthBias_;
+        pushConstants.depthParameters[1] = trackingTestLipSampledDepthMinimum_;
+        pushConstants.depthParameters[2] = trackingTestLipSampledDepthMaximum_;
         pushConstants.flags[0] = trackingTestLipTemporalFlowEnabled_ && temporalFlowAvailable
             ? 1
             : 0;
+        pushConstants.flags[1] = trackingTestLipSampledDepthVisualizationEnabled_ ? 1 : 0;
         cmdPushConstants_(
             commandBuffer,
             trackingTestLipPipelineLayout_,
@@ -5985,6 +6045,11 @@ private:
                 destroyPipeline_(device_, faceOccluderPipeline_, nullptr);
                 faceOccluderPipeline_ = VK_NULL_HANDLE;
             }
+            if (faceDepthVisualizationPipeline_ != VK_NULL_HANDLE &&
+                destroyPipeline_ != nullptr) {
+                destroyPipeline_(device_, faceDepthVisualizationPipeline_, nullptr);
+                faceDepthVisualizationPipeline_ = VK_NULL_HANDLE;
+            }
             if (faceOccluderPipelineLayout_ != VK_NULL_HANDLE &&
                 destroyPipelineLayout_ != nullptr) {
                 destroyPipelineLayout_(device_, faceOccluderPipelineLayout_, nullptr);
@@ -6310,6 +6375,7 @@ private:
     VkPipeline trackingTestLipPipeline_ = VK_NULL_HANDLE;
     VkPipelineLayout faceOccluderPipelineLayout_ = VK_NULL_HANDLE;
     VkPipeline faceOccluderPipeline_ = VK_NULL_HANDLE;
+    VkPipeline faceDepthVisualizationPipeline_ = VK_NULL_HANDLE;
     std::array<VkBuffer, kFramesInFlight> faceOccluderVertexBuffers_{};
     std::array<VkDeviceMemory, kFramesInFlight> faceOccluderVertexMemories_{};
     std::array<void*, kFramesInFlight> faceOccluderVertexMapped_{};
@@ -6319,6 +6385,7 @@ private:
     std::vector<float> faceOccluderVertices_;
     std::vector<std::uint16_t> faceOccluderIndices_;
     bool faceOccluderVisible_ = false;
+    std::atomic<bool> faceDepthVisualizationEnabled_{false};
     VkDescriptorSetLayout trackingTestLipDescriptorSetLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool trackingTestLipDescriptorPool_ = VK_NULL_HANDLE;
     VkDescriptorSet trackingTestLipDescriptorSet_ = VK_NULL_HANDLE;
@@ -6335,6 +6402,10 @@ private:
     std::vector<std::uint16_t> trackingTestLipIndices_;
     std::array<float, 4> trackingTestLipDisplayToScreen_{1.0F, 1.0F, 0.0F, 0.0F};
     bool trackingTestLipTemporalFlowEnabled_ = false;
+    float trackingTestLipDepthBias_ = -0.0005F;
+    float trackingTestLipSampledDepthMinimum_ = 0.0F;
+    float trackingTestLipSampledDepthMaximum_ = 0.0F;
+    bool trackingTestLipSampledDepthVisualizationEnabled_ = false;
     bool trackingTestLipVisible_ = false;
     bool retainedTemporalFlowAvailable_ = false;
     bool displayTimingSupported_ = false;
@@ -6698,6 +6769,10 @@ Java_com_example_armakeup_render_NativeVulkanDiagnosticRuntime_nativeUpdateTrack
     jshortArray indices,
     jfloatArray displayToScreen,
     jboolean temporalFlowEnabled,
+    jfloat lipDepthBias,
+    jfloat sampledDepthMinimum,
+    jfloat sampledDepthMaximum,
+    jboolean visualizeSampledDepth,
     jboolean visible
 ) {
     VulkanDiagnosticRuntime* runtime = fromHandle(handle);
@@ -6707,6 +6782,10 @@ Java_com_example_armakeup_render_NativeVulkanDiagnosticRuntime_nativeUpdateTrack
         indices,
         displayToScreen,
         temporalFlowEnabled == JNI_TRUE,
+        lipDepthBias,
+        sampledDepthMinimum,
+        sampledDepthMaximum,
+        visualizeSampledDepth == JNI_TRUE,
         visible == JNI_TRUE
     ) ? JNI_TRUE : JNI_FALSE;
 }
@@ -6718,6 +6797,7 @@ Java_com_example_armakeup_render_NativeVulkanDiagnosticRuntime_nativeUpdateFaceO
     jlong handle,
     jfloatArray vertices,
     jshortArray indices,
+    jboolean visualizeDepth,
     jboolean visible
 ) {
     VulkanDiagnosticRuntime* runtime = fromHandle(handle);
@@ -6725,6 +6805,7 @@ Java_com_example_armakeup_render_NativeVulkanDiagnosticRuntime_nativeUpdateFaceO
         environment,
         vertices,
         indices,
+        visualizeDepth == JNI_TRUE,
         visible == JNI_TRUE
     ) ? JNI_TRUE : JNI_FALSE;
 }

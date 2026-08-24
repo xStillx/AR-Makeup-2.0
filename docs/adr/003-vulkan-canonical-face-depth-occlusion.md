@@ -81,6 +81,28 @@ implementation as a product cutover. The lip shape is still a 2D local affine de
 sampled surface depth; the next iteration must isolate XY attachment, depth interpolation/bias and
 visibility/loss gating, and evaluate true camera-space 3D local lip attachment.
 
+### Follow-up evidence
+
+A controlled A/B on the same SM-G990B separated all three failure classes. Forward drift remained
+visible with face depth disabled at yaw around 45–52 degrees, so it is an XY/affine attachment
+problem rather than a depth-bias effect. The old 3D path alone produced skin holes. Its face pass
+and lip pass interpolate depth over different triangulations; matching sampled depth only at lip
+vertices does not make fragment depth coplanar. At strong yaw, overlapping projected triangle
+depth spread reached roughly 0.024–0.032. A larger diagnostic bias nearly hid the holes but is not
+accepted as a correction.
+
+An unsaved shared-surface proof rendered lipstick with a 109–112 triangle subset of the original
+ARCore face topology and applied the composed MediaPipe outer/inner loop displacement to the same
+projected vertices used by both passes. With zero bias it reported no fallback/overlap sampling,
+removed the depth holes and ran at about 51–61 FPS. Its whole-triangle coverage is visibly coarse,
+so this is causal evidence, not visual acceptance. The next implementation should retain the
+shared surface but replace triangle selection with canonical UV or analytic coverage and propagate
+local deformation through the complete camera-space lip region.
+
+Downward pitch around +28–30 degrees also produced genuine ARCore global-state loss bursts; total
+loss increased from 2 to 38 during the short test. This confirms that pitch flicker needs measured
+loss-episode/reacquisition handling rather than blind changes to the existing 100 ms hold.
+
 ## Validation gates
 
 1. JVM tests cover topology ownership, validation and projected surface-depth interpolation.

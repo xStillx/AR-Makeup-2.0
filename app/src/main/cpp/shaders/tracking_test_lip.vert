@@ -14,10 +14,14 @@ layout(push_constant) uniform TrackingLipState {
     // screenY = scaleY * displayY + offsetY. The positive-height Vulkan viewport used by this
     // renderer maps UV y=0 to the top of the framebuffer.
     vec4 displayToScreen;
+    // x = clip-space lip depth bias, y/z = sampled NDC depth range.
+    vec4 depthParameters;
     ivec4 flags;
 } state;
 
 layout(location = 0) out float fragmentCoverage;
+layout(location = 1) out float sampledDepthDebug;
+layout(location = 2) flat out int sampledDepthDebugEnabled;
 
 void main() {
     vec2 displayPosition = predictorDisplayPosition;
@@ -52,8 +56,13 @@ void main() {
     gl_Position = vec4(
         displayPosition.x * 2.0 - 1.0,
         displayPosition.y * 2.0 - 1.0,
-        clamp(faceNdcDepth * 0.5 + 0.5 - 0.0005, 0.0, 1.0),
+        clamp(faceNdcDepth * 0.5 + 0.5 + state.depthParameters.x, 0.0, 1.0),
         1.0
     );
     fragmentCoverage = coverage;
+    float depthRange = state.depthParameters.z - state.depthParameters.y;
+    sampledDepthDebug = depthRange > 1e-7
+        ? clamp((faceNdcDepth - state.depthParameters.y) / depthRange, 0.0, 1.0)
+        : 0.5;
+    sampledDepthDebugEnabled = state.flags.y;
 }

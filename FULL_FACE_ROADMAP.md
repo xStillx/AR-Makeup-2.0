@@ -238,7 +238,8 @@ Parsing выполняется ориентировочно 15–30 раз/с п
 ## Следующее действие
 
 1. Использовать `80aaf7e`/`92fc514` как принятый 2D Vulkan baseline, а `18cf1e0` — только как отклонённый 3D candidate для сравнения.
-2. На новом устройстве повторить одинаковые yaw/pitch/open-mouth/lifecycle сценарии с `ENABLE_VULKAN_FACE_DEPTH=false/true`; записать camera timestamp, yaw/pitch, local weight, residual, age, tracking loss и кадры появления skin holes.
-3. Разделить причины: временно визуализировать sampled lip depth и face depth; проверить dynamic/camera-space 3D lip attachment вместо screen-space affine + depth sampling; сделать depth bias/compare и visibility gates управляемыми debug-параметрами.
-4. Исправить forward drift, coplanar depth artifacts и pitch-down flicker, затем повторить полный visual gate. До acceptance не переключать default и не переходить к FF6/material tuning.
-5. После 3D acceptance выполнить actual-present/camera telemetry и 10–15-минутный thermal soak, затем добавить reusable replay, ARCore/Vulkan fallback и matte/satin/gloss + color/HDR contract. IMU/optical flow добавлять только при измеримом residual.
+2. Использовать завершённый A/B verdict: forward drift уже локализован в XY/affine attachment; skin holes — в несовпадающих face/lip depth triangulations; pitch-down flicker — в реальных ARCore global-loss bursts около `+30°` и текущем hide/hold policy.
+3. Заменить грубый shared-face-triangle proof на canonical UV/analytic lip coverage поверх той же ARCore face surface. Переносить MediaPipe local deformation в camera/face space для всей lip region, сохраняя общий depth raster и `bias=0`; не возвращаться к отдельному screen-space lip mesh с sampled Z.
+4. Добавить per-loss-episode frames/duration и visual reacquisition telemetry, затем определить hold/fade policy по измеренным burst distributions, а не подбором порога.
+5. Повторить front/open-mouth/yaw `±45–55°`/pitch-down A/B и получить пользовательский visual acceptance без holes, forward drift, coverage gaps и flicker. До acceptance не переключать default и не переходить к FF6/material tuning.
+6. После 3D acceptance выполнить actual-present/camera telemetry и 10–15-минутный thermal soak, затем добавить reusable replay, ARCore/Vulkan fallback и matte/satin/gloss + color/HDR contract. IMU/optical flow добавлять только при измеримом residual.

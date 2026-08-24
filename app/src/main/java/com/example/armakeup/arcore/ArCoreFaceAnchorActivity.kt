@@ -40,6 +40,9 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
     private var vulkanRenderer: ArCoreVulkanFaceRenderer? = null
     private var useVulkan = false
     private var faceDepthEnabled = false
+    private var lipDepthBias = MainActivity.DEFAULT_VULKAN_LIP_DEPTH_BIAS
+    private var visualizeFaceDepth = false
+    private var visualizeLipDepth = false
 
     private var session: Session? = null
     private var mediaPipeTracker: ArCoreMediaPipeLipTracker? = null
@@ -67,11 +70,27 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
         useVulkan = vulkanRequested && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
         faceDepthEnabled = useVulkan &&
             intent.getBooleanExtra(MainActivity.EXTRA_ENABLE_VULKAN_FACE_DEPTH, false)
+        lipDepthBias = intent.getFloatExtra(
+            MainActivity.EXTRA_VULKAN_LIP_DEPTH_BIAS,
+            MainActivity.DEFAULT_VULKAN_LIP_DEPTH_BIAS,
+        ).takeIf { it.isFinite() && it in MINIMUM_DEBUG_DEPTH_BIAS..MAXIMUM_DEBUG_DEPTH_BIAS }
+            ?: MainActivity.DEFAULT_VULKAN_LIP_DEPTH_BIAS
+        visualizeFaceDepth = faceDepthEnabled && intent.getBooleanExtra(
+            MainActivity.EXTRA_VISUALIZE_VULKAN_FACE_DEPTH,
+            false,
+        )
+        visualizeLipDepth = faceDepthEnabled && intent.getBooleanExtra(
+            MainActivity.EXTRA_VISUALIZE_VULKAN_LIP_DEPTH,
+            false,
+        )
         surfaceView = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && useVulkan) {
             SurfaceView(this).also { view ->
                 vulkanRenderer = ArCoreVulkanFaceRenderer(
                     surfaceView = view,
                     faceDepthEnabled = faceDepthEnabled,
+                    lipDepthBias = lipDepthBias,
+                    visualizeFaceDepth = visualizeFaceDepth,
+                    visualizeLipDepth = visualizeLipDepth,
                     displayRotation = { currentDisplayRotation() },
                     imageRotationDegrees = { mediaPipeImageRotationDegrees },
                     onStatus = { status -> runOnUiThread { statusView.text = status } },
@@ -254,6 +273,8 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
     }
 
     private companion object {
+        const val MINIMUM_DEBUG_DEPTH_BIAS = -0.05f
+        const val MAXIMUM_DEBUG_DEPTH_BIAS = 0.05f
         const val TAG = "ARMakeupArCore"
     }
 }

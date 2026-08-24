@@ -1,6 +1,7 @@
 #version 450
 
 layout(location = 0) in vec3 projectedFacePosition;
+layout(location = 0) out float fragmentFaceDepth;
 
 void main() {
     // Kotlin supplies normalized display x/y (top-left origin) and OpenGL-style NDC depth.
@@ -11,4 +12,5 @@ void main() {
         clamp(projectedFacePosition.z * 0.5 + 0.5, 0.0, 1.0),
         1.0
     );
+    fragmentFaceDepth = projectedFacePosition.z * 0.5 + 0.5;
 }

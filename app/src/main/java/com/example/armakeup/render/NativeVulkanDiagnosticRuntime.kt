@@ -242,8 +242,15 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
         indices: ShortArray,
         displayToScreen: FloatArray = IDENTITY_DISPLAY_TO_SCREEN,
         temporalFlowEnabled: Boolean = false,
+        lipDepthBias: Float = DEFAULT_TRACKING_LIP_DEPTH_BIAS,
+        sampledDepthMinimum: Float = 0f,
+        sampledDepthMaximum: Float = sampledDepthMinimum,
+        visualizeSampledDepth: Boolean = false,
         visible: Boolean,
     ): Boolean {
+        require(lipDepthBias.isFinite())
+        require(sampledDepthMinimum.isFinite())
+        require(sampledDepthMaximum.isFinite() && sampledDepthMaximum >= sampledDepthMinimum)
         val handle = nativeHandle
         if (handle == 0L) return false
         return nativeUpdateTrackingTestLip(
@@ -252,6 +259,10 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
             indices,
             displayToScreen,
             temporalFlowEnabled,
+            lipDepthBias,
+            sampledDepthMinimum,
+            sampledDepthMaximum,
+            visualizeSampledDepth,
             visible,
         )
     }
@@ -259,11 +270,12 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
     fun updateFaceOccluder(
         vertices: FloatArray,
         indices: ShortArray,
+        visualizeDepth: Boolean = false,
         visible: Boolean,
     ): Boolean {
         val handle = nativeHandle
         if (handle == 0L) return false
-        return nativeUpdateFaceOccluder(handle, vertices, indices, visible)
+        return nativeUpdateFaceOccluder(handle, vertices, indices, visualizeDepth, visible)
     }
 
     fun latestPresentationSample(): NativeVulkanPresentationSample? {
@@ -430,12 +442,17 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
         indices: ShortArray,
         displayToScreen: FloatArray,
         temporalFlowEnabled: Boolean,
+        lipDepthBias: Float,
+        sampledDepthMinimum: Float,
+        sampledDepthMaximum: Float,
+        visualizeSampledDepth: Boolean,
         visible: Boolean,
     ): Boolean
     private external fun nativeUpdateFaceOccluder(
         handle: Long,
         vertices: FloatArray,
         indices: ShortArray,
+        visualizeDepth: Boolean,
         visible: Boolean,
     ): Boolean
     private external fun nativeReadLatestPresentationTiming(
@@ -488,6 +505,7 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
         private const val PRESENTATION_MARGIN_INDEX = 5
         private const val PRESENTATION_REFRESH_DURATION_INDEX = 6
         private const val PRESENTATION_FAILED = -1L
+        private const val DEFAULT_TRACKING_LIP_DEPTH_BIAS = -0.0005f
         private val IDENTITY_DISPLAY_TO_SCREEN = floatArrayOf(1f, 1f, 0f, 0f)
 
         init {
