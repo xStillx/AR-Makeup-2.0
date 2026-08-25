@@ -10,6 +10,7 @@ import com.example.armakeup.makeup.LipMeshTessellator
 import com.example.armakeup.makeup.ReferenceMatteLipstickProfile
 import com.example.armakeup.render.NativeVulkanBootstrap
 import com.example.armakeup.render.NativeVulkanDiagnosticRuntime
+import com.example.armakeup.render.VulkanTemporalTrackingRoi
 import com.example.armakeup.tracking.CanonicalFaceTransform
 import com.example.armakeup.tracking.TrackingGeometryExtractor
 import com.example.armakeup.tracking.face.DynamicLipContourCoverage
@@ -23,6 +24,7 @@ import com.example.armakeup.tracking.face.FaceSurfaceCameraLipDeformer
 import com.example.armakeup.tracking.face.FaceSurfaceTopology
 import com.example.armakeup.tracking.face.FaceSurfaceTextureCoordinates
 import com.example.armakeup.tracking.face.FullFaceRenderState
+import com.example.armakeup.tracking.face.MouthLocalGeometryPolicy
 import com.example.armakeup.tracking.face.HybridFullFaceStateComposer
 import com.example.armakeup.tracking.face.TrackingLossEpisodeTracker
 import com.example.armakeup.tracking.face.TrackingVisibilityController
@@ -68,6 +70,11 @@ internal class ArCoreVulkanFaceRenderer(
     private val nativeProbe = NativeVulkanBootstrap.probe()
     private val lipTessellator = LipMeshTessellator()
     private val nativeLipVertices = FloatArray(lipTessellator.vertexCount * NATIVE_VERTEX_COMPONENTS)
+    private val previousLipVertexPositions =
+        FloatArray(lipTessellator.vertexCount * POSITION_COMPONENTS)
+    private var previousLipGeometryTimestampNs = 0L
+    private var previousLipFlowRoi = VulkanTemporalTrackingRoi.INVALID
+    private var previousLipFlowRoiTimestampNs = 0L
     private var faceLipTopology: FaceSurfaceTopology? = null
     private var faceLipIndices = EMPTY_SHORTS
     private var faceLipTextureCoordinates: FaceSurfaceTextureCoordinates? = null
@@ -81,6 +88,7 @@ internal class ArCoreVulkanFaceRenderer(
     private val transformedCameraCorners = directFloatBuffer(CAMERA_CORNER_COMPONENTS)
     private val transformedCameraCornerValues = FloatArray(CAMERA_CORNER_COMPONENTS)
     private val cameraUvTransform = FloatArray(UV_TRANSFORM_COMPONENTS)
+
     private val arCoreObservationAdapter = ArCoreFaceObservationAdapter()
     private val stateComposer = HybridFullFaceStateComposer(
         stableAnchorIndices = TrackingGeometryExtractor.stableAnchorIndices,
@@ -96,6 +104,13 @@ internal class ArCoreVulkanFaceRenderer(
         maximumLocalObservationAgeNs = MAXIMUM_LOCAL_OBSERVATION_AGE_NS,
         localObservationAgeFadeOutNs = LOCAL_OBSERVATION_AGE_FADE_OUT_NS,
         perspectivePolicy = FaceLocalGeometryPerspectivePolicy.profileSafe(),
+        mouthLocalGeometryPolicy = MouthLocalGeometryPolicy.CALIBRATED_CORNER_RESIDUAL,
+    )
+    private val lipContourFlowPropagator = MediaPipeLipContourFlowPropagator(
+        stableAnchorIndices = TrackingGeometryExtractor.stableAnchorIndices,
+        outerLipIndices = LipLandmarkTopology.outerContour,
+        innerLipIndices = LipLandmarkTopology.innerContour,
+        maximumAnchorResidual = MAXIMUM_GLOBAL_AFFINE_RESIDUAL,
     )
 
     private var runtime: NativeVulkanDiagnosticRuntime? = null
@@ -113,6 +128,10 @@ internal class ArCoreVulkanFaceRenderer(
     private var depthSampler: FaceSurfaceDepthSampler? = null
     private var runtimeRecoveryAttempts = 0
     private var lastRenderState: FullFaceRenderState? = null
+    private var lastPropagatedLip: PropagatedLipGeometry? = null
+    private var lastSemanticLocalTimestampNs = 0L
+    private var lastCompletedFlowFromTimestampNs = 0L
+    private var lastCompletedFlowToTimestampNs = 0L
     private var statusWindowStartNs = 0L
     private var statusWindowFrames = 0
     private val trackingLossEpisodes = TrackingLossEpisodeTracker()
@@ -222,13 +241,14 @@ internal class ArCoreVulkanFaceRenderer(
                     TrackingVisibilityDecision.HIDDEN
                 }
             }
-            val retainedTimestampNs = if (
+            val cameraImport = if (
                 android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O_MR1
             ) {
-                importCameraFrame(activeRuntime, frame, timestampNs)
+                importCameraFrame(activeRuntime, frame, timestampNs, renderState)
             } else {
-                lastAcceptedCameraTimestampNs
+                CameraImportResult(lastAcceptedCameraTimestampNs, null)
             }
+            val retainedTimestampNs = cameraImport.acceptedSensorTimestampNs
             if (retainedTimestampNs == timestampNs) {
                 uploadFaceSurface(
                     activeRuntime,
@@ -241,7 +261,9 @@ internal class ArCoreVulkanFaceRenderer(
                     renderState,
                     timestampNs,
                     lastTrackingVisibilityDecision,
+                    cameraImport.propagatedLip,
                 )
+                lastPropagatedLip = cameraImport.propagatedLip
                 lastRenderState = renderState
                 lastAcceptedCameraTimestampNs = timestampNs
             }
@@ -281,11 +303,14 @@ internal class ArCoreVulkanFaceRenderer(
             face = face,
         ) != null
         if (!globalObservationAvailable) return null
-        return stateComposer.compose(
-            globalBackend = arCoreObservationAdapter,
-            localBackend = mediaPipeTracker,
+        val globalObservation = arCoreObservationAdapter.latestObservation() ?: return null
+        val state = stateComposer.compose(
+            globalObservation = globalObservation,
+            localObservation = null,
             renderTimestampNs = timestampNs,
         )
+        if (state != null) lipContourFlowPropagator.recordGlobal(globalObservation)
+        return state
     }
 
     @RequiresApi(android.os.Build.VERSION_CODES.O_MR1)
@@ -293,21 +318,57 @@ internal class ArCoreVulkanFaceRenderer(
         activeRuntime: NativeVulkanDiagnosticRuntime,
         frame: Frame,
         timestampNs: Long,
-    ): Long {
+        renderState: FullFaceRenderState?,
+    ): CameraImportResult {
         updateCameraUvTransform(frame)
         return try {
-            val hardwareBuffer = frame.hardwareBuffer ?: return lastAcceptedCameraTimestampNs
-            hardwareBuffer.use {
+            val currentTrackingRoi = MouthLocalFlowRoiPolicy.from(
+                renderState?.region(FaceRegion.LIPS_OUTER),
+            )
+            val flowIntervalNs = timestampNs - previousLipFlowRoiTimestampNs
+            val sourceTrackingRoi = if (
+                previousLipFlowRoi.isValid &&
+                flowIntervalNs in 1L..MAXIMUM_FLOW_INTERVAL_NS
+            ) {
+                previousLipFlowRoi
+            } else {
+                currentTrackingRoi
+            }
+            val hardwareBuffer = frame.hardwareBuffer
+                ?: return CameraImportResult(lastAcceptedCameraTimestampNs, null)
+            val cameraUpdate = hardwareBuffer.use {
                 activeRuntime.updateExternalVisibleCamera(
                     hardwareBuffer = hardwareBuffer,
                     sensorTimestampNs = timestampNs,
                     uvTransform = cameraUvTransform,
+                    trackingRoi = sourceTrackingRoi,
                 )
             }
+            val acceptedTimestampNs = cameraUpdate.acceptedSensorTimestampNs
+            lipContourFlowPropagator.recordFlow(cameraUpdate.completedMouthFlow)
+            cameraUpdate.completedMouthFlow?.let {
+                lastCompletedFlowFromTimestampNs = it.fromSensorTimestampNs
+                lastCompletedFlowToTimestampNs = it.toSensorTimestampNs
+            }
+            if (acceptedTimestampNs == timestampNs) {
+                previousLipFlowRoi = currentTrackingRoi
+                previousLipFlowRoiTimestampNs = timestampNs
+            }
+            val propagatedLip = if (acceptedTimestampNs == timestampNs) {
+                val localObservation = mediaPipeTracker?.latestObservation()
+                lastSemanticLocalTimestampNs = localObservation?.sensorTimestampNs ?: 0L
+                lipContourFlowPropagator.propagate(
+                    localObservation = localObservation,
+                    currentGlobalObservation = arCoreObservationAdapter.latestObservation(),
+                )
+            } else {
+                null
+            }
+            CameraImportResult(acceptedTimestampNs, propagatedLip)
         } catch (_: NotYetAvailableException) {
-            lastAcceptedCameraTimestampNs
+            CameraImportResult(lastAcceptedCameraTimestampNs, null)
         } catch (_: DeadlineExceededException) {
-            lastAcceptedCameraTimestampNs
+            CameraImportResult(lastAcceptedCameraTimestampNs, null)
         }
     }
 
@@ -333,10 +394,11 @@ internal class ArCoreVulkanFaceRenderer(
         state: FullFaceRenderState?,
         timestampNs: Long,
         visibility: TrackingVisibilityDecision,
+        propagatedLip: PropagatedLipGeometry?,
     ) {
-        val outer = state?.region(FaceRegion.LIPS_OUTER)
-        val inner = state?.region(FaceRegion.LIPS_INNER)
-        if (outer == null || inner == null ||
+        val outer = propagatedLip?.outer ?: state?.region(FaceRegion.LIPS_OUTER)
+        val inner = propagatedLip?.inner ?: state?.region(FaceRegion.LIPS_INNER)
+        if (state == null || outer == null || inner == null ||
             outer.pointCount != LIP_CONTOUR_POINT_COUNT ||
             inner.pointCount != LIP_CONTOUR_POINT_COUNT) {
             if (faceDepthEnabled && visibility.retainLastGeometry &&
@@ -370,6 +432,8 @@ internal class ArCoreVulkanFaceRenderer(
             upperProfile = ReferenceMatteLipstickProfile.upper,
             lowerProfile = ReferenceMatteLipstickProfile.lower,
         )
+        val previousGeometryAvailable = previousLipGeometryTimestampNs > 0L &&
+            timestampNs - previousLipGeometryTimestampNs in 1L..MAXIMUM_FLOW_INTERVAL_NS
         val surfaceDepthSampler = if (faceDepthEnabled) {
             state.surfaceTopology?.let(::depthSamplerFor)
         } else {
@@ -388,8 +452,14 @@ internal class ArCoreVulkanFaceRenderer(
             val y = tessellated[sourceIndex + LipMeshTessellator.Y_COMPONENT_OFFSET]
             nativeLipVertices[destinationIndex] = x
             nativeLipVertices[destinationIndex + 1] = y
-            nativeLipVertices[destinationIndex + 2] = x
-            nativeLipVertices[destinationIndex + 3] = y
+            val previousIndex =
+                destinationIndex / NATIVE_VERTEX_COMPONENTS * POSITION_COMPONENTS
+            nativeLipVertices[destinationIndex + 2] = if (previousGeometryAvailable) {
+                previousLipVertexPositions[previousIndex]
+            } else x
+            nativeLipVertices[destinationIndex + 3] = if (previousGeometryAvailable) {
+                previousLipVertexPositions[previousIndex + 1]
+            } else y
             nativeLipVertices[destinationIndex + 4] =
                 tessellated[sourceIndex + LipMeshTessellator.COVERAGE_COMPONENT_OFFSET]
             val depthSample = surfaceDepthSampler?.sampleAt(
@@ -413,6 +483,8 @@ internal class ArCoreVulkanFaceRenderer(
                     depthSample.overlappingDepthSpread,
                 )
             }
+            previousLipVertexPositions[previousIndex] = x
+            previousLipVertexPositions[previousIndex + 1] = y
             sourceIndex += LipMeshTessellator.VERTEX_COMPONENT_COUNT
             destinationIndex += NATIVE_VERTEX_COMPONENTS
         }
@@ -445,6 +517,7 @@ internal class ArCoreVulkanFaceRenderer(
             ),
         ) { "ARCore Vulkan lip upload failed" }
         lastValidLipTimestampNs = timestampNs
+        previousLipGeometryTimestampNs = timestampNs
     }
 
     private fun uploadFaceAttachedLip(
@@ -684,6 +757,8 @@ internal class ArCoreVulkanFaceRenderer(
                     "same Frame: camera + ARCore pose + hybrid lips\n" +
                     "yaw=%s pitch=%s loss=%d total=%d max=%d/%dms\n" +
                     "visibility=%.2f retain=%s current=%s\n" +
+                    "semanticFlow=%s\n" +
+                    "semanticTs=%d flow=%d>%d\n" +
                     "lipLocal=%.2f age=%s residual=%s\n" +
                     "lipDepth=%s tri=%d fallback=%d overlap=%d spread=%s bias=%.6f\n" +
                     "debugFace=%s debugLip=%s\n%s",
@@ -698,6 +773,10 @@ internal class ArCoreVulkanFaceRenderer(
                 lastTrackingVisibilityDecision.opacity,
                 lastTrackingVisibilityDecision.retainLastGeometry,
                 lastTrackingVisibilityDecision.useCurrentGeometry,
+                lastPropagatedLip != null,
+                lastSemanticLocalTimestampNs,
+                lastCompletedFlowFromTimestampNs,
+                lastCompletedFlowToTimestampNs,
                 lastRenderState?.attachmentQuality?.localDeformationWeight ?: 0f,
                 lastRenderState?.attachmentQuality?.localObservationAgeNs
                     ?.let { "${it / 1_000_000L}ms" } ?: "global",
@@ -811,13 +890,21 @@ internal class ArCoreVulkanFaceRenderer(
         deformedSurfaceTimestampNs = 0L
         deformedSurfaceCoordinates = null
         lastRenderState = null
+        lastPropagatedLip = null
         lastLipDepthSamplingStats = null
+        lastSemanticLocalTimestampNs = 0L
+        lastCompletedFlowFromTimestampNs = 0L
+        lastCompletedFlowToTimestampNs = 0L
         trackingLossEpisodes.reset()
+        previousLipGeometryTimestampNs = 0L
+        previousLipFlowRoi = VulkanTemporalTrackingRoi.INVALID
+        previousLipFlowRoiTimestampNs = 0L
         trackingVisibilityController.reset()
         lastTrackingVisibilityDecision = TrackingVisibilityDecision.HIDDEN
         statusWindowStartNs = 0L
         statusWindowFrames = 0
         arCoreObservationAdapter.clear()
+        lipContourFlowPropagator.reset()
     }
 
     private fun postFrameCallback() {
@@ -850,12 +937,14 @@ internal class ArCoreVulkanFaceRenderer(
         const val STATUS_INTERVAL_NS = 1_000_000_000L
         const val FULL_LOCAL_AFFINE_RESIDUAL = 0.006f
         const val MAXIMUM_GLOBAL_AFFINE_RESIDUAL = 0.016f
-        const val MAXIMUM_LOCAL_OBSERVATION_AGE_NS = 120_000_000L
-        const val LOCAL_OBSERVATION_AGE_FADE_OUT_NS = 100_000_000L
+        const val MAXIMUM_LOCAL_OBSERVATION_AGE_NS = 350_000_000L
+        const val LOCAL_OBSERVATION_AGE_FADE_OUT_NS = 0L
         const val TRACKING_LOSS_HOLD_NS = 100_000_000L
         const val MAXIMUM_RUNTIME_RECOVERY_ATTEMPTS = 1
         const val NATIVE_VERTEX_COMPONENTS = 6
         const val MATRIX_DIMENSION = 4
+        const val MAXIMUM_FLOW_INTERVAL_NS = 80_000_000L
+        const val POSITION_COMPONENTS = 2
         const val MATRIX_ELEMENT_COUNT = MATRIX_DIMENSION * MATRIX_DIMENSION
         const val FACE_VERTEX_COMPONENTS = 3
         const val DEFAULT_LIP_NDC_DEPTH = -1f
@@ -883,6 +972,11 @@ internal class ArCoreVulkanFaceRenderer(
             .apply { position(0) }
     }
 }
+
+private data class CameraImportResult(
+    val acceptedSensorTimestampNs: Long,
+    val propagatedLip: PropagatedLipGeometry?,
+)
 
 internal data class LipDepthSamplingStats(
     val minimumNdcDepth: Float,

@@ -6,7 +6,7 @@ layout(std430, set = 0, binding = 6) readonly buffer FlowVectors {
     vec4 vectors[];
 } inputFlow;
 layout(std430, set = 0, binding = 7) buffer FitResult {
-    vec4 values[2];
+    vec4 values[4];
 } outputFit;
 
 layout(push_constant) uniform TemporalState {
@@ -31,6 +31,72 @@ float baseWeight(vec4 flow) {
     return flow.z * clamp(1.0 - flow.w / 0.14, 0.0, 1.0);
 }
 
+float cornerSpatialWeight(int index, bool rightCorner) {
+    vec2 roiExtent = max(state.roi.zw - state.roi.xy, vec2(1e-5));
+    vec2 normalizedPoint = (pointAt(index) - state.roi.xy) / roiExtent;
+    vec2 center = vec2(rightCorner ? 0.8333 : 0.1667, 0.5);
+    vec2 normalizedDistance = (normalizedPoint - center) / vec2(0.16, 0.24);
+    return exp(-0.5 * dot(normalizedDistance, normalizedDistance));
+}
+
+vec4 fitCornerTranslation(bool rightCorner) {
+    vec2 initial = vec2(0.0);
+    float initialWeight = 0.0;
+    for (int index = 0; index < POINT_COUNT; ++index) {
+        vec4 flow = inputFlow.vectors[index];
+        float weight = baseWeight(flow) * cornerSpatialWeight(index, rightCorner);
+        initial += flow.xy * weight;
+        initialWeight += weight;
+    }
+    if (initialWeight < 1.5) {
+        return vec4(0.0);
+    }
+    initial /= initialWeight;
+
+    vec2 fitted = vec2(0.0);
+    float fittedWeight = 0.0;
+    for (int index = 0; index < POINT_COUNT; ++index) {
+        vec4 flow = inputFlow.vectors[index];
+        float spatialWeight = cornerSpatialWeight(index, rightCorner);
+        float weight = baseWeight(flow) * spatialWeight;
+        float normalizedResidual = length(flow.xy - initial) / 0.006;
+        weight *= 1.0 / (1.0 + normalizedResidual * normalizedResidual);
+        fitted += flow.xy * weight;
+        fittedWeight += weight;
+    }
+    if (fittedWeight < 1.0) {
+        return vec4(0.0);
+    }
+    fitted /= fittedWeight;
+
+    float squaredResidual = 0.0;
+    float confidenceSum = 0.0;
+    float confidenceWeight = 0.0;
+    float effectiveSupport = 0.0;
+    int inliers = 0;
+    for (int index = 0; index < POINT_COUNT; ++index) {
+        vec4 flow = inputFlow.vectors[index];
+        float spatialWeight = cornerSpatialWeight(index, rightCorner);
+        float residual = length(flow.xy - fitted);
+        if (baseWeight(flow) > 0.0 && spatialWeight >= 0.08 && residual <= 0.008) {
+            squaredResidual += residual * residual * spatialWeight;
+            confidenceSum += flow.z * spatialWeight;
+            confidenceWeight += spatialWeight;
+            effectiveSupport += spatialWeight;
+            inliers++;
+        }
+    }
+    float rms = effectiveSupport > 0.0
+        ? sqrt(squaredResidual / effectiveSupport)
+        : 1.0;
+    float confidence = confidenceWeight > 0.0
+        ? (confidenceSum / confidenceWeight) * smoothstep(2.5, 6.0, effectiveSupport)
+        : 0.0;
+    bool valid = inliers >= 4 && effectiveSupport >= 2.5 &&
+        confidence >= 0.42 && rms <= 0.008 &&
+        length(fitted) <= 0.10;
+    return vec4(fitted, confidence, valid ? 1.0 : 0.0);
+}
 vec4 fitSimilarity(vec4 initial, bool robustPass) {
     float weightSum = 0.0;
     vec2 meanSource = vec2(0.0);
@@ -145,5 +211,7 @@ void main() {
         confidence >= 0.42 && rms <= 0.012 &&
         scale >= 0.94 && scale <= 1.06 && rotation <= 0.10 && translation <= 0.10;
     outputFit.values[0] = fitted;
+    outputFit.values[2] = fitCornerTranslation(false);
+    outputFit.values[3] = fitCornerTranslation(true);
     outputFit.values[1] = vec4(confidence, rms, float(inliers), valid ? 1.0 : 0.0);
 }

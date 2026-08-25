@@ -10,8 +10,20 @@ internal object NativeYuv420Converter {
         runCatching { System.loadLibrary(NATIVE_LIBRARY) }.exceptionOrNull()
     }
 
-    fun convert(image: Image, target: ByteBuffer): Boolean {
-        if (libraryLoadFailure != null || image.planes.size < 3) return false
+    fun convert(
+        image: Image,
+        target: ByteBuffer,
+        outputWidth: Int = image.width,
+        outputHeight: Int = image.height,
+    ): Boolean {
+        if (
+            libraryLoadFailure != null ||
+            image.planes.size < 3 ||
+            outputWidth <= 0 ||
+            outputHeight <= 0
+        ) {
+            return false
+        }
         val y = image.planes[0]
         val u = image.planes[1]
         val v = image.planes[2]
@@ -25,8 +37,10 @@ internal object NativeYuv420Converter {
             vBuffer = v.buffer,
             vRowStride = v.rowStride,
             vPixelStride = v.pixelStride,
-            width = image.width,
-            height = image.height,
+            sourceWidth = image.width,
+            sourceHeight = image.height,
+            outputWidth = outputWidth,
+            outputHeight = outputHeight,
             rgbaBuffer = target,
         )
     }
@@ -41,8 +55,10 @@ internal object NativeYuv420Converter {
         vBuffer: ByteBuffer,
         vRowStride: Int,
         vPixelStride: Int,
-        width: Int,
-        height: Int,
+        sourceWidth: Int,
+        sourceHeight: Int,
+        outputWidth: Int,
+        outputHeight: Int,
         rgbaBuffer: ByteBuffer,
     ): Boolean
 

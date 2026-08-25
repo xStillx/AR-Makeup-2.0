@@ -39,6 +39,7 @@ import java.util.concurrent.atomic.AtomicReference
  */
 internal class ArCoreMediaPipeLipTracker(
     context: android.content.Context,
+    private val forceCpuDelegate: Boolean = false,
     private val onError: (String) -> Unit,
 ) : FaceTrackingBackend {
 
@@ -50,12 +51,19 @@ internal class ArCoreMediaPipeLipTracker(
     private val lock = Any()
     private val busy = AtomicBoolean(false)
     private val latestObservation = AtomicReference<FaceObservation?>()
+    private val latestRawObservation = AtomicReference<FaceObservation?>()
+    private val lipContourMotionDiagnostics = LipContourMotionDiagnostics()
     private val localLipContourStabilizer = FaceAnchoredLipContourStabilizer(
         localCutoffHz = LOCAL_CONTOUR_CUTOFF_HZ,
+        motionCutoffHz = LOCAL_CONTOUR_MOTION_CUTOFF_HZ,
         maximumFrameGapMs = LOCAL_CONTOUR_MAXIMUM_GAP_MS,
     )
     private val stableAnchorCoordinates =
         FloatArray(TrackingGeometryExtractor.stableAnchorIndices.size * XY_COMPONENT_COUNT)
+    private val rawOuterLipCoordinates =
+        FloatArray(LipLandmarkTopology.outerContour.size * XY_COMPONENT_COUNT)
+    private val rawInnerLipCoordinates =
+        FloatArray(LipLandmarkTopology.innerContour.size * XY_COMPONENT_COUNT)
     private val outerLipCoordinates =
         FloatArray(LipLandmarkTopology.outerContour.size * XY_COMPONENT_COUNT)
     private val innerLipCoordinates =
@@ -64,6 +72,7 @@ internal class ArCoreMediaPipeLipTracker(
         Thread(runnable, "arcore-mediapipe-conversion")
     }
     private var landmarker: FaceLandmarker? = null
+    private var activeDelegate = Delegate.GPU
     private var activeCameraImage: android.media.Image? = null
     private var activeInput: MPImage? = null
     private var activeSensorTimestampNs = 0L
@@ -75,17 +84,29 @@ internal class ArCoreMediaPipeLipTracker(
     private var lastSubmittedTimestampMs = Long.MIN_VALUE
     private var lastResultTimestampNs = 0L
     private var smoothedFps = 0f
+    private var lastTimingLogAtNs = 0L
     private var closed = false
 
     fun initialize() {
         synchronized(lock) {
             if (closed || landmarker != null) return
-            landmarker = try {
-                createLandmarker(Delegate.GPU)
-            } catch (gpuError: RuntimeException) {
-                Log.w(TAG, "MediaPipe GPU initialization failed, using CPU", gpuError)
-                createLandmarker(Delegate.CPU)
+            landmarker = if (forceCpuDelegate) {
+                createLandmarker(Delegate.CPU).also {
+                    activeDelegate = Delegate.CPU
+                }
+            } else {
+                try {
+                    createLandmarker(Delegate.GPU).also {
+                        activeDelegate = Delegate.GPU
+                    }
+                } catch (gpuError: RuntimeException) {
+                    Log.w(TAG, "MediaPipe GPU initialization failed, using CPU", gpuError)
+                    createLandmarker(Delegate.CPU).also {
+                        activeDelegate = Delegate.CPU
+                    }
+                }
             }
+            Log.i(TAG, "FF5 MediaPipe delegate=${activeDelegate.name}")
         }
     }
 
@@ -129,10 +150,20 @@ internal class ArCoreMediaPipeLipTracker(
     ) {
         val sensorTimestampNs = cameraImage.timestamp
         var timestampMs = sensorTimestampNs / NANOS_PER_MILLISECOND
+        val inferenceSize = MediaPipeInferenceSizePolicy.fitWithin(
+            sourceWidth = cameraImage.width,
+            sourceHeight = cameraImage.height,
+            maximumLongEdge = MAXIMUM_INFERENCE_LONG_EDGE,
+        )
         val conversionStartedAtNs = SystemClock.elapsedRealtimeNanos()
         val inferenceBuffer = try {
-            obtainInferenceBuffer(cameraImage.width, cameraImage.height).also { target ->
-                convertYuv420ToRgba(cameraImage, target)
+            obtainInferenceBuffer(inferenceSize.width, inferenceSize.height).also { target ->
+                convertYuv420ToRgba(
+                    image = cameraImage,
+                    target = target,
+                    outputWidth = inferenceSize.width,
+                    outputHeight = inferenceSize.height,
+                )
             }
         } catch (error: RuntimeException) {
             releaseCameraImage(cameraImage)
@@ -140,8 +171,9 @@ internal class ArCoreMediaPipeLipTracker(
             onError("ARCore YUV conversion failed: ${error.message}")
             return
         }
-        val conversionDurationMs = (SystemClock.elapsedRealtimeNanos() - conversionStartedAtNs) /
-            NANOS_PER_MILLISECOND.toFloat()
+        val conversionDurationMs =
+            (SystemClock.elapsedRealtimeNanos() - conversionStartedAtNs) /
+                NANOS_PER_MILLISECOND.toFloat()
         releaseCameraImage(cameraImage)
 
         val inputImage = try {
@@ -185,6 +217,8 @@ internal class ArCoreMediaPipeLipTracker(
 
     override fun latestObservation(): FaceObservation? = latestObservation.get()
 
+    fun latestRawObservation(): FaceObservation? = latestRawObservation.get()
+
     override fun close() {
         val inputToClose: MPImage?
         val cameraImageToClose: android.media.Image?
@@ -203,7 +237,9 @@ internal class ArCoreMediaPipeLipTracker(
         inputToClose?.close()
         busy.set(false)
         latestObservation.set(null)
+        latestRawObservation.set(null)
         localLipContourStabilizer.reset()
+        lipContourMotionDiagnostics.reset()
     }
 
     private fun createLandmarker(delegate: Delegate): FaceLandmarker {
@@ -262,9 +298,26 @@ internal class ArCoreMediaPipeLipTracker(
                 smoothedFps + FPS_RESPONSE * (instantaneousFps - smoothedFps)
             }
             lastResultTimestampNs = resultAtNs
+            if (resultAtNs - lastTimingLogAtNs >= NANOS_PER_SECOND) {
+                val inferenceDurationMs =
+                    (resultAtNs - submittedAtNs).coerceAtLeast(0L) /
+                        NANOS_PER_MILLISECOND.toFloat()
+                val observationAgeMs =
+                    (resultAtNs - sensorTimestampNs).coerceAtLeast(0L) /
+                        NANOS_PER_MILLISECOND.toFloat()
+                Log.i(
+                    TAG,
+                    "FF5 mediaPipeTiming delegate=${activeDelegate.name} " +
+                        "input=${inferenceWidth}x$inferenceHeight " +
+                        "fps=$smoothedFps yuvMs=$conversionDurationMs " +
+                        "inferenceMs=$inferenceDurationMs resultAgeMs=$observationAgeMs",
+                )
+                lastTimingLogAtNs = resultAtNs
+            }
             if (landmarks.size == topology.pointCount) {
+                val rawCoordinates = coordinates.copyOf()
                 stabilizeLocalLipShape(coordinates, sensorTimestampNs)
-                latestObservation.set(
+                val stabilizedObservation =
                     FaceObservation(
                         backendId = backendId,
                         role = role,
@@ -292,8 +345,17 @@ internal class ArCoreMediaPipeLipTracker(
                             conversionDurationMs = conversionDurationMs,
                             smoothedFps = smoothedFps,
                         ),
+                    )
+                latestRawObservation.set(
+                    stabilizedObservation.copy(
+                        imageLandmarks = FaceLandmarkSet.takeOwnership(
+                            topology = topology,
+                            coordinateSpace = FaceCoordinateSpace.NORMALIZED_IMAGE_TOP_LEFT,
+                            packedCoordinates = rawCoordinates,
+                        ),
                     ),
                 )
+                latestObservation.set(stabilizedObservation)
             }
         }
         releaseActiveInput(inputImage)
@@ -322,10 +384,20 @@ internal class ArCoreMediaPipeLipTracker(
             landmarkIndices = LipLandmarkTopology.innerContour,
             destination = innerLipCoordinates,
         )
+        outerLipCoordinates.copyInto(rawOuterLipCoordinates)
+        innerLipCoordinates.copyInto(rawInnerLipCoordinates)
         localLipContourStabilizer.stabilize(
             anchors = stableAnchorCoordinates,
             outerContour = outerLipCoordinates,
             innerContour = innerLipCoordinates,
+            timestampMs = sensorTimestampNs / NANOS_PER_MILLISECOND,
+        )
+        lipContourMotionDiagnostics.record(
+            anchors = stableAnchorCoordinates,
+            rawOuter = rawOuterLipCoordinates,
+            rawInner = rawInnerLipCoordinates,
+            stabilizedOuter = outerLipCoordinates,
+            stabilizedInner = innerLipCoordinates,
             timestampMs = sensorTimestampNs / NANOS_PER_MILLISECOND,
         )
         writeRegionCoordinates(
@@ -397,12 +469,17 @@ internal class ArCoreMediaPipeLipTracker(
         return target
     }
 
-    private fun convertYuv420ToRgba(image: android.media.Image, target: ByteBuffer) {
+    private fun convertYuv420ToRgba(
+        image: android.media.Image,
+        target: ByteBuffer,
+        outputWidth: Int,
+        outputHeight: Int,
+    ) {
         require(image.format == android.graphics.ImageFormat.YUV_420_888) {
             "Expected YUV_420_888, received ${image.format}"
         }
         require(image.planes.size >= 3) { "YUV image is missing chroma planes" }
-        if (!NativeYuv420Converter.convert(image, target)) {
+        if (!NativeYuv420Converter.convert(image, target, outputWidth, outputHeight)) {
             error("Native YUV_420_888 to RGBA conversion failed")
         }
         target.position(0)
@@ -420,6 +497,8 @@ internal class ArCoreMediaPipeLipTracker(
         const val FPS_RESPONSE = 0.2f
         const val XY_COMPONENT_COUNT = 2
         const val LOCAL_CONTOUR_CUTOFF_HZ = 8f
+        const val LOCAL_CONTOUR_MOTION_CUTOFF_HZ = 30f
+        const val MAXIMUM_INFERENCE_LONG_EDGE = 480
         const val LOCAL_CONTOUR_MAXIMUM_GAP_MS = 220L
     }
 }

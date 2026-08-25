@@ -1,5 +1,11 @@
 package com.example.armakeup.tracking.face
 
+enum class MouthLocalGeometryPolicy {
+    FULL_CONTOUR,
+    CORNER_RESIDUAL,
+    CALIBRATED_CORNER_RESIDUAL,
+}
+
 /**
  * Combines a current global face observation with the latest local-expression observation.
  *
@@ -21,6 +27,8 @@ class HybridFullFaceStateComposer(
     private val fullLocalAffineResidual: Float = maximumGlobalAffineResidual,
     private val maximumLocalObservationAgeNs: Long = Long.MAX_VALUE,
     private val localObservationAgeFadeOutNs: Long = 0L,
+    private val mouthLocalGeometryPolicy: MouthLocalGeometryPolicy =
+        MouthLocalGeometryPolicy.FULL_CONTOUR,
     private val perspectivePolicy: FaceLocalGeometryPerspectivePolicy =
         FaceLocalGeometryPerspectivePolicy.UNRESTRICTED,
 ) {
@@ -29,6 +37,13 @@ class HybridFullFaceStateComposer(
     private val innerLipIndices = innerLipIndices.copyOf()
     private val leftEyeIndices = leftEyeIndices.copyOf()
     private val rightEyeIndices = rightEyeIndices.copyOf()
+    private val calibratedMouthCornerResidualFilter = CalibratedMouthCornerResidualFilter()
+    private val firstMouthCornerPosition = mouthAperture?.let { aperture ->
+        this.outerLipIndices.indexOf(aperture.firstCornerIndex)
+    } ?: MISSING_INDEX
+    private val secondMouthCornerPosition = mouthAperture?.let { aperture ->
+        this.outerLipIndices.indexOf(aperture.secondCornerIndex)
+    } ?: MISSING_INDEX
     private val maximumRequiredIndex = sequenceOf(
         this.stableAnchorIndices.maxOrNull(),
         this.outerLipIndices.maxOrNull(),
@@ -59,6 +74,11 @@ class HybridFullFaceStateComposer(
             fullLocalAffineResidual in 0f..maximumGlobalAffineResidual)
         require(maximumLocalObservationAgeNs >= 0L)
         require(localObservationAgeFadeOutNs >= 0L)
+        if (mouthLocalGeometryPolicy != MouthLocalGeometryPolicy.FULL_CONTOUR) {
+            require(mouthAperture != null)
+            require(firstMouthCornerPosition != MISSING_INDEX)
+            require(secondMouthCornerPosition != MISSING_INDEX)
+        }
     }
 
     fun compose(
@@ -128,13 +148,21 @@ class HybridFullFaceStateComposer(
         val residualLocalWeight = globalAffine?.let { affine ->
             localWeightForResidual(affine.normalizedRmsResidual)
         } ?: 0f
-        val localGeometryWeight =
-            perspectivePolicy.localWeight(globalObservation) * residualLocalWeight *
-                localObservationAgeWeight(globalObservation, local)
+        val localGeometryBaseWeight =
+            perspectivePolicy.localWeight(globalObservation) * residualLocalWeight
+        val localGeometryWeight = localGeometryBaseWeight *
+            localObservationAgeWeight(globalObservation, local)
+        val mouthLocalGeometryWeight = if (
+            mouthLocalGeometryPolicy == MouthLocalGeometryPolicy.CALIBRATED_CORNER_RESIDUAL
+        ) {
+            localGeometryBaseWeight
+        } else {
+            localGeometryWeight
+        }
         val mouthLocalWeight = if (
             fitAccepted && localFeatureTracks(local, local?.features?.mouth)
         ) {
-            localGeometryWeight
+            mouthLocalGeometryWeight
         } else {
             0f
         }
@@ -164,21 +192,23 @@ class HybridFullFaceStateComposer(
             null
         }
         if (mouthTransform != null) {
-            regions[FaceRegion.LIPS_OUTER] = mapRegion(
+            regions[FaceRegion.LIPS_OUTER] = mapMouthRegion(
                 FaceRegion.LIPS_OUTER,
                 outerLipIndices,
                 checkNotNull(acceptedLocalLandmarks),
                 mouthTransform,
                 display,
                 mouthLocalWeight,
+                checkNotNull(local).sensorTimestampNs,
             )
-            regions[FaceRegion.LIPS_INNER] = mapRegion(
+            regions[FaceRegion.LIPS_INNER] = mapMouthRegion(
                 FaceRegion.LIPS_INNER,
                 innerLipIndices,
                 checkNotNull(acceptedLocalLandmarks),
                 mouthTransform,
                 display,
                 mouthLocalWeight,
+                checkNotNull(local).sensorTimestampNs,
             )
         } else {
             regions[FaceRegion.LIPS_OUTER] = copyGlobalRegion(
@@ -460,6 +490,222 @@ class HybridFullFaceStateComposer(
         return FaceRegionGeometry.takeOwnership(region, copied)
     }
 
+    private fun mapMouthRegion(
+        region: FaceRegion,
+        indices: IntArray,
+        source: FaceLandmarkSet,
+        transform: FaceLocalAffineTransform,
+        globalDisplay: FaceLandmarkSet,
+        localWeight: Float,
+        localObservationTimestampNs: Long,
+    ): FaceRegionGeometry = when (mouthLocalGeometryPolicy) {
+        MouthLocalGeometryPolicy.FULL_CONTOUR -> mapRegion(
+            region = region,
+            indices = indices,
+            source = source,
+            transform = transform,
+            globalDisplay = globalDisplay,
+            localWeight = localWeight,
+        )
+        MouthLocalGeometryPolicy.CORNER_RESIDUAL -> mapMouthCornerResidualRegion(
+            region = region,
+            indices = indices,
+            source = source,
+            transform = transform,
+            globalDisplay = globalDisplay,
+            localWeight = localWeight,
+        )
+        MouthLocalGeometryPolicy.CALIBRATED_CORNER_RESIDUAL ->
+            mapCalibratedMouthCornerResidualRegion(
+                region = region,
+                indices = indices,
+                source = source,
+                transform = transform,
+                globalDisplay = globalDisplay,
+                localWeight = localWeight,
+                localObservationTimestampNs = localObservationTimestampNs,
+            )
+    }
+
+    private fun mapCalibratedMouthCornerResidualRegion(
+        region: FaceRegion,
+        indices: IntArray,
+        source: FaceLandmarkSet,
+        transform: FaceLocalAffineTransform,
+        globalDisplay: FaceLandmarkSet,
+        localWeight: Float,
+        localObservationTimestampNs: Long,
+    ): FaceRegionGeometry {
+        val aperture = checkNotNull(mouthAperture)
+        val firstCorner = NormalizedFacePoint(
+            globalDisplay.x(aperture.firstCornerIndex),
+            globalDisplay.y(aperture.firstCornerIndex),
+        )
+        val secondCorner = NormalizedFacePoint(
+            globalDisplay.x(aperture.secondCornerIndex),
+            globalDisplay.y(aperture.secondCornerIndex),
+        )
+        val mouthAxisX = secondCorner.x - firstCorner.x
+        val mouthAxisY = secondCorner.y - firstCorner.y
+        val mouthWidth = distance(firstCorner, secondCorner)
+        if (!mouthWidth.isFinite() || mouthWidth <= MINIMUM_APERTURE_WIDTH) {
+            calibratedMouthCornerResidualFilter.reset()
+            return copyGlobalRegion(region, indices, globalDisplay)
+        }
+        val axisX = mouthAxisX / mouthWidth
+        val axisY = mouthAxisY / mouthWidth
+
+        fun normalized(residual: NormalizedFacePoint) = NormalizedFacePoint(
+            x = (residual.x * axisX + residual.y * axisY) / mouthWidth,
+            y = (-residual.x * axisY + residual.y * axisX) / mouthWidth,
+        )
+        val firstMeasured = normalized(
+            boundedCornerResidual(
+                landmarkIndex = aperture.firstCornerIndex,
+                source = source,
+                transform = transform,
+                globalDisplay = globalDisplay,
+            ),
+        )
+        val secondMeasured = normalized(
+            boundedCornerResidual(
+                landmarkIndex = aperture.secondCornerIndex,
+                source = source,
+                transform = transform,
+                globalDisplay = globalDisplay,
+            ),
+        )
+        val filtered = calibratedMouthCornerResidualFilter.update(
+            timestampNs = localObservationTimestampNs,
+            measurement = MouthCornerResidualPair(
+                firstX = firstMeasured.x,
+                firstY = firstMeasured.y,
+                secondX = secondMeasured.x,
+                secondY = secondMeasured.y,
+            ),
+        )
+        fun displayResidual(x: Float, y: Float) = NormalizedFacePoint(
+            x = mouthWidth * (x * axisX - y * axisY),
+            y = mouthWidth * (x * axisY + y * axisX),
+        )
+        val firstResidual = displayResidual(filtered.firstX, filtered.firstY)
+        val secondResidual = displayResidual(filtered.secondX, filtered.secondY)
+        val weight = localWeight.coerceIn(0f, 1f)
+        val influenceRadius = (indices.size / CORNER_INFLUENCE_DIVISOR).coerceAtLeast(1)
+        val mapped = FloatArray(indices.size * XY_COMPONENT_COUNT)
+        indices.forEachIndexed { pointIndex, landmarkIndex ->
+            val outputIndex = pointIndex * XY_COMPONENT_COUNT
+            val firstInfluence = cornerInfluence(
+                pointIndex,
+                firstMouthCornerPosition,
+                indices.size,
+                influenceRadius,
+            )
+            val secondInfluence = cornerInfluence(
+                pointIndex,
+                secondMouthCornerPosition,
+                indices.size,
+                influenceRadius,
+            )
+            mapped[outputIndex] = globalDisplay.x(landmarkIndex) + weight * (
+                firstResidual.x * firstInfluence + secondResidual.x * secondInfluence
+                )
+            mapped[outputIndex + 1] = globalDisplay.y(landmarkIndex) + weight * (
+                firstResidual.y * firstInfluence + secondResidual.y * secondInfluence
+                )
+        }
+        return FaceRegionGeometry.takeOwnership(region, mapped)
+    }
+
+    private fun mapMouthCornerResidualRegion(
+        region: FaceRegion,
+        indices: IntArray,
+        source: FaceLandmarkSet,
+        transform: FaceLocalAffineTransform,
+        globalDisplay: FaceLandmarkSet,
+        localWeight: Float,
+    ): FaceRegionGeometry {
+        val aperture = checkNotNull(mouthAperture)
+        val firstResidual = boundedCornerResidual(
+            landmarkIndex = aperture.firstCornerIndex,
+            source = source,
+            transform = transform,
+            globalDisplay = globalDisplay,
+        )
+        val secondResidual = boundedCornerResidual(
+            landmarkIndex = aperture.secondCornerIndex,
+            source = source,
+            transform = transform,
+            globalDisplay = globalDisplay,
+        )
+        val weight = localWeight.coerceIn(0f, 1f)
+        val influenceRadius = (indices.size / CORNER_INFLUENCE_DIVISOR).coerceAtLeast(1)
+        val mapped = FloatArray(indices.size * XY_COMPONENT_COUNT)
+        indices.forEachIndexed { pointIndex, landmarkIndex ->
+            val output = pointIndex * XY_COMPONENT_COUNT
+            val firstInfluence = cornerInfluence(
+                pointIndex,
+                firstMouthCornerPosition,
+                indices.size,
+                influenceRadius,
+            )
+            val secondInfluence = cornerInfluence(
+                pointIndex,
+                secondMouthCornerPosition,
+                indices.size,
+                influenceRadius,
+            )
+            mapped[output] = globalDisplay.x(landmarkIndex) + weight * (
+                firstResidual.x * firstInfluence + secondResidual.x * secondInfluence
+                )
+            mapped[output + 1] = globalDisplay.y(landmarkIndex) + weight * (
+                firstResidual.y * firstInfluence + secondResidual.y * secondInfluence
+                )
+        }
+        return FaceRegionGeometry.takeOwnership(region, mapped)
+    }
+
+    private fun boundedCornerResidual(
+        landmarkIndex: Int,
+        source: FaceLandmarkSet,
+        transform: FaceLocalAffineTransform,
+        globalDisplay: FaceLandmarkSet,
+    ): NormalizedFacePoint {
+        val sourceX = source.x(landmarkIndex)
+        val sourceY = source.y(landmarkIndex)
+        val residualX = transform.mapX(sourceX, sourceY) - globalDisplay.x(landmarkIndex)
+        val residualY = transform.mapY(sourceX, sourceY) - globalDisplay.y(landmarkIndex)
+        val aperture = checkNotNull(mouthAperture)
+        val mouthWidth = distance(
+            NormalizedFacePoint(
+                globalDisplay.x(aperture.firstCornerIndex),
+                globalDisplay.y(aperture.firstCornerIndex),
+            ),
+            NormalizedFacePoint(
+                globalDisplay.x(aperture.secondCornerIndex),
+                globalDisplay.y(aperture.secondCornerIndex),
+            ),
+        )
+        val maximumResidual = mouthWidth * MAXIMUM_CORNER_RESIDUAL_WIDTH_RATIO
+        val magnitude = kotlin.math.sqrt(residualX * residualX + residualY * residualY)
+        val scale = if (magnitude > maximumResidual && magnitude > 0f) {
+            maximumResidual / magnitude
+        } else {
+            1f
+        }
+        return NormalizedFacePoint(residualX * scale, residualY * scale)
+    }
+
+    private fun cornerInfluence(
+        pointIndex: Int,
+        cornerIndex: Int,
+        pointCount: Int,
+        radius: Int,
+    ): Float {
+        val directDistance = kotlin.math.abs(pointIndex - cornerIndex)
+        val circularDistance = minOf(directDistance, pointCount - directDistance)
+        return (1f - circularDistance.toFloat() / radius).coerceIn(0f, 1f)
+    }
     private fun mapRegion(
         region: FaceRegion,
         indices: IntArray,
@@ -492,6 +738,9 @@ class HybridFullFaceStateComposer(
         const val MINIMUM_AFFINE_POINT_COUNT = 3
         const val MINIMUM_APERTURE_WIDTH = 1e-6f
         const val MINIMUM_LOCAL_GEOMETRY_WEIGHT = 1e-3f
+        const val CORNER_INFLUENCE_DIVISOR = 4
+        const val MAXIMUM_CORNER_RESIDUAL_WIDTH_RATIO = 0.18f
         const val XY_COMPONENT_COUNT = 2
+        const val MISSING_INDEX = -1
     }
 }

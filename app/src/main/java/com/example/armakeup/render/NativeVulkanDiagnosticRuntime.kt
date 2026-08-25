@@ -15,6 +15,61 @@ import java.io.Closeable
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
+internal data class VulkanLipCornerTemporalFit(
+    val fromSensorTimestampNs: Long,
+    val toSensorTimestampNs: Long,
+    val globalScaleCos: Float,
+    val globalScaleSin: Float,
+    val globalTranslationX: Float,
+    val globalTranslationY: Float,
+    val globalConfidence: Float,
+    val globalValid: Boolean,
+    val leftFlowX: Float,
+    val leftFlowY: Float,
+    val leftConfidence: Float,
+    val leftValid: Boolean,
+    val rightFlowX: Float,
+    val rightFlowY: Float,
+    val rightConfidence: Float,
+    val rightValid: Boolean,
+) {
+    companion object {
+        const val VALUE_COUNT = 16
+
+        fun fromNative(metadata: LongArray, values: FloatArray): VulkanLipCornerTemporalFit? {
+            require(metadata.size >= 3)
+            require(values.size >= VALUE_COUNT)
+            val fromTimestampNs = metadata[1]
+            val toTimestampNs = metadata[2]
+            if (fromTimestampNs <= 0L || toTimestampNs <= fromTimestampNs) return null
+            return VulkanLipCornerTemporalFit(
+                fromSensorTimestampNs = fromTimestampNs,
+                toSensorTimestampNs = toTimestampNs,
+                globalScaleCos = values[0],
+                globalScaleSin = values[1],
+                globalTranslationX = values[2],
+                globalTranslationY = values[3],
+                globalConfidence = values[4],
+                globalValid = values[7] >= 0.5f,
+                leftFlowX = values[8],
+                leftFlowY = values[9],
+                leftConfidence = values[10],
+                leftValid = values[11] >= 0.5f,
+                rightFlowX = values[12],
+                rightFlowY = values[13],
+                rightConfidence = values[14],
+                rightValid = values[15] >= 0.5f,
+            )
+        }
+    }
+}
+
+internal data class VulkanExternalVisibleCameraUpdate(
+    val acceptedSensorTimestampNs: Long,
+    val completedLipCornerFit: VulkanLipCornerTemporalFit?,
+    val completedMouthFlow: VulkanMouthFlowFrame?,
+)
+
 /**
  * Persistent native Vulkan runtime and V3 camera-buffer ownership bridge.
  *
@@ -41,6 +96,9 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
     private val visibleTrackingRoi = FloatArray(VISIBLE_TRACKING_ROI_ELEMENT_COUNT)
     private val visibleCameraMetadata = LongArray(VISIBLE_CAMERA_METADATA_COUNT)
     private val visibleTemporalValues = FloatArray(VulkanTemporalTrackingResult.VALUE_COUNT)
+    private val externalCameraMetadata = LongArray(VISIBLE_CAMERA_METADATA_COUNT)
+    private val externalTemporalValues = FloatArray(VulkanLipCornerTemporalFit.VALUE_COUNT)
+    private val externalMouthFlowValues = FloatArray(VulkanMouthFlowFrame.VALUE_COUNT)
     private var lastVisibleCameraTimestampNs = 0L
     private var nativeHandle = nativeCreate(
         outputSurface,
@@ -203,18 +261,51 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
         hardwareBuffer: HardwareBuffer,
         sensorTimestampNs: Long,
         uvTransform: FloatArray,
-    ): Long {
+        trackingRoi: VulkanTemporalTrackingRoi,
+    ): VulkanExternalVisibleCameraUpdate {
         require(sensorTimestampNs > 0L)
         require(uvTransform.size == VISIBLE_TRANSFORM_ELEMENT_COUNT)
         val handle = nativeHandle
-        return if (handle == 0L) {
-            0L
+        if (handle == 0L) {
+            return VulkanExternalVisibleCameraUpdate(0L, null, null)
         } else {
-            nativeUpdateExternalVisibleCamera(
+            externalCameraMetadata.fill(0L)
+            externalTemporalValues.fill(0f)
+            externalMouthFlowValues.fill(0f)
+            val acceptedTimestampNs = nativeUpdateExternalVisibleCamera(
                 handle,
                 hardwareBuffer,
                 sensorTimestampNs,
                 uvTransform,
+                trackingRoi.toFloatArray(),
+                externalCameraMetadata,
+                externalTemporalValues,
+                externalMouthFlowValues,
+            )
+            if (acceptedTimestampNs > 0L &&
+                acceptedTimestampNs != lastVisibleCameraTimestampNs
+            ) {
+                lastVisibleCameraTimestampNs = acceptedTimestampNs
+                val count = cameraFrameCount.incrementAndGet()
+                if (count == 1L || count % CAMERA_PROGRESS_INTERVAL == 0L) {
+                    Log.i(
+                        LOG_TAG,
+                        "externalCameraProgress copied=$count timestampNs=${acceptedTimestampNs} " +
+                            "trackingRoiValid=${trackingRoi.isValid} $diagnostic",
+                    )
+                }
+            }
+            return VulkanExternalVisibleCameraUpdate(
+                acceptedSensorTimestampNs = acceptedTimestampNs,
+                completedMouthFlow = VulkanMouthFlowFrame.fromNative(
+                    externalCameraMetadata,
+                    externalMouthFlowValues,
+                ),
+                completedLipCornerFit =
+                    VulkanLipCornerTemporalFit.fromNative(
+                        externalCameraMetadata,
+                        externalTemporalValues,
+                    ),
             )
         }
     }
@@ -435,6 +526,10 @@ internal class NativeVulkanDiagnosticRuntime private constructor(
         hardwareBuffer: HardwareBuffer,
         sensorTimestampNs: Long,
         uvTransform: FloatArray,
+        trackingRoi: FloatArray,
+        temporalMetadata: LongArray,
+        temporalValues: FloatArray,
+        temporalFlowValues: FloatArray,
     ): Long
     private external fun nativePresentVisibleFrame(handle: Long): Long
     private external fun nativeCloseCamera(handle: Long)

@@ -98,6 +98,39 @@ class FaceAnchoredLipContourStabilizerTest {
         assertPointsEqual(innerContour(), changedInner)
     }
 
+    @Test
+    fun intentionalLocalMotionUsesFasterCutoffThanRestingShape() {
+        val fixed = FaceAnchoredLipContourStabilizer(
+            localCutoffHz = 4f,
+            motionCutoffHz = 4f,
+        )
+        val adaptive = FaceAnchoredLipContourStabilizer(
+            localCutoffHz = 4f,
+            motionCutoffHz = 30f,
+        )
+        val fixedOuter = contour()
+        val adaptiveOuter = contour()
+        fixed.stabilize(anchors(), fixedOuter, innerContour(), timestampMs = 1_000L)
+        adaptive.stabilize(anchors(), adaptiveOuter, innerContour(), timestampMs = 1_000L)
+        val openedFixed = contour().also {
+            it[3] -= 0.02f
+            it[7] += 0.02f
+        }
+        val openedAdaptive = openedFixed.copyOf()
+
+        fixed.stabilize(anchors(), openedFixed, innerContour(), timestampMs = 1_033L)
+        adaptive.stabilize(anchors(), openedAdaptive, innerContour(), timestampMs = 1_033L)
+
+        assertTrue(
+            kotlin.math.abs(openedAdaptive[3] - contour()[3]) >
+                kotlin.math.abs(openedFixed[3] - contour()[3]),
+        )
+        assertTrue(
+            kotlin.math.abs(openedAdaptive[7] - contour()[7]) >
+                kotlin.math.abs(openedFixed[7] - contour()[7]),
+        )
+    }
+
     private fun anchors() = floatArrayOf(
         0.30f, 0.35f,
         0.70f, 0.35f,

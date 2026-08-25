@@ -45,10 +45,14 @@ constexpr std::size_t kCameraMetadataCount = 9;
 constexpr std::size_t kVisibleCameraMetadataCount = 3;
 constexpr std::size_t kTemporalRoiElementCount = 4;
 constexpr std::size_t kTemporalResultElementCount = 8;
+constexpr std::size_t kTemporalFitBufferElementCount = 16;
 constexpr std::uint32_t kTemporalPyramidLevels = 4;
 constexpr std::uint32_t kTemporalPyramidSize = 256;
 constexpr std::uint32_t kTemporalFlowPointCount = 108;
 constexpr std::size_t kTrackingTestLipVertexComponentCount = 6;
+constexpr std::size_t kTemporalFlowVectorElementCount = 4U * kTemporalFlowPointCount;
+constexpr std::size_t kTemporalFlowResultElementCount =
+    kTemporalRoiElementCount + kTemporalFlowVectorElementCount;
 constexpr std::size_t kTrackingTestLipMaxVertexCount = 1024;
 constexpr std::size_t kTrackingTestLipMaxIndexCount = 6000;
 constexpr std::size_t kTrackingLipContourPointCount = 20;
@@ -82,9 +86,10 @@ struct alignas(16) TrackingLipPushConstants final {
     std::array<float, 4> displayToScreen{};
     std::array<float, 4> depthParameters{};
     std::array<std::int32_t, 4> flags{};
+    std::array<float, 4> flowRegion{};
 };
 
-static_assert(sizeof(TrackingLipPushConstants) == 48U);
+static_assert(sizeof(TrackingLipPushConstants) == 64U);
 
 struct alignas(16) TrackingLipContourState final {
     std::array<float, kTrackingLipContourFloatCount> values{};
@@ -318,6 +323,10 @@ public:
                << " temporalComputed=" << temporalComputedFrames_.load()
                << " temporalAccepted=" << temporalAcceptedFrames_.load()
                << " temporalRejected=" << temporalRejectedFrames_.load()
+               << " leftCornerAccepted=" << leftCornerAcceptedFrames_.load()
+               << " leftCornerRejected=" << leftCornerRejectedFrames_.load()
+               << " rightCornerAccepted=" << rightCornerAcceptedFrames_.load()
+               << " rightCornerRejected=" << rightCornerRejectedFrames_.load()
                << " faceDepthUpdates=" << faceOccluderUpdates_.load()
                << " depthFormat=" << formatName(depthFormat_)
                << " displayTiming=" << (displayTimingSupported_ ? "true" : "false")
@@ -542,7 +551,11 @@ public:
             }
             completedTemporalFromTimestampNs = pendingCameraFrame_.temporalFromTimestampNs;
             completedTemporalToTimestampNs = pendingCameraFrame_.timestampNs;
-            completedTemporalResult = pendingCameraFrame_.temporalResult;
+            std::copy_n(
+                pendingCameraFrame_.temporalResult.begin(),
+                kTemporalResultElementCount,
+                completedTemporalResult.begin()
+            );
             releasePendingCameraSource();
             pendingCameraFrame_ = PendingCameraFrame{};
             cameraReleasedFrames_.fetch_add(1);
@@ -574,39 +587,98 @@ public:
         JNIEnv* environment,
         jobject hardwareBufferObject,
         std::int64_t sensorTimestampNs,
-        jfloatArray uvTransform
+        jfloatArray uvTransform,
+        jfloatArray trackingRoi,
+        jlongArray temporalMetadata,
+        jfloatArray temporalValues,
+        jfloatArray temporalFlowValues
     ) {
         if (hardwareBufferObject == nullptr || sensorTimestampNs <= 0 || uvTransform == nullptr ||
+            trackingRoi == nullptr || temporalMetadata == nullptr || temporalValues == nullptr ||
+            temporalFlowValues == nullptr ||
             environment->GetArrayLength(uvTransform) !=
-                static_cast<jsize>(kTransformElementCount)) {
+                static_cast<jsize>(kTransformElementCount) ||
+            environment->GetArrayLength(trackingRoi) !=
+                static_cast<jsize>(kTemporalRoiElementCount) ||
+            environment->GetArrayLength(temporalMetadata) <
+                static_cast<jsize>(kVisibleCameraMetadataCount) ||
+            environment->GetArrayLength(temporalValues) <
+                static_cast<jsize>(kTemporalFitBufferElementCount) ||
+            environment->GetArrayLength(temporalFlowValues) <
+                static_cast<jsize>(kTemporalFlowResultElementCount)) {
             return 0;
         }
         std::array<float, kTransformElementCount> transform{};
+        std::array<float, kTemporalRoiElementCount> roi{};
         environment->GetFloatArrayRegion(
             uvTransform,
             0,
             static_cast<jsize>(transform.size()),
             transform.data()
         );
+        environment->GetFloatArrayRegion(
+            trackingRoi,
+            0,
+            static_cast<jsize>(roi.size()),
+            roi.data()
+        );
         if (environment->ExceptionCheck() == JNI_TRUE ||
             !std::all_of(transform.begin(), transform.end(), [](float value) {
+                return std::isfinite(value);
+            }) ||
+            !std::all_of(roi.begin(), roi.end(), [](float value) {
                 return std::isfinite(value);
             })) {
             return 0;
         }
 
+        std::int64_t completedTemporalFromTimestampNs = 0;
+        std::int64_t completedTemporalToTimestampNs = 0;
+        std::array<float, kTemporalFitBufferElementCount> completedTemporalResult{};
+        std::array<float, kTemporalFlowResultElementCount> completedTemporalFlowResult{};
+        const auto publishResult = [&](std::int64_t timestampNs) {
+            const std::array<jlong, kVisibleCameraMetadataCount> metadata{
+                static_cast<jlong>(timestampNs),
+                static_cast<jlong>(completedTemporalFromTimestampNs),
+                static_cast<jlong>(completedTemporalToTimestampNs),
+            };
+            environment->SetLongArrayRegion(
+                temporalMetadata,
+                0,
+                static_cast<jsize>(metadata.size()),
+                metadata.data()
+            );
+            environment->SetFloatArrayRegion(
+                temporalValues,
+                0,
+                static_cast<jsize>(completedTemporalResult.size()),
+                completedTemporalResult.data()
+            );
+            environment->SetFloatArrayRegion(
+                temporalFlowValues,
+                0,
+                static_cast<jsize>(completedTemporalFlowResult.size()),
+                completedTemporalFlowResult.data()
+            );
+            return timestampNs;
+        };
+
         std::lock_guard lock(cameraMutex_);
         if (!ready_.load()) {
-            return 0;
+            return publishResult(0);
         }
         if (!mediaDispatch_.load()) {
             setCameraError("external_ahb_dispatch_unavailable");
-            return retainedCameraTimestampNs_;
+            return publishResult(retainedCameraTimestampNs_);
         }
         if (pendingCameraFrame_.hardwareBuffer != nullptr) {
             if (!finalizePendingCameraFrame()) {
-                return retainedCameraTimestampNs_;
+                return publishResult(retainedCameraTimestampNs_);
             }
+            completedTemporalFromTimestampNs = pendingCameraFrame_.temporalFromTimestampNs;
+            completedTemporalToTimestampNs = pendingCameraFrame_.timestampNs;
+            completedTemporalResult = pendingCameraFrame_.temporalResult;
+            completedTemporalFlowResult = pendingCameraFrame_.temporalFlowResult;
             releasePendingCameraSource();
             pendingCameraFrame_ = PendingCameraFrame{};
             cameraReleasedFrames_.fetch_add(1);
@@ -618,7 +690,7 @@ public:
         );
         if (hardwareBuffer == nullptr) {
             setCameraError("external_java_hardware_buffer_unavailable");
-            return retainedCameraTimestampNs_;
+            return publishResult(retainedCameraTimestampNs_);
         }
         mediaDispatch_.acquireHardwareBuffer(hardwareBuffer);
         AHardwareBuffer_Desc description{};
@@ -629,18 +701,19 @@ public:
         pendingCameraFrame_.timestampNs = sensorTimestampNs;
         pendingCameraFrame_.token = nextCameraToken_++;
         pendingCameraFrame_.transform = transform;
+        pendingCameraFrame_.temporalRoi = roi;
 
         int acquireFenceFd = -1;
         if (!importAndCopyCameraFrame(acquireFenceFd)) {
             destroyPendingCameraFrame(/* deleteImage = */ false);
             cameraDroppedFrames_.fetch_add(1);
-            return retainedCameraTimestampNs_;
+            return publishResult(retainedCameraTimestampNs_);
         }
         retainedCameraTimestampNs_ = sensorTimestampNs;
         retainedCameraValid_ = true;
         retainedCameraCopies_.fetch_add(1);
         cameraRenderedFrames_.fetch_add(1);
-        return retainedCameraTimestampNs_;
+        return publishResult(retainedCameraTimestampNs_);
     }
 
     std::int64_t presentVisibleFrame() {
@@ -777,6 +850,19 @@ public:
             }
             unsignedIndices[index] = value;
         }
+        std::array<float, 4> flowRegion{
+            std::numeric_limits<float>::max(),
+            std::numeric_limits<float>::lowest(),
+            std::numeric_limits<float>::max(),
+            std::numeric_limits<float>::lowest(),
+        };
+        for (std::size_t index = 0; index < vertexCount; ++index) {
+            const std::size_t offset = index * kTrackingTestLipVertexComponentCount;
+            flowRegion[0] = std::min(flowRegion[0], copiedVertices[offset]);
+            flowRegion[1] = std::max(flowRegion[1], copiedVertices[offset]);
+            flowRegion[2] = std::min(flowRegion[2], copiedVertices[offset + 1U]);
+            flowRegion[3] = std::max(flowRegion[3], copiedVertices[offset + 1U]);
+        }
         std::lock_guard lock(lipMutex_);
         trackingTestLipVertices_ = std::move(copiedVertices);
         trackingTestLipIndices_ = std::move(unsignedIndices);
@@ -787,6 +873,7 @@ public:
         trackingTestLipSampledDepthMaximum_ = sampledDepthMaximum;
         trackingTestLipSampledDepthVisualizationEnabled_ = visualizeSampledDepth;
         trackingTestLipDynamicContour_ = copiedDynamicContour;
+        trackingTestLipFlowRegion_ = flowRegion;
         trackingTestLipVisible_ = true;
         return true;
     }
@@ -925,7 +1012,8 @@ private:
         std::uint64_t token = 0;
         std::array<float, kTransformElementCount> transform{};
         std::array<float, kTemporalRoiElementCount> temporalRoi{};
-        std::array<float, kTemporalResultElementCount> temporalResult{};
+        std::array<float, kTemporalFitBufferElementCount> temporalResult{};
+        std::array<float, kTemporalFlowResultElementCount> temporalFlowResult{};
         std::int64_t temporalFromTimestampNs = 0;
         std::uint32_t temporalWriteIndex = 0;
         bool temporalComputed = false;
@@ -2330,7 +2418,7 @@ private:
             return false;
         }
         if (!createTrackingTestLipBuffer(
-                sizeof(float) * kTemporalResultElementCount,
+                sizeof(float) * kTemporalFitBufferElementCount,
                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                 &trackingTestLipFallbackFitBuffer_,
                 &trackingTestLipFallbackFitMemory_,
@@ -2341,7 +2429,7 @@ private:
         std::memset(
             trackingTestLipFallbackFitMapped_,
             0,
-            sizeof(float) * kTemporalResultElementCount
+            sizeof(float) * kTemporalFitBufferElementCount
         );
         for (std::size_t index = 0; index < kFramesInFlight; ++index) {
             if (!createTrackingTestLipBuffer(
@@ -2411,7 +2499,7 @@ private:
         const VkDescriptorBufferInfo bufferInfo{
             .buffer = buffer,
             .offset = 0,
-            .range = sizeof(float) * kTemporalResultElementCount,
+            .range = sizeof(float) * kTemporalFitBufferElementCount,
         };
         for (const VkDescriptorSet descriptorSet : trackingTestLipDescriptorSets_) {
             const VkWriteDescriptorSet write{
@@ -3412,6 +3500,7 @@ private:
             ? 1
             : 0;
         pushConstants.flags[1] = trackingTestLipSampledDepthVisualizationEnabled_ ? 1 : 0;
+        pushConstants.flowRegion = trackingTestLipFlowRegion_;
         cmdPushConstants_(
             commandBuffer,
             trackingTestLipPipelineLayout_,
@@ -4137,14 +4226,14 @@ private:
             return false;
         }
         if (!createOwnedBuffer(
-                sizeof(float) * 4U * kTemporalFlowPointCount,
+                sizeof(float) * kTemporalFlowVectorElementCount,
                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                 &temporalFlowBuffer_,
                 &temporalFlowMemory_
             ) ||
             !createOwnedBuffer(
-                sizeof(float) * kTemporalResultElementCount,
+                sizeof(float) * kTemporalFitBufferElementCount,
                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                 &temporalFitBuffer_,
@@ -4155,9 +4244,23 @@ private:
         }
         result = mapMemory_(
             device_,
+            temporalFlowMemory_,
+            0,
+            sizeof(float) * kTemporalFlowVectorElementCount,
+            0,
+            &temporalFlowMapped_
+        );
+        if (result != VK_SUCCESS || temporalFlowMapped_ == nullptr) {
+            setTemporalVulkanError("map_flow_buffer", result);
+            destroyTemporalPipeline();
+            return false;
+        }
+        std::memset(temporalFlowMapped_, 0, sizeof(float) * kTemporalFlowVectorElementCount);
+        result = mapMemory_(
+            device_,
             temporalFitMemory_,
             0,
-            sizeof(float) * kTemporalResultElementCount,
+            sizeof(float) * kTemporalFitBufferElementCount,
             0,
             &temporalFitMapped_
         );
@@ -4166,7 +4269,7 @@ private:
             destroyTemporalPipeline();
             return false;
         }
-        std::memset(temporalFitMapped_, 0, sizeof(float) * kTemporalResultElementCount);
+        std::memset(temporalFitMapped_, 0, sizeof(float) * kTemporalFitBufferElementCount);
         updateTrackingTestLipFitDescriptor(temporalFitBuffer_);
         if (!createComputePipeline(
                 armakeup::shaders::kTemporalLuma,
@@ -4253,7 +4356,7 @@ private:
             VkDescriptorBufferInfo{
                 .buffer = temporalFitBuffer_,
                 .offset = 0,
-                .range = sizeof(float) * kTemporalResultElementCount,
+                .range = sizeof(float) * kTemporalFitBufferElementCount,
             },
         };
         std::array<VkWriteDescriptorSet, 8> writes{};
@@ -5609,7 +5712,7 @@ private:
             .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
             .pNext = nullptr,
             .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
-            .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+            .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_HOST_READ_BIT,
             .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
             .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
             .buffer = temporalFlowBuffer_,
@@ -5619,7 +5722,7 @@ private:
         cmdPipelineBarrier_(
             commandBuffer,
             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
             0,
             0,
             nullptr,
@@ -5683,13 +5786,36 @@ private:
         if (pendingCameraFrame_.temporalDescriptorSet != VK_NULL_HANDLE && temporalReady_ &&
             temporalRoiValid()) {
             if (pendingCameraFrame_.temporalComputed && temporalFitMapped_ != nullptr) {
+                if (temporalFlowMapped_ != nullptr) {
+                    std::copy_n(
+                        pendingCameraFrame_.temporalRoi.begin(),
+                        kTemporalRoiElementCount,
+                        pendingCameraFrame_.temporalFlowResult.begin()
+                    );
+                    std::copy_n(
+                        static_cast<const float*>(temporalFlowMapped_),
+                        kTemporalFlowVectorElementCount,
+                        pendingCameraFrame_.temporalFlowResult.begin() +
+                            kTemporalRoiElementCount
+                    );
+                }
                 const auto* result = static_cast<const float*>(temporalFitMapped_);
                 std::copy_n(
                     result,
-                    kTemporalResultElementCount,
+                    kTemporalFitBufferElementCount,
                     pendingCameraFrame_.temporalResult.begin()
                 );
                 temporalComputedFrames_.fetch_add(1);
+                if (result[11] >= 0.5F) {
+                    leftCornerAcceptedFrames_.fetch_add(1);
+                } else {
+                    leftCornerRejectedFrames_.fetch_add(1);
+                }
+                if (result[15] >= 0.5F) {
+                    rightCornerAcceptedFrames_.fetch_add(1);
+                } else {
+                    rightCornerRejectedFrames_.fetch_add(1);
+                }
                 if (pendingCameraFrame_.temporalResult[7] >= 0.5F) {
                     temporalAcceptedFrames_.fetch_add(1);
                 } else {
@@ -5751,7 +5877,7 @@ private:
         environment->SetFloatArrayRegion(
             temporalValues,
             0,
-            static_cast<jsize>(pendingCameraFrame_.temporalResult.size()),
+            static_cast<jsize>(kTemporalResultElementCount),
             pendingCameraFrame_.temporalResult.data()
         );
         if (environment->ExceptionCheck() == JNI_TRUE) {
@@ -5871,6 +5997,10 @@ private:
         if (temporalDescriptorSetLayout_ != VK_NULL_HANDLE) {
             destroyDescriptorSetLayout_(device_, temporalDescriptorSetLayout_, nullptr);
             temporalDescriptorSetLayout_ = VK_NULL_HANDLE;
+        }
+        if (temporalFlowMapped_ != nullptr && temporalFlowMemory_ != VK_NULL_HANDLE) {
+            unmapMemory_(device_, temporalFlowMemory_);
+            temporalFlowMapped_ = nullptr;
         }
         if (temporalFitMapped_ != nullptr && temporalFitMemory_ != VK_NULL_HANDLE) {
             unmapMemory_(device_, temporalFitMemory_);
@@ -6479,6 +6609,7 @@ private:
     VkPipeline temporalFitPipeline_ = VK_NULL_HANDLE;
     VkBuffer temporalFlowBuffer_ = VK_NULL_HANDLE;
     VkDeviceMemory temporalFlowMemory_ = VK_NULL_HANDLE;
+    void* temporalFlowMapped_ = nullptr;
     VkBuffer temporalFitBuffer_ = VK_NULL_HANDLE;
     VkDeviceMemory temporalFitMemory_ = VK_NULL_HANDLE;
     void* temporalFitMapped_ = nullptr;
@@ -6521,6 +6652,7 @@ private:
     float trackingTestLipSampledDepthMaximum_ = 0.0F;
     bool trackingTestLipSampledDepthVisualizationEnabled_ = false;
     TrackingLipContourState trackingTestLipDynamicContour_{};
+    std::array<float, 4> trackingTestLipFlowRegion_{0.0F, 1.0F, 0.0F, 1.0F};
     bool trackingTestLipVisible_ = false;
     bool retainedTemporalFlowAvailable_ = false;
     bool displayTimingSupported_ = false;
@@ -6546,6 +6678,10 @@ private:
     std::atomic<std::uint64_t> temporalComputedFrames_{0};
     std::atomic<std::uint64_t> temporalAcceptedFrames_{0};
     std::atomic<std::uint64_t> temporalRejectedFrames_{0};
+    std::atomic<std::uint64_t> leftCornerAcceptedFrames_{0};
+    std::atomic<std::uint64_t> leftCornerRejectedFrames_{0};
+    std::atomic<std::uint64_t> rightCornerAcceptedFrames_{0};
+    std::atomic<std::uint64_t> rightCornerRejectedFrames_{0};
     std::atomic<std::uint64_t> faceOccluderUpdates_{0};
     std::atomic<std::uint64_t> latestPresentationId_{0};
     std::atomic<std::uint32_t> lastCameraWidth_{0};
@@ -6840,7 +6976,11 @@ Java_com_example_armakeup_render_NativeVulkanDiagnosticRuntime_nativeUpdateExter
     jlong handle,
     jobject hardwareBuffer,
     jlong sensorTimestampNs,
-    jfloatArray uvTransform
+    jfloatArray uvTransform,
+    jfloatArray trackingRoi,
+    jlongArray temporalMetadata,
+    jfloatArray temporalValues,
+    jfloatArray temporalFlowValues
 ) {
     VulkanDiagnosticRuntime* runtime = fromHandle(handle);
     return runtime == nullptr
@@ -6849,7 +6989,11 @@ Java_com_example_armakeup_render_NativeVulkanDiagnosticRuntime_nativeUpdateExter
             environment,
             hardwareBuffer,
             static_cast<std::int64_t>(sensorTimestampNs),
-            uvTransform
+            uvTransform,
+            trackingRoi,
+            temporalMetadata,
+            temporalValues,
+            temporalFlowValues
         ));
 }
 

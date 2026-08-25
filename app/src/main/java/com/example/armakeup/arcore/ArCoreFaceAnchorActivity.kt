@@ -43,6 +43,8 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
     private var lipDepthBias = MainActivity.DEFAULT_VULKAN_LIP_DEPTH_BIAS
     private var visualizeFaceDepth = false
     private var visualizeLipDepth = false
+    private var forceMediaPipeCpu = false
+    private var disableMediaPipeLocal = false
 
     private var session: Session? = null
     private var mediaPipeTracker: ArCoreMediaPipeLipTracker? = null
@@ -81,6 +83,14 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
         )
         visualizeLipDepth = faceDepthEnabled && intent.getBooleanExtra(
             MainActivity.EXTRA_VISUALIZE_VULKAN_LIP_DEPTH,
+            false,
+        )
+        forceMediaPipeCpu = intent.getBooleanExtra(
+            MainActivity.EXTRA_FORCE_ARCORE_MEDIAPIPE_CPU,
+            false,
+        )
+        disableMediaPipeLocal = intent.getBooleanExtra(
+            MainActivity.EXTRA_DISABLE_ARCORE_MEDIAPIPE_LOCAL,
             false,
         )
         surfaceView = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && useVulkan) {
@@ -214,14 +224,17 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
                 session = newSession
                 glRenderer?.bindSession(newSession)
                 vulkanRenderer?.bindSession(newSession)
-                ArCoreMediaPipeLipTracker(
-                    context = applicationContext,
-                    onError = { message -> Log.w(TAG, message) },
-                ).also { tracker ->
-                    tracker.initialize()
-                    mediaPipeTracker = tracker
-                    glRenderer?.bindMediaPipeTracker(tracker)
-                    vulkanRenderer?.bindMediaPipeTracker(tracker)
+                if (!disableMediaPipeLocal) {
+                    ArCoreMediaPipeLipTracker(
+                        context = applicationContext,
+                        onError = { message -> Log.w(TAG, message) },
+                        forceCpuDelegate = forceMediaPipeCpu,
+                    ).also { tracker ->
+                        tracker.initialize()
+                        mediaPipeTracker = tracker
+                        glRenderer?.bindMediaPipeTracker(tracker)
+                        vulkanRenderer?.bindMediaPipeTracker(tracker)
+                    }
                 }
             }
 

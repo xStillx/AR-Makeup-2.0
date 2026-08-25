@@ -99,6 +99,14 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
                         EXTRA_VISUALIZE_VULKAN_LIP_DEPTH,
                         intent.getBooleanExtra(EXTRA_VISUALIZE_VULKAN_LIP_DEPTH, false),
                     )
+                    putExtra(
+                        EXTRA_FORCE_ARCORE_MEDIAPIPE_CPU,
+                        intent.getBooleanExtra(EXTRA_FORCE_ARCORE_MEDIAPIPE_CPU, false),
+                    )
+                    putExtra(
+                        EXTRA_DISABLE_ARCORE_MEDIAPIPE_LOCAL,
+                        intent.getBooleanExtra(EXTRA_DISABLE_ARCORE_MEDIAPIPE_LOCAL, false),
+                    )
                 },
             )
             finish()
@@ -574,6 +582,10 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerTracker.Listener {
             "com.example.armakeup.extra.VISUALIZE_VULKAN_FACE_DEPTH"
         const val EXTRA_VISUALIZE_VULKAN_LIP_DEPTH =
             "com.example.armakeup.extra.VISUALIZE_VULKAN_LIP_DEPTH"
+        const val EXTRA_FORCE_ARCORE_MEDIAPIPE_CPU =
+            "com.example.armakeup.extra.FORCE_ARCORE_MEDIAPIPE_CPU"
+        const val EXTRA_DISABLE_ARCORE_MEDIAPIPE_LOCAL =
+            "com.example.armakeup.extra.DISABLE_ARCORE_MEDIAPIPE_LOCAL"
         const val DEFAULT_VULKAN_LIP_DEPTH_BIAS = 0f
         private const val MIN_CAMERA_FPS = 30
         private const val MAX_CAMERA_FPS = 60

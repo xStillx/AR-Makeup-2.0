@@ -150,6 +150,77 @@ class HybridFullFaceStateComposerTest {
     }
 
     @Test
+    fun `corner residual policy keeps lip centers on current ARCore geometry`() {
+        val cornerTopology = FaceTopologyDescriptor("corner-residual", 1, 12)
+        val cornerComposer = HybridFullFaceStateComposer(
+            stableAnchorIndices = intArrayOf(0, 1, 2, 3),
+            outerLipIndices = intArrayOf(4, 5, 6, 7),
+            innerLipIndices = intArrayOf(8, 9, 10, 11),
+            mouthAperture = FaceApertureTopology(
+                firstCornerIndex = 4,
+                secondCornerIndex = 6,
+                upperIndex = 5,
+                lowerIndex = 7,
+            ),
+            upperInnerLipIndex = 5,
+            lowerInnerLipIndex = 7,
+            maximumGlobalAffineResidual = 0.02f,
+            mouthLocalGeometryPolicy = MouthLocalGeometryPolicy.CORNER_RESIDUAL,
+        )
+        val neutral = floatArrayOf(
+            0.1f, 0.1f, 0f,
+            0.9f, 0.1f, 0f,
+            0.1f, 0.9f, 0f,
+            0.9f, 0.9f, 0f,
+            0.35f, 0.50f, 0f,
+            0.50f, 0.47f, 0f,
+            0.65f, 0.50f, 0f,
+            0.50f, 0.53f, 0f,
+            0.38f, 0.50f, 0f,
+            0.50f, 0.49f, 0f,
+            0.62f, 0.50f, 0f,
+            0.50f, 0.51f, 0f,
+        )
+        val expression = neutral.copyOf().also { coordinates ->
+            coordinates[4 * 3] += 0.03f
+            coordinates[4 * 3 + 1] -= 0.01f
+            coordinates[6 * 3] += 0.03f
+            coordinates[6 * 3 + 1] += 0.01f
+        }
+        val currentGlobal = mapCoordinates(cornerTopology, neutral)
+        val expectedLocal = mapCoordinates(cornerTopology, expression)
+        val global = observationForTopology(
+            topology = cornerTopology,
+            displayCoordinates = currentGlobal,
+            sensorTimestampNs = 20L,
+            role = FaceObservationRole.GLOBAL_POSE,
+        )
+        val local = observationForTopology(
+            topology = cornerTopology,
+            displayCoordinates = expression,
+            sensorTimestampNs = 10L,
+            role = FaceObservationRole.LOCAL_DEFORMATION,
+        )
+
+        val state = cornerComposer.compose(global, local, renderTimestampNs = 21L)!!
+        val outer = state.region(FaceRegion.LIPS_OUTER)!!
+        val inner = state.region(FaceRegion.LIPS_INNER)!!
+
+        assertEquals(expectedLocal[4 * 3], outer.x(0), 1e-5f)
+        assertEquals(expectedLocal[4 * 3 + 1], outer.y(0), 1e-5f)
+        assertEquals(expectedLocal[6 * 3], outer.x(2), 1e-5f)
+        assertEquals(expectedLocal[6 * 3 + 1], outer.y(2), 1e-5f)
+        assertEquals(currentGlobal[5 * 3], outer.x(1), 1e-5f)
+        assertEquals(currentGlobal[5 * 3 + 1], outer.y(1), 1e-5f)
+        assertEquals(currentGlobal[7 * 3], outer.x(3), 1e-5f)
+        assertEquals(currentGlobal[7 * 3 + 1], outer.y(3), 1e-5f)
+        assertTrue(inner.x(0) > currentGlobal[8 * 3])
+        assertEquals(currentGlobal[9 * 3], inner.x(1), 1e-5f)
+        assertTrue(inner.x(2) > currentGlobal[10 * 3])
+        assertEquals(currentGlobal[11 * 3], inner.x(3), 1e-5f)
+    }
+
+    @Test
     fun `backend implementations can be replaced without changing composer`() {
         val localCoordinates = sourceCoordinates()
         val global = globalObservation(mapCoordinates(localCoordinates), sensorTimestampNs = 10L)

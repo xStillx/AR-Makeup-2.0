@@ -12,6 +12,7 @@ import kotlin.math.hypot
  */
 internal class FaceAnchoredLipContourStabilizer(
     private val localCutoffHz: Float = DEFAULT_LOCAL_CUTOFF_HZ,
+    private val motionCutoffHz: Float = localCutoffHz,
     private val maximumFrameGapMs: Long = DEFAULT_MAXIMUM_FRAME_GAP_MS,
 ) {
     private var previousAnchors = FloatArray(0)
@@ -21,6 +22,7 @@ internal class FaceAnchoredLipContourStabilizer(
 
     init {
         require(localCutoffHz > 0f)
+        require(motionCutoffHz >= localCutoffHz)
         require(maximumFrameGapMs > 0L)
     }
 
@@ -68,7 +70,20 @@ internal class FaceAnchoredLipContourStabilizer(
             return
         }
         val elapsedSeconds = elapsedMs / MILLIS_PER_SECOND
-        val alpha = smoothingAlpha(localCutoffHz, elapsedSeconds)
+        val motion = normalizedLocalMotion(
+            transform,
+            stabilizedOuter,
+            outerContour,
+            stabilizedInner,
+            innerContour,
+        )
+        val motionWeight = smoothStep(
+            LOCAL_MOTION_START_RATIO,
+            LOCAL_MOTION_FULL_RATIO,
+            motion,
+        )
+        val adaptiveCutoff = localCutoffHz + motionWeight * (motionCutoffHz - localCutoffHz)
+        val alpha = smoothingAlpha(adaptiveCutoff, elapsedSeconds)
         transportAndBlend(transform, stabilizedOuter, outerContour, alpha)
         transportAndBlend(transform, stabilizedInner, innerContour, alpha)
         outerContour.indices.forEach { outerContour[it] = stabilizedOuter[it] }
@@ -115,6 +130,44 @@ internal class FaceAnchoredLipContourStabilizer(
     private fun smoothingAlpha(cutoffHz: Float, elapsedSeconds: Float): Float {
         val timeConstant = 1f / (TWO_PI * cutoffHz)
         return 1f / (1f + timeConstant / elapsedSeconds)
+    }
+
+    private fun normalizedLocalMotion(
+        transform: SimilarityTransform,
+        previousOuter: FloatArray,
+        measuredOuter: FloatArray,
+        previousInner: FloatArray,
+        measuredInner: FloatArray,
+    ): Float {
+        val pointCount = (previousOuter.size + previousInner.size) / POINT_COMPONENTS
+        if (pointCount == 0) return 0f
+        var squaredResidual = 0f
+        fun accumulate(previous: FloatArray, measured: FloatArray) {
+            var index = 0
+            while (index < previous.size) {
+                val deltaX = measured[index] - transform.mapX(previous[index], previous[index + 1])
+                val deltaY = measured[index + 1] -
+                    transform.mapY(previous[index], previous[index + 1])
+                squaredResidual += deltaX * deltaX + deltaY * deltaY
+                index += POINT_COMPONENTS
+            }
+        }
+        accumulate(previousOuter, measuredOuter)
+        accumulate(previousInner, measuredInner)
+        val oppositeCorner = measuredOuter.size / (POINT_COMPONENTS * 2)
+        val oppositeOffset = oppositeCorner * POINT_COMPONENTS
+        val mouthWidth = hypot(
+            measuredOuter[oppositeOffset] - measuredOuter[0],
+            measuredOuter[oppositeOffset + 1] - measuredOuter[1],
+        )
+        if (!mouthWidth.isFinite() || mouthWidth <= MINIMUM_MOUTH_WIDTH) return 0f
+        return kotlin.math.sqrt(squaredResidual / pointCount) / mouthWidth
+    }
+
+    private fun smoothStep(edge0: Float, edge1: Float, value: Float): Float {
+        if (!value.isFinite()) return 0f
+        val normalized = ((value - edge0) / (edge1 - edge0)).coerceIn(0f, 1f)
+        return normalized * normalized * (3f - 2f * normalized)
     }
 
     private fun isValid(points: FloatArray, minimumPointCount: Int): Boolean =
@@ -201,6 +254,9 @@ internal class FaceAnchoredLipContourStabilizer(
 
     companion object {
         private const val DEFAULT_LOCAL_CUTOFF_HZ = 8f
+        private const val LOCAL_MOTION_START_RATIO = 0.012f
+        private const val LOCAL_MOTION_FULL_RATIO = 0.04f
+        private const val MINIMUM_MOUTH_WIDTH = 1e-5f
         private const val DEFAULT_MAXIMUM_FRAME_GAP_MS = 100L
         private const val MINIMUM_FRAME_SCALE = 0.80f
         private const val MAXIMUM_FRAME_SCALE = 1.25f
