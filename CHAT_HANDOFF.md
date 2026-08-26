@@ -1,6 +1,6 @@
 # ARMakeup — компактный контекст для нового чата
 
-Актуально на 2026-08-21. Полный источник истины — `PROJECT_CONTEXT.md`; правила репозитория — `AGENTS.md`.
+Актуально на 2026-08-26. Полный источник истины — `PROJECT_CONTEXT.md`; правила репозитория — `AGENTS.md`.
 
 ## Цель и приоритет
 
@@ -10,33 +10,33 @@ Native Android-приложение виртуальной примерки ма
 
 Принятый детальный порядок дальнейшей разработки находится в `FULL_FACE_ROADMAP.md`. Этапы: `FF0` сохранить V6.3 experimental checkpoint; `FF1` разложить end-to-end latency; `FF2` записывать MediaPipe facial transformation matrix в shadow-режиме; `FF3` ввести `FaceTrackingBackend`/`FaceObservation`/`FullFaceRenderState`; `FF4` построить единый visual-inertial 3D tracker с late reprojection; `FF5` перейти к видимому canonical 3D face renderer; `FF6A` собрать бесплатный baseline без обучения (3D/product masks/Vulkan refinement и optional Apache Selfie Multiclass только для broad skin/hair/background); `FF6B` обучать собственный beauty parser в бесплатном cloud runtime только если FF6A недостаточно; `FF7` реализовать продукты поверх общего state; `FF8` только по результатам benchmark решить вопрос собственной landmark/mesh model.
 
-## Последний принятый checkpoint — ARCore + MediaPipe hybrid
+## Основной tracking baseline — ARCore + MediaPipe timestamped anchor
 
-2026-08-21 пользователь остановил работу на isolated ARCore Augmented Faces proof. ARCore полностью владеет front-camera session, текущей global face pose и 468-point mesh; MediaPipe получает latest-only `640×480 YUV_420_888` CPU image из той же session, после JNI YUV420→RGBA восстанавливает 40-point outer/inner lip contour. Последний MediaPipe contour переносится в текущую ARCore-проекцию 2D affine fit по восьми общим eye/nose/cheek anchors. Magenta — чистый ARCore anchor, cyan — hybrid lip shape.
+2026-08-26 пользователь принял текущее решение как лучшее и назначил его основой дальнейшей разработки. ARCore полностью владеет front-camera session, camera timeline и current global face pose; MediaPipe получает latest-only `640×480 YUV_420_888` CPU image той же session и восстанавливает 40-point outer/inner lip contour. Rotation, front-camera mirror и `FILL_CENTER` совпадают с camera transform. `TimestampedLipAnchorTransport` переносит измеренный MediaPipe-контур translation-only между ARCore mouth anchor на measurement timestamp и anchor текущего render frame; face-wide affine/projective, predictor и gyro в видимом пути не используются.
 
-Пользовательский verdict: при резких движениях головы anchor не слетает; при резких движениях устройства anchor не слетает; мелкую дрожь определить не удалось; cyan contour визуально совпадает с губами. Ограничение: одна ARCore-точка не повторяет локальное боковое смещение/открытие губ, что ожидаемо и подтверждает разделение global pose от local MediaPipe deformation. Warm SM-G990B: ARCore `58–60 FPS`, MediaPipe `27–30 FPS`, conversion `2–3 ms` обычно, ML `22–27 ms`, observation age около `67 ms`, affine fit обычно `2–4 px`. Gate: `154` tests, lint, debug APK, C++ всех четырёх ABI; exact принятый APK запущен на устройстве.
+Пользовательский verdict: резкие движения головы/устройства не вызывают прежних слётов, открытие/закрытие рта успевает, текущая отрисовка визуально лучше всех проверенных вариантов. Диагностические magenta/cyan/yellow/green точки выключены; видна только red tessellated lip mask. Рендер запрашивается с целевыми 60 FPS и даёт примерно `56–60`, MediaPipe — `26–30 FPS`, conversion обычно `2–5 ms`, ML примерно `20–34 ms`, age обычно `42–85 ms`. При pitch `>=24°` три кадра маска скрывается и возвращается после трёх кадров `<=18°`; device-лог подтвердил гистерезис без мигания. Gate перед основным коммитом: `166` unit-тестов и debug APK успешны.
 
-Proof пока debug-only и использует отдельную OpenGL ES сцену без Vulkan production compositor, matte/satin/gloss, full-face state или fallback. Запуск: debug `MainActivity` с extra `com.example.armakeup.extra.ENABLE_ARCORE_FACE_ANCHOR_PROOF=true`. Следующее действие после паузы — сначала `FaceObservation`/`FullFaceRenderState`, затем перенос ARCore global pose + MediaPipe local deformation в единый Vulkan timeline; не продолжать tuning старого predictor/gyro до этого архитектурного slice.
+`ArCoreFaceAnchorActivity` назначена обычным `MAIN/LAUNCHER`, специальный intent-extra больше не нужен. Экран пока использует OpenGL ES camera background и диагностический red material без production Vulkan compositor, matte/satin/gloss, full-face state или fallback. Следующий этап — `FaceObservation`/`FullFaceRenderState`, затем перенос неизменённой tracking-семантики в единый Vulkan timeline; старый predictor/gyro не настраивать без нового измеримого основания.
 
 ## Репозиторий и состояние
 
 - Путь: `C:\Users\User\AndroidStudioProjects\ARMakeup`.
-- Ветка: `master`; актуальная вершина после фиксации этого набора изменений — принятый ARCore + MediaPipe hybrid checkpoint. Исторические точки отката: `cc82370` / `tracking-v6.2-stable-2026-08-17`, `d4636ac` / `tracking-v6.2-fast-motion-2026-08-17`, `ab8796a` / `material-temporal-v1-candidate-2026-08-17`, `dd095f7` / `tracking-v6.3-gyro-experimental-2026-08-17`; FF1/FF2/native commits `0554924`, `19a2280`, `3419063`, `7bd498f`, `6be330f`, `9bc3efb`, `2fb7cd7`, `082d88e`, `be35764`, `1406c24`. Обычный запуск всё ещё использует Filament; ARCore hybrid включается отдельным debug-extra.
+- Ветка: `codex/arcore-point-2d-baseline`; predecessor accepted proof — `782778c`. Исторические точки отката: `cc82370` / `tracking-v6.2-stable-2026-08-17`, `d4636ac`, `ab8796a`, `dd095f7`; FF1/FF2/native commits `0554924`, `19a2280`, `3419063`, `7bd498f`, `6be330f`, `9bc3efb`, `2fb7cd7`, `082d88e`, `be35764`, `1406c24`. Обычный запуск теперь открывает ARCore hybrid; legacy CameraX/Filament остаётся внутренним rollback.
 - Основные коммиты: `cc82370 [V6.2]`, `cd1a560 [UpdateContext]`, `8d48b46 [V6]`, `4f8039b [V5]`, `3d3572e [V4]`, `395d3f3 [V3]`.
 - Kotlin, XML/View UI, один модуль `:app`; `minSdk 24`, `targetSdk/compileSdk 37`.
-- Последняя локальная проверка: `154` unit-теста, 0 failures/errors, lint и debug APK успешно; native код/SPIR-V собираются для `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`. Exact принятый ARCore hybrid APK запущен на SM-G990B. Production Vulkan/material cutover не начат.
+- Последняя локальная проверка: `166` unit-тестов, 0 failures/errors, lint и debug APK успешно; native код/SPIR-V собираются для `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`. Exact launcher APK установлен на SM-G990B; обычный launch и Home/resume прошли без crash/black screen. Production Vulkan/material cutover не начат.
 
 ## Текущий pipeline
 
-- Обычный product path: CameraX 1.6.1 Preview/`ImageAnalysis`, MediaPipe Face Landmarker 1.0.0 и Filament 1.74.0. Он сохранён как legacy/default и не определяет принятый ARCore proof.
-- ARCore proof: ARCore 1.54.0 владеет фронтальной камерой и отдельной OpenGL ES сценой; MediaPipe использует latest-only analysis image той же ARCore session. Второй CameraX owner не создаётся.
+- Основной path: ARCore 1.54.0 владеет фронтальной камерой и OpenGL ES сценой; MediaPipe Face Landmarker 1.0.0 использует latest-only analysis image той же ARCore session. Второй CameraX owner не создаётся.
+- Legacy rollback: CameraX 1.6.1 + MediaPipe + Filament 1.74.0/Vulkan experiments сохранены в `MainActivity`, но больше не являются launcher/default.
 - Следующий архитектурный слой должен скрыть обе библиотеки за `FaceTrackingBackend`/`FaceObservation`, чтобы Vulkan renderer и makeup materials зависели только от единого render state.
 - Native Vulkan V3 напрямую импортирует camera `AHardwareBuffer`, использует YCbCr sampling и fences без CPU-копии. V4 luma pyramid + pyramidal LK optical flow + similarity fit остаётся невидимым и в V6.2 вообще не запускается вне активной telemetry-записи.
 - Ориентация, front-camera mirror и lip/camera alignment на SM-G990B исправлены и покрыты тестами. Не менять display/camera transforms без отдельной regression-проверки.
 
 ## Состояние трекера
 
-- Текущий `LandmarkMotionPredictor` — принятый fast-motion вариант поверх V6.2 baseline. Все stable states/robust fit/quality response сохранены. Только при быстром согласованном high-quality motion alignment horizon плавно растёт `45→85 ms`; первый impulse, stop/reversal и poor/unknown fit остаются на `45 ms`. Пользователь подтвердил улучшение без возврата прежних улётов, но небольшой sharp-motion lag ещё виден. Точки отката: `tracking-v6.2-fast-motion-2026-08-17` и более консервативный `cc82370` / `tracking-v6.2-stable-2026-08-17`.
+- Основной launcher не использует `LandmarkMotionPredictor` или gyro correction. Глобальное движение берётся из timestamped ARCore mouth anchor, локальная форма — непосредственно из последнего MediaPipe contour. Старые predictor/gyro реализации сохранены только в legacy path/history и не должны снова включаться без controlled A/B против принятого baseline.
 - V4 optical flow раньше применялся к видимой mesh и создавал сильное дрожание: accepted/rejected fits чередовались почти покадрово, переключая координаты между flow и predictor.
 - Это исправлено: `TemporalLandmarkRefiner.visibleApplicationEnabled` по умолчанию `false`, в логах должно быть `temporalFlowVisible=false`. Flow не имеет права двигать видимую mesh, а его luma/flow/fit compute выполняется только во время диагностической записи.
 - Тег `tracking-stable-2026-08-11` — историческая точка сравнения, а не доказательство текущей production-стабильности.
@@ -152,11 +152,11 @@ V5 реализует reconstructed lip normals, camera-conditioned lighting и 
 - `app/src/main/java/com/example/armakeup/render/FilamentMakeupRenderer.kt` — видимая lip mesh, camera bridge и flow integration.
 - `app/src/main/java/com/example/armakeup/render/NativeVulkanVisibleRenderer.kt` и `app/src/main/cpp/vulkan/VulkanDiagnosticRuntime.cpp` — debug exclusive-surface Vulkan camera/lip proof и actual-present feedback.
 - `app/src/main/java/com/example/armakeup/render/NativeVulkanRenderMotionCompensator.kt`, `FaceAnchoredLipContourStabilizer.kt` — текущий native-only residual motion/local-shape visual candidate.
-- `app/src/main/java/com/example/armakeup/arcore/ArCoreFaceAnchorActivity.kt`, `ArCoreFaceAnchorRenderer.kt` — принятая isolated ARCore camera/pose scene и diagnostic anchor/hybrid contour.
-- `app/src/main/java/com/example/armakeup/arcore/ArCoreMediaPipeLipTracker.kt`, `FaceLocalAffineTransform.kt`, `NativeYuv420Converter.kt` и `app/src/main/cpp/image/Yuv420ToRgba.cpp` — latest-only MediaPipe local-shape path, current-pose affine mapping и off-render-thread conversion.
+- `app/src/main/java/com/example/armakeup/arcore/ArCoreFaceAnchorActivity.kt`, `ArCoreFaceAnchorRenderer.kt` — основной launcher, 60-FPS render scheduler, ARCore camera/pose scene и red tessellated lip mask.
+- `ArCoreMediaPipeLipTracker.kt`, `TimestampedLipAnchorTransport.kt`, `HeadDownLipVisibilityGate.kt`, `NativeYuv420Converter.kt` и `app/src/main/cpp/image/Yuv420ToRgba.cpp` — accepted latest-only local shape, timestamped anchor transport, pitch visibility gate и off-render-thread conversion. `FaceLocalAffineTransform` остаётся историческим кодом, но не участвует в основном рендере.
 - `docs/adr/001-native-vulkan-visible-proof.md` — ownership/rollback/timing решение текущего FF1 slice.
 - `app/src/main/java/com/example/armakeup/makeup/LipstickMaterialProfile.kt` — продуктовые render-профили и временный `TRACKING_TEST`.
 - `app/src/main/java/com/example/armakeup/render/FilamentMaterialFactory.kt` — lipstick shader, включая диагностические coverage/luminance uniforms.
 - `app/src/test/java/com/example/armakeup/tracking/` — tracking regression tests.
 
-Начни новый чат с изучения `AGENTS.md`, `PROJECT_CONTEXT.md`, `FULL_FACE_ROADMAP.md`, `LICENSE_COMPLIANCE.md`, ADR 001 и перечисленных ARCore/tracking/render-файлов. Точки отката: baseline `cc82370`, fast-motion `d4636ac`, material candidate `ab8796a`, V6.3 experimental `dd095f7`; FF1/FF2/native checkpoints `0554924`, `19a2280`, `3419063`, `7bd498f`, `6be330f`, `9bc3efb`, `2fb7cd7`, `082d88e`, `be35764`, `1406c24`. Текущая точка остановки — принятый debug ARCore + MediaPipe hybrid из верхнего раздела. При продолжении сначала создать model-independent full-face contract, затем переносить гибрид в production Vulkan/material path; старый predictor/gyro не настраивать дальше без нового измеримого основания.
+Начни новый чат с изучения `AGENTS.md`, `PROJECT_CONTEXT.md`, `FULL_FACE_ROADMAP.md`, `LICENSE_COMPLIANCE.md` и перечисленных ARCore/tracking/render-файлов. Текущая основа — принятый 2026-08-26 ARCore + MediaPipe timestamped-anchor launcher baseline из верхнего раздела; predecessor `782778c`. При продолжении сначала создать model-independent full-face contract, затем переносить гибрид в production Vulkan/material path без визуальной регрессии; старый predictor/gyro не настраивать дальше без нового измеримого основания.

@@ -42,6 +42,9 @@ internal class ArCoreMediaPipeLipTracker(
     private var activeSensorTimestampNs = 0L
     private var activeSubmittedAtNs = 0L
     private var activeConversionDurationMs = 0f
+    private var activeInputWidth = 0
+    private var activeInputHeight = 0
+    private var activeRotationDegrees = 0
     private var reusableInferenceBuffer: ByteBuffer? = null
     private var inferenceWidth = 0
     private var inferenceHeight = 0
@@ -130,6 +133,10 @@ internal class ArCoreMediaPipeLipTracker(
             return
         }
 
+        val rotated = rotationDegrees % HALF_ROTATION != 0
+        val inputWidth = if (rotated) inferenceHeight else inferenceWidth
+        val inputHeight = if (rotated) inferenceWidth else inferenceHeight
+
         synchronized(lock) {
             if (closed) {
                 inputImage.close()
@@ -144,6 +151,9 @@ internal class ArCoreMediaPipeLipTracker(
             activeSensorTimestampNs = sensorTimestampNs
             activeSubmittedAtNs = SystemClock.elapsedRealtimeNanos()
             activeConversionDurationMs = conversionDurationMs
+            activeInputWidth = inputWidth
+            activeInputHeight = inputHeight
+            activeRotationDegrees = rotationDegrees
         }
         val processingOptions = ImageProcessingOptions.builder()
             .setRotationDegrees(rotationDegrees)
@@ -208,10 +218,16 @@ internal class ArCoreMediaPipeLipTracker(
         val sensorTimestampNs: Long
         val submittedAtNs: Long
         val conversionDurationMs: Float
+        val inputWidth: Int
+        val inputHeight: Int
+        val rotationDegrees: Int
         synchronized(lock) {
             sensorTimestampNs = activeSensorTimestampNs
             submittedAtNs = activeSubmittedAtNs
             conversionDurationMs = activeConversionDurationMs
+            inputWidth = activeInputWidth
+            inputHeight = activeInputHeight
+            rotationDegrees = activeRotationDegrees
         }
         val landmarks = result.faceLandmarks().firstOrNull()
         if (landmarks != null) {
@@ -242,6 +258,9 @@ internal class ArCoreMediaPipeLipTracker(
                         NANOS_PER_MILLISECOND.toFloat(),
                     conversionDurationMs = conversionDurationMs,
                     smoothedFps = smoothedFps,
+                    inputWidth = inputWidth,
+                    inputHeight = inputHeight,
+                    rotationDegrees = rotationDegrees,
                 ),
             )
         }
@@ -254,6 +273,9 @@ internal class ArCoreMediaPipeLipTracker(
             activeSensorTimestampNs = 0L
             activeSubmittedAtNs = 0L
             activeConversionDurationMs = 0f
+            activeInputWidth = 0
+            activeInputHeight = 0
+            activeRotationDegrees = 0
         }
         inputImage.close()
         busy.set(false)
@@ -296,6 +318,9 @@ internal class ArCoreMediaPipeLipTracker(
         val inferenceDurationMs: Float,
         val conversionDurationMs: Float,
         val smoothedFps: Float,
+        val inputWidth: Int,
+        val inputHeight: Int,
+        val rotationDegrees: Int,
     )
 
     private companion object {
@@ -307,5 +332,6 @@ internal class ArCoreMediaPipeLipTracker(
         const val NANOS_PER_MILLISECOND = 1_000_000L
         const val NANOS_PER_SECOND = 1_000_000_000L
         const val FPS_RESPONSE = 0.2f
+        const val HALF_ROTATION = 180
     }
 }

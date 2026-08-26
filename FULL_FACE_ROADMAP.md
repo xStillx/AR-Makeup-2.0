@@ -2,7 +2,7 @@
 
 Статус: принят 2026-08-17.
 
-Текущий прогресс 2026-08-21:
+Текущий прогресс 2026-08-26:
 
 - FF0 выполнен: V6.3 сохранён commit `dd095f7` и тегом `tracking-v6.3-gyro-experimental-2026-08-17` после полного unit/lint/assemble gate. Это experimental, не stable.
 - Первый shadow slice FF1/FF2 реализован поверх checkpoint: `.arv6` v6 разделяет tracker latency на camera→analysis, analysis→submit, MediaPipe inference и callback queue, отдельно пишет RGBA/quality/result-processing CPU duration.
@@ -23,9 +23,9 @@
 - Commit `082d88e` поднимает `.arv6` до v11 и записывает для native exact displayed contours/predictor/gyro state, backend, `presentID` и сопоставленный actual-present. Формат читает v1–v10; локально пройдены `137` tests, lint, APK и четыре ABI. Первый functional run дал `907` renders, `dropped=0` и actual-present coverage `0.99559`; вариативность SurfaceFlinger queue `30→47 ms` запретила прежний вывод о гарантированно более короткой native queue и привела к exact cold repeat следующего checkpoint.
 - Commit `be35764` добавляет `MAILBOX` low-latency candidate, exact actual-presentation decomposition и offline `.arv6` analyzer. Exact cold FIFO показал submit→actual `63.48/64.45 ms`; `MAILBOX` снял один refresh до `46.80/47.73 ms`, сохранил actual interval `16.688/16.763 ms`, presentation coverage `0.9945`, `dropped=0` и thermal `0`. Драйвер Adreno при surface minimum `4` всё равно выделяет `5` images, поэтому выигрыш даёт замена pending кадра, а не сокращение фактического buffer count.
 - Cold numerical stationary/head-motion/phone-motion A/B завершён. Clean stationary native/Filament: camera sensor→render-vsync `77.55/102.61 ms`, displayed jitter `1.70/3.78 px RMS`, SurfaceFlinger desired→actual `46.89/44.20 ms`; Filament actual не связывается с exact submit через Java API. Head-motion lag одинаков `33 ms`, overshoot `0.008375/0.008626`; phone-motion lag `0/0 ms`, overshoot `0.000687/0.003843`. Во всех принятых sidecar `0` intervals `>25 ms`; повторные движения имели разную силу/pose quality, а native использует `TRACKING_TEST` вместо production `SATIN`.
-- Последующие predictor/gyro/flow A/B не устранили одновременно head-motion lag, phone-motion slippage и jitter. Направление изменено после isolated ARCore Augmented Faces proof: ARCore владеет front-camera session и current global face pose, MediaPipe получает latest-only image той же session и восстанавливает local lip shape.
-- Device visual acceptance на SM-G990B пройдена для ключевой гипотезы: чистый ARCore anchor не слетает при резких движениях головы и устройства, hybrid MediaPipe contour совпадает с губами. Локальная мимика одной ARCore-точкой не описывается, поэтому принят именно hybrid global-pose/local-deformation design. Proof остаётся debug-only OpenGL ES; production Vulkan/material cutover, full-face contract и compatibility fallback не выполнены.
-- Финальный локальный gate текущего checkpoint: `154` unit-теста, `0` failures/errors, lint, debug APK и четыре ABI. Warm runtime: ARCore `58–60 FPS`, MediaPipe `27–30 FPS`, YUV→RGBA обычно `2–3 ms`, ML `22–27 ms`, latest observation age около `67 ms`, affine fit обычно `2–4 px`.
+- Последующие predictor/gyro/flow и face-wide affine/projective A/B не устранили одновременно head-motion lag, phone-motion slippage, jitter и искажение локального контура. Принято другое разделение ответственности: ARCore владеет front-camera session, camera timeline и current global mouth anchor, MediaPipe получает latest-only image той же session и восстанавливает local 2D lip shape.
+- Device visual acceptance на SM-G990B пройдена для timestamped translation transport: ARCore anchor не слетает при резких движениях головы/устройства, а MediaPipe сохраняет локальную мимику. Диагностические точки выключены; при pitch `24°` маска скрывается с трёхкадровым подтверждением и возвращается ниже `18°`. Эта Activity назначена обычным launcher и является основным tracking baseline; legacy CameraX/Filament path сохранён как rollback.
+- Финальный локальный gate принятого checkpoint перед коммитом: `166` unit-тестов, `0` failures/errors и debug APK. Warm runtime: ARCore render updates примерно `56–60 FPS`, MediaPipe `26–30 FPS`, YUV→RGBA обычно `2–5 ms`, ML примерно `20–34 ms`, latest observation age обычно `42–85 ms`. Production Vulkan/material cutover, full-face contract, compatibility fallback и multi-device thermal gate ещё не выполнены.
 
 Этот файл задаёт порядок дальнейшей разработки после V6.3. Полный исторический и технический контекст находится в `PROJECT_CONTEXT.md`; компактный перенос между чатами — в `CHAT_HANDOFF.md`.
 
@@ -77,7 +77,7 @@ MediaPipe 3D landmarks + canonical face transform
 
 Критерий завершения: для stationary, head-motion и phone-motion сценариев известен p50/p95 каждого участка, а решение о собственной landmark model опирается на долю inference в общей задержке, а не на capture-to-result целиком.
 
-Текущий status 2026-08-21: latency decomposition, native/Filament present matrix и predictor/gyro/flow эксперименты завершены как исследовательская база, но не дали приемлемого global attachment. Isolated ARCore + MediaPipe proof визуально подтвердил новый global-pose/local-deformation путь. FF1 считается достаточным для выбора следующей архитектуры, но не production-complete: текущая сцена использует debug OpenGL ES и diagnostic contour. Следующий gate начинается с FF3 contract и только затем переносит принятый гибрид в Vulkan/material path.
+Текущий status 2026-08-26: latency decomposition, native/Filament present matrix и predictor/gyro/flow эксперименты завершены как исследовательская база. ARCore + MediaPipe timestamped-anchor baseline визуально принят и назначен основным launcher, но ещё не production-complete: текущая сцена использует OpenGL ES camera background и диагностический red material. Следующий gate начинается с FF3 contract и только затем переносит неизменённую принятую tracking-семантику в Vulkan/material path.
 
 ## FF2 — MediaPipe 3D transform в shadow-режиме
 
@@ -118,7 +118,7 @@ MediaPipe-specific классы не проходят в Vulkan renderer или 
 
 Критерий завершения: MediaPipe backend можно заменить test/replay backend без изменений renderer; все старые tracking regressions проходят.
 
-Статус 2026-08-21: интерфейсы ещё не введены, но ARCore proof подтвердил обязательность этой границы. Контракт должен поддерживать одновременно ARCore global pose/mesh и MediaPipe local observations из одного camera timeline, а также fallback backend для устройств без ARCore.
+Статус 2026-08-26: интерфейсы ещё не введены, но принятый launcher baseline подтвердил обязательность этой границы. Контракт должен поддерживать одновременно ARCore global pose/mesh и MediaPipe local observations из одного camera timeline, а также fallback backend для устройств без ARCore, не меняя визуально принятую timestamped-anchor семантику.
 
 ## FF4 — единый visual-inertial 3D tracker
 
@@ -136,7 +136,7 @@ MediaPipe-specific классы не проходят в Vulkan renderer или 
 
 Критерий завершения: controlled A/B показывает уменьшение head-motion и phone-motion lag без возврата stationary jitter, forward overshoot и stop/reacquisition jump.
 
-Статус 2026-08-21: vertical proof глобального attachment пройден без отдельного IMU/flow fusion — ARCore anchor не слетает в пользовательских резких head/phone сценариях. Production FF4 всё ещё должен перенести это свойство в общий render state, сохранить локальную мимику MediaPipe и подтвердить jitter/thermal/dropout/fallback на полном makeup renderer.
+Статус 2026-08-26: основной launcher baseline проходит пользовательские резкие head/phone сценарии без отдельного IMU/flow fusion; predictor и gyro не входят в видимый путь. Production FF4 должен перенести timestamped ARCore anchor transport в общий render state без визуальной регрессии, сохранить локальную мимику MediaPipe и подтвердить jitter/thermal/dropout/fallback на полном makeup renderer.
 
 ## FF5 — видимый canonical 3D face renderer
 
@@ -229,11 +229,11 @@ Parsing выполняется ориентировочно 15–30 раз/с п
 
 ## Следующее действие
 
-Работа намеренно остановлена на принятом debug ARCore + MediaPipe hybrid checkpoint.
+Основой дальнейшей работы является принятый 2026-08-26 ARCore + MediaPipe timestamped-anchor launcher baseline.
 
 1. При возобновлении сначала ввести model-independent `FaceTrackingBackend` / `FaceObservation` / `FullFaceRenderState`; не переносить ARCore или MediaPipe classes напрямую в makeup material API.
 2. Сохранить единственного camera owner: ARCore выдаёт camera-synchronized global pose/mesh, MediaPipe обрабатывает только latest analysis image той же session и обновляет local deformation.
-3. Перенести hybrid state в production Vulkan camera/render timeline и только затем подключить matte/satin/gloss и полный color/HDR contract. Diagnostic OpenGL ES proof оставить как точку сравнения и отката.
+3. Перенести hybrid state в production Vulkan camera/render timeline и только затем подключить matte/satin/gloss и полный color/HDR contract. Текущий OpenGL ES launcher baseline оставить как точку визуального сравнения и отката.
 4. Расширить contract с губ до canonical full-face surface для blush, eyeshadow и eyeliner; отдельно реализовать visibility/occlusion и local mouth/eyelid deformation.
 5. Провести controlled stationary/head/phone/mouth/dropout/weak-light/thermal A/B, проверить поддержку ARCore на целевых устройствах и определить fallback для несовместимых устройств.
 6. Перед release выполнить ARCore Terms/privacy/user-notice gate из `LICENSE_COMPLIANCE.md`; IMU/optical flow добавлять только при измеримом residual после production hybrid cutover.
