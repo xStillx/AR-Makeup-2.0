@@ -8,6 +8,9 @@ import android.util.Log
 import com.example.armakeup.makeup.LipLandmarkTopology
 import com.example.armakeup.makeup.LipMeshTessellator
 import com.example.armakeup.makeup.ReferenceMatteLipstickProfile
+import com.example.armakeup.makeup.LipstickFinish
+import com.example.armakeup.makeup.LipstickPigmentPalette
+import com.example.armakeup.makeup.ReferenceLipstickRenderProfiles
 import com.example.armakeup.tracking.CanonicalFaceTransform
 import com.example.armakeup.tracking.FillCenterTransform
 import com.example.armakeup.tracking.NormalizedImageTransform
@@ -62,7 +65,9 @@ internal class ArCoreFaceAnchorRenderer(
     private val lipTessellator = LipMeshTessellator()
     private val outerContourPoints = FloatArray(LipLandmarkTopology.outerContour.size * 2)
     private val innerContourPoints = FloatArray(LipLandmarkTopology.innerContour.size * 2)
-    private val tessellatedLipVertices = directFloatBuffer(lipTessellator.vertexCount * 3)
+    private val tessellatedLipVertices = directFloatBuffer(
+        lipTessellator.vertexCount * LipMeshTessellator.VERTEX_COMPONENT_COUNT,
+    )
     private val tessellatedLipIndices = directShortBuffer(lipTessellator.indices)
     private val projection = FloatArray(16)
     private val view = FloatArray(16)
@@ -71,6 +76,16 @@ internal class ArCoreFaceAnchorRenderer(
     private val mvp = FloatArray(16)
     private val clipPoint = FloatArray(4)
     private val identity = FloatArray(16).apply { Matrix.setIdentityM(this, 0) }
+
+    private val cameraUvCorners = FloatArray(8)
+
+    @Volatile
+    private var lipstickFinish = LipstickFinish.SATIN
+
+    fun setLipstickFinish(value: LipstickFinish) {
+        lipstickFinish = value
+        Log.i(TAG, "Lipstick finish: $value")
+    }
 
     private var statusWindowStartNs = 0L
     private var statusWindowFrames = 0
@@ -156,6 +171,9 @@ internal class ArCoreFaceAnchorRenderer(
             transformedCameraUvs,
         )
 
+        transformedCameraUvs.position(0)
+        transformedCameraUvs.get(cameraUvCorners)
+        transformedCameraUvs.position(0)
         GLES20.glDisable(GLES20.GL_DEPTH_TEST)
         GLES20.glUseProgram(backgroundProgram)
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
@@ -304,7 +322,12 @@ internal class ArCoreFaceAnchorRenderer(
             tessellatedLipVertices
                 .put(tessellated[sourceIndex + LipMeshTessellator.X_COMPONENT_OFFSET] * 2f - 1f)
                 .put(1f - tessellated[sourceIndex + LipMeshTessellator.Y_COMPONENT_OFFSET] * 2f)
+                .put(tessellated[sourceIndex + LipMeshTessellator.NORMAL_X_COMPONENT_OFFSET])
+                .put(tessellated[sourceIndex + LipMeshTessellator.NORMAL_Y_COMPONENT_OFFSET])
+                .put(tessellated[sourceIndex + LipMeshTessellator.NORMAL_Z_COMPONENT_OFFSET])
                 .put(tessellated[sourceIndex + LipMeshTessellator.COVERAGE_COMPONENT_OFFSET])
+                .put(tessellated[sourceIndex + LipMeshTessellator.RING_COMPONENT_OFFSET])
+                .put(tessellated[sourceIndex + LipMeshTessellator.ARC_COMPONENT_OFFSET])
             sourceIndex += LipMeshTessellator.VERTEX_COMPONENT_COUNT
         }
         tessellatedLipVertices.position(0)
@@ -382,16 +405,35 @@ internal class ArCoreFaceAnchorRenderer(
 
     private fun drawLipMesh() {
         GLES20.glDisable(GLES20.GL_DEPTH_TEST)
-        GLES20.glEnable(GLES20.GL_BLEND)
-        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
+        GLES20.glDisable(GLES20.GL_BLEND)
         GLES20.glUseProgram(lipMeshProgram)
-        GLES20.glUniform4fv(
-            GLES20.glGetUniformLocation(lipMeshProgram, "uColor"),
-            1,
-            LIP_MASK_COLOR,
-            0,
+        val profile = ReferenceLipstickRenderProfiles.forFinish(lipstickFinish)
+        val pigment = when (profile.pigmentPalette) {
+            LipstickPigmentPalette.PRODUCT_ROSE -> PRODUCT_PIGMENT
+            LipstickPigmentPalette.TRACKING_MAGENTA -> TRACKING_PIGMENT
+        }
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, cameraTextureId)
+        GLES20.glUniform1i(GLES20.glGetUniformLocation(lipMeshProgram, "uCamera"), 0)
+        GLES20.glUniform2f(GLES20.glGetUniformLocation(lipMeshProgram, "uUvBottomLeft"), cameraUvCorners[0], cameraUvCorners[1])
+        GLES20.glUniform2f(GLES20.glGetUniformLocation(lipMeshProgram, "uUvBottomRight"), cameraUvCorners[2], cameraUvCorners[3])
+        GLES20.glUniform2f(GLES20.glGetUniformLocation(lipMeshProgram, "uUvTopLeft"), cameraUvCorners[4], cameraUvCorners[5])
+        GLES20.glUniform2f(GLES20.glGetUniformLocation(lipMeshProgram, "uUvTopRight"), cameraUvCorners[6], cameraUvCorners[7])
+        GLES20.glUniform3fv(GLES20.glGetUniformLocation(lipMeshProgram, "uPigment"), 1, pigment, 0)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uCoverageMultiplier"), profile.coverageMultiplier)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uLuminancePreservation"), profile.luminancePreservation)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uRoughness"), profile.optics.roughness)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uSpecularStrength"), profile.optics.specularStrength)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uHighlightRetention"), profile.optics.highlightRetention)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uMicroTextureRetention"), profile.optics.microTextureRetention)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uWetInnerEdgeStrength"), profile.optics.wetInnerEdgeStrength)
+        GLES20.glUniform2f(
+            GLES20.glGetUniformLocation(lipMeshProgram, "uIlluminationSampleStep"),
+            ILLUMINATION_SAMPLE_RADIUS_PIXELS / viewportWidth,
+            ILLUMINATION_SAMPLE_RADIUS_PIXELS / viewportHeight,
         )
-        val strideBytes = LIP_MESH_VERTEX_COMPONENTS * Float.SIZE_BYTES
+
+        val strideBytes = LipMeshTessellator.VERTEX_COMPONENT_COUNT * Float.SIZE_BYTES
         val position = GLES20.glGetAttribLocation(lipMeshProgram, "aPosition")
         tessellatedLipVertices.position(0)
         GLES20.glEnableVertexAttribArray(position)
@@ -403,8 +445,19 @@ internal class ArCoreFaceAnchorRenderer(
             strideBytes,
             tessellatedLipVertices,
         )
-        val coverage = GLES20.glGetAttribLocation(lipMeshProgram, "aCoverage")
+        val normal = GLES20.glGetAttribLocation(lipMeshProgram, "aNormal")
         tessellatedLipVertices.position(2)
+        GLES20.glEnableVertexAttribArray(normal)
+        GLES20.glVertexAttribPointer(
+            normal,
+            3,
+            GLES20.GL_FLOAT,
+            false,
+            strideBytes,
+            tessellatedLipVertices,
+        )
+        val coverage = GLES20.glGetAttribLocation(lipMeshProgram, "aCoverage")
+        tessellatedLipVertices.position(5)
         GLES20.glEnableVertexAttribArray(coverage)
         GLES20.glVertexAttribPointer(
             coverage,
@@ -415,6 +468,17 @@ internal class ArCoreFaceAnchorRenderer(
             tessellatedLipVertices,
         )
         tessellatedLipIndices.position(0)
+        val lipUv = GLES20.glGetAttribLocation(lipMeshProgram, "aLipUv")
+        tessellatedLipVertices.position(6)
+        GLES20.glEnableVertexAttribArray(lipUv)
+        GLES20.glVertexAttribPointer(
+            lipUv,
+            2,
+            GLES20.GL_FLOAT,
+            false,
+            strideBytes,
+            tessellatedLipVertices,
+        )
         GLES20.glDrawElements(
             GLES20.GL_TRIANGLES,
             lipTessellator.indexCount,
@@ -422,8 +486,9 @@ internal class ArCoreFaceAnchorRenderer(
             tessellatedLipIndices,
         )
         GLES20.glDisableVertexAttribArray(position)
+        GLES20.glDisableVertexAttribArray(normal)
+        GLES20.glDisableVertexAttribArray(lipUv)
         GLES20.glDisableVertexAttribArray(coverage)
-        GLES20.glDisable(GLES20.GL_BLEND)
     }
     private fun drawPointCloud(
         vertices: FloatBuffer,
@@ -500,7 +565,7 @@ internal class ArCoreFaceAnchorRenderer(
         } ?: "MediaPipe: waiting for synchronized result"
         val text = String.format(
             Locale.US,
-            "%s\nARCore %.1f FPS · %s\n%s\nred = anchored tessellated mask",
+            "%s\nARCore %.1f FPS · %s\n%s\nanchored tessellated lipstick",
             state,
             fps,
             pointLabel,
@@ -591,8 +656,8 @@ internal class ArCoreFaceAnchorRenderer(
         const val NEAR_METERS = 0.05f
         const val FAR_METERS = 100f
         const val STATUS_INTERVAL_NS = 1_000_000_000L
-        const val LIP_MESH_VERTEX_COMPONENTS = 3
         const val DRAW_DIAGNOSTIC_POINTS = false
+        const val ILLUMINATION_SAMPLE_RADIUS_PIXELS = 14f
 
         val MAGENTA = floatArrayOf(1f, 0.05f, 0.8f)
         val CYAN = floatArrayOf(0.05f, 1f, 0.95f)
@@ -602,7 +667,8 @@ internal class ArCoreFaceAnchorRenderer(
         val GREEN = floatArrayOf(0.1f, 1f, 0.15f)
         val DARK_GREEN = floatArrayOf(0f, 0.25f, 0.02f)
         val WHITE = floatArrayOf(1f, 1f, 1f)
-        val LIP_MASK_COLOR = floatArrayOf(1f, 0.05f, 0.22f, 0.80f)
+        val PRODUCT_PIGMENT = floatArrayOf(0.735f, 0.325f, 0.314f)
+        val TRACKING_PIGMENT = floatArrayOf(1f, 0f, 0.831f)
 
         val FULLSCREEN_QUAD: FloatBuffer = directFloatBuffer(
             floatArrayOf(
@@ -635,20 +701,151 @@ internal class ArCoreFaceAnchorRenderer(
 
         const val LIP_MESH_VERTEX_SHADER = """
             attribute vec2 aPosition;
+            attribute vec3 aNormal;
             attribute float aCoverage;
+            attribute vec2 aLipUv;
+            varying vec2 vDisplayUv;
+            varying vec3 vNormal;
             varying float vCoverage;
+            varying vec2 vLipUv;
             void main() {
                 gl_Position = vec4(aPosition, 0.0, 1.0);
+                vDisplayUv = vec2(aPosition.x * 0.5 + 0.5, 0.5 - aPosition.y * 0.5);
+                vNormal = aNormal;
                 vCoverage = aCoverage;
+                vLipUv = aLipUv;
             }
         """
 
         const val LIP_MESH_FRAGMENT_SHADER = """
+            #extension GL_OES_EGL_image_external : require
             precision mediump float;
-            uniform vec4 uColor;
+            uniform samplerExternalOES uCamera;
+            uniform vec2 uUvBottomLeft;
+            uniform vec2 uUvBottomRight;
+            uniform vec2 uUvTopLeft;
+            uniform vec2 uUvTopRight;
+            uniform vec3 uPigment;
+            uniform float uCoverageMultiplier;
+            uniform float uLuminancePreservation;
+            uniform float uRoughness;
+            uniform float uSpecularStrength;
+            uniform float uHighlightRetention;
+            uniform float uMicroTextureRetention;
+            uniform float uWetInnerEdgeStrength;
+            uniform vec2 uIlluminationSampleStep;
+            varying vec2 vDisplayUv;
+            varying vec3 vNormal;
             varying float vCoverage;
+            varying vec2 vLipUv;
+
+            vec2 cameraUv(vec2 displayUv) {
+                vec2 top = mix(uUvTopLeft, uUvTopRight, displayUv.x);
+                vec2 bottom = mix(uUvBottomLeft, uUvBottomRight, displayUv.x);
+                return mix(top, bottom, displayUv.y);
+            }
+
+            vec3 srgbToLinear(vec3 value) {
+                return pow(max(value, vec3(0.0)), vec3(2.2));
+            }
+
+            vec3 linearToSrgb(vec3 value) {
+                return pow(max(value, vec3(0.0)), vec3(0.45454545));
+            }
+
+            vec3 cameraLinearAt(vec2 displayUv) {
+                vec2 uv = cameraUv(clamp(displayUv, vec2(0.0), vec2(1.0)));
+                return srgbToLinear(texture2D(uCamera, uv).rgb);
+            }
+
             void main() {
-                gl_FragColor = vec4(uColor.rgb, uColor.a * vCoverage);
+                const vec3 luminanceWeights = vec3(0.2126, 0.7152, 0.0722);
+                vec3 cameraLinear = cameraLinearAt(vDisplayUv);
+                float coverage = clamp(vCoverage * uCoverageMultiplier, 0.0, 1.0);
+                float cameraLuminance = max(dot(cameraLinear, luminanceWeights), 0.0001);
+
+                float luminanceLeft = dot(
+                    cameraLinearAt(vDisplayUv - vec2(uIlluminationSampleStep.x, 0.0)),
+                    luminanceWeights
+                );
+                float luminanceRight = dot(
+                    cameraLinearAt(vDisplayUv + vec2(uIlluminationSampleStep.x, 0.0)),
+                    luminanceWeights
+                );
+                float luminanceBottom = dot(
+                    cameraLinearAt(vDisplayUv - vec2(0.0, uIlluminationSampleStep.y)),
+                    luminanceWeights
+                );
+                float luminanceTop = dot(
+                    cameraLinearAt(vDisplayUv + vec2(0.0, uIlluminationSampleStep.y)),
+                    luminanceWeights
+                );
+                float neighborhoodLuminance = 0.25 * (
+                    luminanceLeft + luminanceRight + luminanceBottom + luminanceTop
+                );
+                vec2 illuminationGradient = clamp(
+                    vec2(luminanceRight - luminanceLeft, luminanceTop - luminanceBottom) * 4.5,
+                    vec2(-0.7),
+                    vec2(0.7)
+                );
+                vec3 lightDirection = normalize(vec3(illuminationGradient, 0.86));
+                vec3 halfDirection = normalize(lightDirection + vec3(0.0, 0.0, 1.0));
+
+                float positiveCameraDetail = max(
+                    cameraLuminance - neighborhoodLuminance,
+                    0.0
+                );
+                float suppressedHighlight = positiveCameraDetail *
+                    (1.0 - uHighlightRetention) * coverage;
+                float materialLuminance = max(cameraLuminance - suppressedHighlight, 0.0001);
+                vec3 pigmentLinear = srgbToLinear(uPigment);
+                float pigmentLuminance = max(dot(pigmentLinear, luminanceWeights), 0.0001);
+                vec3 luminancePreservingPigment = pigmentLinear *
+                    (materialLuminance / pigmentLuminance);
+                vec3 renderedPigment = mix(
+                    pigmentLinear,
+                    luminancePreservingPigment,
+                    uLuminancePreservation
+                );
+                vec3 pigmented = mix(cameraLinear, renderedPigment, coverage);
+
+                vec3 lipNormal = normalize(vNormal);
+                float roughness = clamp(uRoughness, 0.08, 1.0);
+                float specularPower = mix(112.0, 9.0, roughness * roughness);
+                float normalLobe = pow(
+                    max(dot(lipNormal, halfDirection), 0.0),
+                    specularPower
+                );
+                float nativeHighlight = smoothstep(0.006, 0.075, positiveCameraDetail);
+                float illuminationConfidence = smoothstep(
+                    0.008,
+                    0.11,
+                    length(illuminationGradient)
+                );
+                float cameraAnchoredLobe = normalLobe * mix(
+                    0.18,
+                    1.0,
+                    max(nativeHighlight, illuminationConfidence)
+                );
+                float arcCenter = sin(3.14159265 * clamp(vLipUv.y, 0.0, 1.0));
+                float innerEdge = smoothstep(0.56, 0.88, vLipUv.x) *
+                    (1.0 - smoothstep(0.93, 1.0, vLipUv.x)) * arcCenter;
+                float wetEdgeGain = 1.0 + uWetInnerEdgeStrength * innerEdge * 2.2;
+                float retainedNativeSpecular = positiveCameraDetail *
+                    uHighlightRetention * 0.55;
+                float reconstructedSpecular = uSpecularStrength * coverage *
+                    wetEdgeGain * (0.045 * cameraAnchoredLobe + retainedNativeSpecular);
+
+                float textureDetail = cameraLuminance - neighborhoodLuminance;
+                float textureCorrection = textureDetail * uMicroTextureRetention *
+                    coverage * 0.055;
+                vec3 chromaDirection = pigmented / max(
+                    dot(pigmented, luminanceWeights),
+                    0.0001
+                );
+                pigmented += chromaDirection * textureCorrection;
+                pigmented += vec3(1.0, 0.94, 0.92) * reconstructedSpecular;
+                gl_FragColor = vec4(linearToSrgb(max(pigmented, vec3(0.0))), 1.0);
             }
         """
         const val POINT_VERTEX_SHADER = """

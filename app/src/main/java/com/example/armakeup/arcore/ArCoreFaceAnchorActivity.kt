@@ -2,21 +2,25 @@ package com.example.armakeup.arcore
 
 import android.Manifest
 import android.content.pm.PackageManager
-import android.graphics.Color
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.opengl.GLSurfaceView
-import android.os.Bundle
 import android.os.Build
-import android.view.Choreographer
+import android.os.Bundle
 import android.util.Log
-import android.view.Gravity
+import android.view.Choreographer
+import android.view.View
 import android.view.ViewGroup
-import android.widget.FrameLayout
-import android.widget.TextView
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import com.example.armakeup.R
+import com.example.armakeup.databinding.ActivityArcoreFaceAnchorBinding
+import com.example.armakeup.makeup.LipstickFinish
 import com.google.ar.core.ArCoreApk
 import com.google.ar.core.Config
 import com.google.ar.core.Session
@@ -32,8 +36,8 @@ import java.util.EnumSet
  */
 class ArCoreFaceAnchorActivity : AppCompatActivity() {
 
-    private lateinit var surfaceView: GLSurfaceView
-    private lateinit var statusView: TextView
+    private lateinit var binding: ActivityArcoreFaceAnchorBinding
+    private val surfaceView: GLSurfaceView get() = binding.arcoreSurface
     private lateinit var renderer: ArCoreFaceAnchorRenderer
 
     private var session: Session? = null
@@ -44,65 +48,55 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
     private val renderFrameCallback = Choreographer.FrameCallback(::onRenderVsync)
     private var renderSchedulerRunning = false
     private var lastRenderRequestNs = 0L
-    private var permissionRequested = false
     private var resumed = false
 
     private val cameraPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-            permissionRequested = false
+            binding.permissionPanel.visibility = if (granted) View.GONE else View.VISIBLE
             if (granted) {
                 startSessionIfPossible()
             } else {
-                showFatal("Camera permission is required for face tracking")
+                showPermissionPanel()
             }
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-
-        surfaceView = GLSurfaceView(this).apply {
-            setEGLContextClientVersion(2)
-            preserveEGLContextOnPause = true
+        enableEdgeToEdge()
+        WindowCompat.getInsetsController(window, window.decorView).apply {
+            isAppearanceLightStatusBars = false
+            isAppearanceLightNavigationBars = false
         }
-        statusView = TextView(this).apply {
-            setTextColor(Color.WHITE)
-            textSize = 15f
-            setBackgroundColor(0xB3181518.toInt())
-            setPadding(28, 24, 28, 24)
-            text = "AR Makeup: initializing face tracking"
-        }
+        binding = ActivityArcoreFaceAnchorBinding.inflate(layoutInflater)
+        setContentView(binding.root)
+        binding.root.keepScreenOn = true
+        surfaceView.setEGLContextClientVersion(2)
+        surfaceView.preserveEGLContextOnPause = true
         renderer = ArCoreFaceAnchorRenderer(
             displayRotation = { currentDisplayRotation() },
             imageRotationDegrees = { mediaPipeImageRotationDegrees },
-            onStatus = { status -> runOnUiThread { statusView.text = status } },
+            onStatus = { status -> runOnUiThread { showTrackingStatus(status) } },
             onFatalError = { message -> runOnUiThread { showFatal(message) } },
         )
         surfaceView.setRenderer(renderer)
         surfaceView.renderMode = GLSurfaceView.RENDERMODE_WHEN_DIRTY
 
-        val root = FrameLayout(this).apply {
-            addView(
-                surfaceView,
-                FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                ),
-            )
-            addView(
-                statusView,
-                FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                    Gravity.TOP,
-                ).apply {
-                    leftMargin = 24
-                    topMargin = 72
-                    rightMargin = 24
-                },
-            )
+        binding.finishToggleGroup.addOnButtonCheckedListener { _, checkedId, isChecked ->
+            if (!isChecked) return@addOnButtonCheckedListener
+            val finish = when (checkedId) {
+                R.id.finish_matte -> LipstickFinish.MATTE
+                R.id.finish_gloss -> LipstickFinish.GLOSS
+                R.id.finish_tracking_test -> LipstickFinish.TRACKING_TEST
+                else -> LipstickFinish.SATIN
+            }
+            renderer.setLipstickFinish(finish)
         }
-        setContentView(root)
+        binding.permissionButton.setOnClickListener {
+            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+        }
+        applyWindowInsets()
+        showTrackingStatus(getString(R.string.status_preparing))
+        if (!hasCameraPermission()) showPermissionPanel()
     }
 
     override fun onResume() {
@@ -134,10 +128,7 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) !=
             PackageManager.PERMISSION_GRANTED
         ) {
-            if (!permissionRequested) {
-                permissionRequested = true
-                cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
-            }
+            showPermissionPanel()
             return
         }
 
@@ -146,7 +137,7 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
                 when (ArCoreApk.getInstance().requestInstall(this, !installRequested)) {
                     ArCoreApk.InstallStatus.INSTALL_REQUESTED -> {
                         installRequested = true
-                        statusView.text = "AR Makeup: waiting for Google Play Services for AR"
+                        showTrackingStatus("AR Makeup: waiting for Google Play Services for AR")
                         return
                     }
                     ArCoreApk.InstallStatus.INSTALLED -> Unit
@@ -178,18 +169,69 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
             session?.resume()
             surfaceView.onResume()
             startRenderScheduler()
-            statusView.text = "AR Makeup: point the front camera at your face"
+            showTrackingStatus(getString(R.string.status_waiting_for_face))
         } catch (error: Exception) {
             Log.e(TAG, "Unable to start hybrid face tracking", error)
             showFatal("Face tracking initialization failed: ${error.message ?: error.javaClass.simpleName}")
         }
     }
 
+    private fun hasCameraPermission(): Boolean =
+        ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) ==
+            PackageManager.PERMISSION_GRANTED
+
+    private fun showPermissionPanel() {
+        binding.permissionPanel.visibility = View.VISIBLE
+        binding.statusTitle.setText(R.string.camera_permission_title)
+        binding.statusMetrics.setText(R.string.camera_permission_message)
+    }
+
+    private fun showTrackingStatus(status: String) {
+        if (hasCameraPermission()) binding.permissionPanel.visibility = View.GONE
+        binding.statusCard.setCardBackgroundColor(
+            ContextCompat.getColor(this, R.color.glass_900),
+        )
+        val lines = status.lines()
+        binding.statusTitle.text = when (lines.firstOrNull()) {
+            "FACE TRACKING" -> getString(R.string.status_tracking)
+            "SEARCHING FOR FACE" -> getString(R.string.status_waiting_for_face)
+            else -> lines.firstOrNull().orEmpty()
+        }
+        binding.statusMetrics.text = lines.drop(1).joinToString("\n").ifEmpty {
+            getString(R.string.metrics_initial)
+        }
+    }
+
+    private fun applyWindowInsets() {
+        val statusBaseMargin = binding.statusCard.marginTop
+        val phaseBaseMargin = binding.phaseCard.marginBottom
+        ViewCompat.setOnApplyWindowInsetsListener(binding.main) { _, insets ->
+            val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            binding.statusCard.updateVerticalMargin(top = statusBaseMargin + bars.top)
+            binding.phaseCard.updateVerticalMargin(bottom = phaseBaseMargin + bars.bottom)
+            insets
+        }
+    }
+
+    private fun View.updateVerticalMargin(top: Int? = null, bottom: Int? = null) {
+        val params = layoutParams as ViewGroup.MarginLayoutParams
+        top?.let { params.topMargin = it }
+        bottom?.let { params.bottomMargin = it }
+        layoutParams = params
+    }
+
+    private val View.marginTop: Int
+        get() = (layoutParams as ViewGroup.MarginLayoutParams).topMargin
+
+    private val View.marginBottom: Int
+        get() = (layoutParams as ViewGroup.MarginLayoutParams).bottomMargin
+
     private fun showFatal(message: String) {
         Log.e(TAG, message)
-
-        statusView.text = message
-        statusView.setBackgroundColor(0xD08B1E32.toInt())
+        binding.statusTitle.setText(R.string.status_tracker_error)
+        binding.statusMetrics.text = message
+        binding.statusCard.setCardBackgroundColor(0xE68B1E32.toInt())
+        binding.permissionPanel.visibility = View.GONE
     }
 
     private fun startRenderScheduler() {
