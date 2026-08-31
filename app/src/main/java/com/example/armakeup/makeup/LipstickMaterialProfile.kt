@@ -28,7 +28,7 @@ internal data class LipstickCoverageProfile(
 }
 
 /**
- * Reference-calibrated rose-brick matte material.
+ * Reference-calibrated classic neutral-red matte material.
  *
  * The upper lip receives slightly more pigment and matte compression because it naturally faces
  * away from the main light. Lower coverage on the lower lip keeps its native highlight and volume.
@@ -61,6 +61,25 @@ internal enum class LipstickFinish {
 }
 
 /**
+ * Shared source-sRGB pigment used by every product finish.
+ *
+ * The numeric reference is intentionally independent from finish optics: matte, satin and gloss
+ * must start from the same pigment and differ only through their material response. The 999 label
+ * is an internal cross-platform calibration reference, not a claim that this is an official brand
+ * colour specification.
+ */
+internal object ReferenceLipstickPigments {
+    const val PRODUCT_CLASSIC_RED_999_SRGB_HEX = 0xA93033
+    const val PRODUCT_CLASSIC_RED_999_RED_8BIT = 0xA9
+    const val PRODUCT_CLASSIC_RED_999_GREEN_8BIT = 0x30
+    const val PRODUCT_CLASSIC_RED_999_BLUE_8BIT = 0x33
+
+    const val PRODUCT_CLASSIC_RED_999_RED_SRGB = PRODUCT_CLASSIC_RED_999_RED_8BIT / 255f
+    const val PRODUCT_CLASSIC_RED_999_GREEN_SRGB = PRODUCT_CLASSIC_RED_999_GREEN_8BIT / 255f
+    const val PRODUCT_CLASSIC_RED_999_BLUE_SRGB = PRODUCT_CLASSIC_RED_999_BLUE_8BIT / 255f
+}
+
+/**
  * Camera-conditioned optical response used by the lipstick shader.
  *
  * These parameters deliberately do not contain a baked highlight. The shader combines them with
@@ -73,6 +92,7 @@ internal data class LipstickOpticalProfile(
     val highlightRetention: Float,
     val microTextureRetention: Float,
     val surfaceDetailRetention: Float,
+    val satinGlowStrength: Float,
     val wetInnerEdgeStrength: Float,
 ) {
     init {
@@ -81,6 +101,7 @@ internal data class LipstickOpticalProfile(
         require(highlightRetention in UNIT_RANGE)
         require(microTextureRetention in UNIT_RANGE)
         require(surfaceDetailRetention in UNIT_RANGE)
+        require(satinGlowStrength in UNIT_RANGE)
         require(wetInnerEdgeStrength in UNIT_RANGE)
     }
 
@@ -97,15 +118,17 @@ internal object ReferenceLipstickOptics {
         highlightRetention = 0f,
         microTextureRetention = 0.82f,
         surfaceDetailRetention = 1f,
+        satinGlowStrength = 0f,
         wetInnerEdgeStrength = 0f,
     )
     val satin = LipstickOpticalProfile(
-        roughness = 0.68f,
+        roughness = 0.74f,
         specularStrength = 0.18f,
-        highlightRetention = 0.62f,
-        microTextureRetention = 0.48f,
-        surfaceDetailRetention = 1f,
-        wetInnerEdgeStrength = 0.06f,
+        highlightRetention = 0.55f,
+        microTextureRetention = 0.58f,
+        surfaceDetailRetention = 0.72f,
+        satinGlowStrength = 1f,
+        wetInnerEdgeStrength = 0f,
     )
     val gloss = LipstickOpticalProfile(
         roughness = 0.12f,
@@ -113,12 +136,13 @@ internal object ReferenceLipstickOptics {
         highlightRetention = 1f,
         microTextureRetention = 0.12f,
         surfaceDetailRetention = 0.18f,
+        satinGlowStrength = 0f,
         wetInnerEdgeStrength = 0.68f,
     )
 }
 
 internal enum class LipstickPigmentPalette {
-    PRODUCT_ROSE,
+    PRODUCT_CLASSIC_RED_999,
     TRACKING_MAGENTA,
 }
 
@@ -132,14 +156,20 @@ internal data class LipstickRenderProfile(
     val pigmentPalette: LipstickPigmentPalette,
     val coverageMultiplier: Float,
     val luminancePreservation: Float,
+    val minimumLuminanceGain: Float,
+    val maximumLuminanceGain: Float,
 ) {
     init {
         require(coverageMultiplier in 0f..MAX_COVERAGE_MULTIPLIER)
         require(luminancePreservation in 0f..1f)
+        require(minimumLuminanceGain in 0f..MAX_LUMINANCE_GAIN)
+        require(maximumLuminanceGain in 0f..MAX_LUMINANCE_GAIN)
+        require(minimumLuminanceGain <= maximumLuminanceGain)
     }
 
     private companion object {
         private const val MAX_COVERAGE_MULTIPLIER = 8f
+        private const val MAX_LUMINANCE_GAIN = 4f
     }
 }
 
@@ -152,7 +182,7 @@ internal object ReferenceLipstickRenderProfiles {
     val satin = productProfile(
         optics = ReferenceLipstickOptics.satin,
         coverageMultiplier = 1.55f,
-        luminancePreservation = 0.92f,
+        luminancePreservation = 0.68f,
     )
     val gloss = productProfile(
         optics = ReferenceLipstickOptics.gloss,
@@ -165,6 +195,7 @@ internal object ReferenceLipstickRenderProfiles {
         highlightRetention = 0f,
         microTextureRetention = 0f,
         surfaceDetailRetention = 0f,
+        satinGlowStrength = 0f,
         wetInnerEdgeStrength = 0f,
     )
 
@@ -174,6 +205,8 @@ internal object ReferenceLipstickRenderProfiles {
         pigmentPalette = LipstickPigmentPalette.TRACKING_MAGENTA,
         coverageMultiplier = 4f,
         luminancePreservation = 0f,
+        minimumLuminanceGain = 1f,
+        maximumLuminanceGain = 1f,
     )
 
     fun forFinish(finish: LipstickFinish): LipstickRenderProfile = when (finish) {
@@ -189,8 +222,10 @@ internal object ReferenceLipstickRenderProfiles {
         luminancePreservation: Float = 1f,
     ) = LipstickRenderProfile(
         optics = optics,
-        pigmentPalette = LipstickPigmentPalette.PRODUCT_ROSE,
+        pigmentPalette = LipstickPigmentPalette.PRODUCT_CLASSIC_RED_999,
         coverageMultiplier = coverageMultiplier,
         luminancePreservation = luminancePreservation,
+        minimumLuminanceGain = 0.55f,
+        maximumLuminanceGain = 1.65f,
     )
 }

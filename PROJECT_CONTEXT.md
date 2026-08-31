@@ -60,7 +60,47 @@ ARCore владеет фронтальной камерой, её timeline и т
 
 Текущий OpenGL ES compositor семплирует тот же ARCore external camera texture внутри tessellated lip mesh, использует мягкое coverage, reconstructed normals, lip-local UV, camera luminance/gradient и общие `ReferenceLipstickRenderProfiles`. Коммит `af33129` разделил optically opaque matte, более лёгкий satin и плотный lacquer gloss и добавил отдельное сглаживание surface detail. Коммит `5e046da` превратил фиксированную полноразмерную белую полосу gloss в локальный camera-conditioned блик: яркость, цвет и направление берутся из соседних camera samples, горизонтальный центр смещается по градиенту света, а ширина сокращается при направленном освещении; реальные локальные блики камеры сохраняются. Пользователь принял это как рабочую material-базу, но не как конечный вариант. Ещё нужны controlled A/B при разном освещении, защита от temporal shimmer/auto-exposure, дальнейшая BRDF/HDR/edge калибровка и multi-device acceptance.
 
+Единый исходный цвет продуктовой помады для всех трёх финишей зафиксирован как source-sRGB `#A93033` (RGB 169/48/51), внутренний cross-platform reference «999». OpenGL ES, Filament и старый Canvas fallback обязаны начинать с одного и того же пигмента; различия верхней/нижней губы и matte/satin/gloss формируются только coverage, фактурой, освещением и оптическим профилем материала. `#A93033` не считается подтверждённой официальной цифровой спецификацией Dior; без отдельного разрешения коммерческий UI использует нейтральное название вроде «Классический красный».
+
+Текущий незакоммиченный satin-999 candidate ограничивает camera-driven luminance gain диапазоном `0.55..1.65`, снижает `luminancePreservation` сатина до `0.68` и сохраняет camera surface/microtexture на `0.72/0.58`; `coverageMultiplier = 1.55` намеренно не изменён. После device-feedback о невидимом блике satin roughness/specular/highlight retention откалиброваны как `0.74/0.18/0.55`, широкий normal/light lobe увеличен без возврата статической белой полосы. Это исправляет выбеливание/клиппинг глубокого красного отдельно от будущей регулируемой модели плотности. Candidate собран и запущен на Samsung SM-A346E без shader/runtime errors, но до нового отзыва пользователя не считается визуально принятым и не коммитится.
+
 Semantic parsing начинается с бесплатного 2D baseline без собственного обучения: текущие MediaPipe-контуры, product masks, GPU edge refinement/flow и опциональный официальный Apache 2.0 Selfie Multiclass Segmenter только для broad `face-skin/hair/background`. Собственная компактная модель для lips/mouth-teeth/eyelids рассматривается только если этот baseline не проходит visual acceptance; права на dataset/labels/weights остаются обязательным gate.
+
+## Cross-platform parity с iOS — аудит и решение 2026-08-31
+
+Для сравнения статически проверен публичный iOS-репозиторий `https://github.com/Dzhanaeva/virtual-makeup`, ветка `main`, точный commit `8baf9066aeafca744d7336c6f5f9847355ff8efb`. Xcode/iOS runtime нельзя собрать и профилировать на текущем Windows-host, поэтому execution paths подтверждены исходниками, dependency lock, конфигурацией и SHA-256 assets; итоговая visual/performance parity требует согласованных записей с реальных iPhone и Android-устройств.
+
+Главное архитектурное совпадение: iOS также использует гибрид, а не «ARKit вместо MediaPipe». `ARFaceTrackingConfiguration` даёт быстрые pose/depth/blendshape updates, MediaPipe Face Landmarker — реальный контур губ, а Metal/SceneKit формируют материал и финальную геометрию. Android использует эквивалентное разделение ролей через ARCore Augmented Faces + MediaPipe, но текущий Android baseline переносит MediaPipe-контур в основном translation одного mouth anchor; iOS дополнительно привязывает точки к face-local AR surface carrier и ограниченно компенсирует локальную мимику. Для Android полезен сам принцип per-landmark carrier/warp, но не обязательное копирование SceneKit implementation.
+
+Максимально одинаковый cross-platform стек является новым приоритетом только там, где это не ухудшает качество и коммерчески допустимо:
+
+- общий MediaPipe Face Landmarker сохраняется первым кандидатом landmark backend на обеих платформах; iOS и Android содержат побайтово одинаковый официальный `face_landmarker.task`, SHA-256 `64184E229B263107BC2B804C6625DB1341FF2BB731874B0BCC2FE6544E0BC9FF`, с уже проверенными Apache 2.0 model cards;
+- общими должны стать model-independent `FaceObservation`/`FullFaceRenderState`, MediaPipe lip topology, timestamp/age/confidence contract, visibility/occlusion semantics, `LipstickMaterialSpec`, source-sRGB pigment catalog и одинаковые golden input/output vectors;
+- ARKit/ARCore остаются платформенными pose/carrier backends, а Metal и Android OpenGL/Vulkan/Filament — платформенными GPU implementations одного material contract; заменять их менее качественным общим API только ради одинакового названия нельзя;
+- material/color-space contract, coverage/density, edge feather, detail/luminance budgets и acceptance scenes должны совпадать семантически, даже если shader language и camera texture API различаются;
+- перенос Swift-кода разрешён только после подтверждения прав на iOS-репозиторий: в проверенном commit нет корневого `LICENSE`; если оба проекта принадлежат одной команде, права всё равно нужно документально зафиксировать для release audit.
+
+Обязательные расхождения и blockers до сближения:
+
+- bundled `Virtual Makeup/faceParsing.mlmodel` размером `52,658,220` байт имеет SHA-256 `E2695F389C73EE9BFA9513337E11CC860D740A1E2A4644671CFD9E44AAAC09B1`, полностью совпадающий с публичной FaceParsing CoreML-моделью `tucan9389/SemanticSegmentation-CoreML`; её BiSeNet checkpoint обучен на CelebAMask-HQ, условия которого запрещают коммерческое использование и derived data;
+- этот CoreML asset фактически не участвует в iOS renderer: production texture request передаёт `semanticMask: nil`; его нужно удалить из коммерческого shipping target, а не переносить в Android;
+- iOS preset «999» использует RGB `158/38/32` (`#9E2620`), Android candidate — `169/48/51` (`#A93033`); единый reference не выбран до совместной visual/color calibration;
+- iOS Metal satin использует camera-derived highlight, но считает luminance/detail в gamma-like `Unorm` RGB с Rec.601 weights, тогда как Android выполняет sRGB→linear и использует Rec.709; простое копирование коэффициентов не даст одинаковое изображение;
+- iOS gloss math существует только в legacy CPU fallback, а основной Metal path имеет отдельную ветку лишь для satin; в UI также нет gloss preset;
+- iOS Metal compositor ждёт `waitUntilCompleted`, читает GPU texture на CPU, создаёт `UIImage` и возвращает её SceneKit. Этот GPU→CPU→GPU roundtrip не переносится; общий целевой принцип — GPU-resident compositing без readback;
+- Xcode deployment target равен iOS 18.0 при `platform :ios, '15.0'` в Podfile; матрицу iPhone/TrueDepth support нужно согласовать отдельно от Android `minSdk` и ARCore supported-device gate;
+- iOS runtime находится в одном `FaceTrackingView.swift` примерно на 11.7 тысячи строк и не имеет XCTest/CI; перед синхронизацией нужны отдельные tracking/geometry/material/color modules и regression fixtures.
+
+Принятый порядок следующего cross-platform этапа:
+
+1. На iOS удалить либо исключить из shipping target non-commercial `faceParsing.mlmodel`, добавить third-party notices и зафиксировать права на репозиторий; Android этот asset не импортирует.
+2. Создать platform-neutral `LipstickMaterialSpec` и golden vectors: source-sRGB цвет, density/coverage, roughness/specular, camera-highlight retention, micro/surface detail, luminance bounds, feather и inner-mouth rules. Цвет «999» остаётся нерешённым до совместной калибровки.
+3. Зафиксировать общий temporal/geometry contract: capture timestamp, measurement age, topology version, 20+20 boundary loops, current platform pose/carrier, per-point confidence/visibility и stale/hold gates.
+4. Реализовать одинаковую linear-RGB material math отдельно в Android shader и iOS Metal без CPU readback, сохраняя платформенные ARKit/ARCore camera/pose layers.
+5. Добавить parity harness с одинаковыми сценами и метриками boundary error, mask age, jitter/lag, ΔE/luminance/detail retention, p50/p95 CPU/GPU latency и thermal behavior.
+6. Только после controlled device A/B переносить iOS per-landmark AR surface carrier в Android; результат принимается лишь при улучшении attachment без возвращения jitter/deformation.
+
+До выполнения этих gates текущая Android tracking/material база остаётся основной и не заменяется iOS-кодом. Аудит задаёт направление следующей реализации, но не является автоматическим разрешением сторонних лицензий.
 
 ## Текущее состояние репозитория
 
@@ -635,3 +675,7 @@ Preview и ImageAnalysis должны использовать общий `ViewP
 - ARCore Augmented Faces: https://developers.google.com/ar/develop/augmented-faces
 - Apple ARFaceAnchor: https://developer.apple.com/documentation/arkit/arfaceanchor
 - Apple face tracking and geometry sample: https://developer.apple.com/documentation/arkit/tracking-and-visualizing-faces
+- Audited iOS repository and pinned commit: https://github.com/Dzhanaeva/virtual-makeup/commit/8baf9066aeafca744d7336c6f5f9847355ff8efb
+- Exact public CoreML FaceParsing artifact/source: https://github.com/tucan9389/SemanticSegmentation-CoreML
+- FaceParsing BiSeNet training source: https://github.com/zllrunning/face-parsing.PyTorch
+- CelebAMask-HQ non-commercial dataset agreement: https://github.com/switchablenorms/CelebAMask-HQ#dataset-agreement

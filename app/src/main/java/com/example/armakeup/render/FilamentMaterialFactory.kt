@@ -46,12 +46,15 @@ internal object FilamentMaterialFactory {
             .uniformParameter(MaterialBuilder.UniformType.FLOAT3, "pigmentColor")
             .uniformParameter(MaterialBuilder.UniformType.FLOAT, "coverageMultiplier")
             .uniformParameter(MaterialBuilder.UniformType.FLOAT, "luminancePreservation")
+            .uniformParameter(MaterialBuilder.UniformType.FLOAT, "minimumLuminanceGain")
+            .uniformParameter(MaterialBuilder.UniformType.FLOAT, "maximumLuminanceGain")
             .uniformParameter(MaterialBuilder.UniformType.FLOAT2, "illuminationSampleStep")
             .uniformParameter(MaterialBuilder.UniformType.FLOAT, "roughness")
             .uniformParameter(MaterialBuilder.UniformType.FLOAT, "specularStrength")
             .uniformParameter(MaterialBuilder.UniformType.FLOAT, "highlightRetention")
             .uniformParameter(MaterialBuilder.UniformType.FLOAT, "microTextureRetention")
             .uniformParameter(MaterialBuilder.UniformType.FLOAT, "surfaceDetailRetention")
+            .uniformParameter(MaterialBuilder.UniformType.FLOAT, "satinGlowStrength")
             .uniformParameter(MaterialBuilder.UniformType.FLOAT, "wetInnerEdgeStrength")
             .uniformParameter(MaterialBuilder.UniformType.FLOAT, "cameraDetailCoherence")
             .material(LIPSTICK_FRAGMENT),
@@ -203,8 +206,13 @@ internal object FilamentMaterialFactory {
                 0.0001
             );
             float pigmentLuminance = max(dot(materialParams.pigmentColor, luminanceWeights), 0.0001);
-            vec3 luminancePreservingPigment = materialParams.pigmentColor *
-                (materialLuminance / pigmentLuminance);
+            float luminanceGain = clamp(
+                materialLuminance / pigmentLuminance,
+                materialParams.minimumLuminanceGain,
+                materialParams.maximumLuminanceGain
+            );
+            vec3 luminancePreservingPigment =
+                materialParams.pigmentColor * luminanceGain;
             vec3 renderedPigment = mix(
                 materialParams.pigmentColor,
                 luminancePreservingPigment,
@@ -276,6 +284,23 @@ internal object FilamentMaterialFactory {
                 vec3(0.72),
                 vec3(1.28)
             );
+            float satinGlow = clamp(materialParams.satinGlowStrength, 0.0, 1.0);
+            float satinBroadLobe = pow(
+                max(dot(lipNormal, halfDirection), 0.0),
+                4.0
+            );
+            float satinLightResponse = mix(
+                0.42,
+                1.0,
+                max(sceneLightLevel, illuminationConfidence)
+            );
+            float satinSpecular = materialParams.specularStrength * coverage * 0.060 *
+                satinBroadLobe * satinLightResponse;
+            vec3 satinNativeHighlightColor = min(
+                max(cameraLinear - neighborhoodLinear, vec3(0.0)),
+                vec3(0.12)
+            ) * materialParams.highlightRetention * materialParams.specularStrength *
+                coverage * cameraDetailCoherence * 0.34;
             vec3 nativeSpecularColor = min(
                 max(cameraLinear - neighborhoodLinear, vec3(0.0)),
                 vec3(0.22)
@@ -284,8 +309,15 @@ internal object FilamentMaterialFactory {
             vec3 legacySpecularColor = vec3(1.0, 0.94, 0.92) * legacySpecular;
             vec3 adaptiveSpecularColor =
                 illuminationTint * adaptiveSpecular + nativeSpecularColor;
-            vec3 specularColor = mix(
+            vec3 satinSpecularColor =
+                illuminationTint * satinSpecular + satinNativeHighlightColor;
+            vec3 baseSpecularColor = mix(
                 legacySpecularColor,
+                satinSpecularColor,
+                satinGlow
+            );
+            vec3 specularColor = mix(
+                baseSpecularColor,
                 adaptiveSpecularColor,
                 adaptiveGloss
             );
@@ -294,6 +326,9 @@ internal object FilamentMaterialFactory {
                 cameraDetailCoherence;
             float textureCorrection = textureDetail * materialParams.microTextureRetention *
                 coverage * 0.055;
+            float satinDiffuseGlow = satinGlow * coverage * sceneLightLevel *
+                (0.022 + 0.032 * satinBroadLobe);
+            pigmented *= 1.0 + satinDiffuseGlow;
             vec3 chromaDirection = pigmented / max(
                 dot(pigmented, luminanceWeights),
                 0.0001

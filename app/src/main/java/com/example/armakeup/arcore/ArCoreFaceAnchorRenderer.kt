@@ -10,6 +10,7 @@ import com.example.armakeup.makeup.LipMeshTessellator
 import com.example.armakeup.makeup.ReferenceMatteLipstickProfile
 import com.example.armakeup.makeup.LipstickFinish
 import com.example.armakeup.makeup.LipstickPigmentPalette
+import com.example.armakeup.makeup.ReferenceLipstickPigments
 import com.example.armakeup.makeup.ReferenceLipstickRenderProfiles
 import com.example.armakeup.tracking.CanonicalFaceTransform
 import com.example.armakeup.tracking.FillCenterTransform
@@ -409,7 +410,7 @@ internal class ArCoreFaceAnchorRenderer(
         GLES20.glUseProgram(lipMeshProgram)
         val profile = ReferenceLipstickRenderProfiles.forFinish(lipstickFinish)
         val pigment = when (profile.pigmentPalette) {
-            LipstickPigmentPalette.PRODUCT_ROSE -> PRODUCT_PIGMENT
+            LipstickPigmentPalette.PRODUCT_CLASSIC_RED_999 -> PRODUCT_PIGMENT
             LipstickPigmentPalette.TRACKING_MAGENTA -> TRACKING_PIGMENT
         }
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
@@ -422,12 +423,15 @@ internal class ArCoreFaceAnchorRenderer(
         GLES20.glUniform3fv(GLES20.glGetUniformLocation(lipMeshProgram, "uPigment"), 1, pigment, 0)
         GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uCoverageMultiplier"), profile.coverageMultiplier)
         GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uLuminancePreservation"), profile.luminancePreservation)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uMinimumLuminanceGain"), profile.minimumLuminanceGain)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uMaximumLuminanceGain"), profile.maximumLuminanceGain)
         GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uRoughness"), profile.optics.roughness)
         GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uSpecularStrength"), profile.optics.specularStrength)
         GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uHighlightRetention"), profile.optics.highlightRetention)
         GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uMicroTextureRetention"), profile.optics.microTextureRetention)
         GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uWetInnerEdgeStrength"), profile.optics.wetInnerEdgeStrength)
         GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uSurfaceDetailRetention"), profile.optics.surfaceDetailRetention)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uSatinGlowStrength"), profile.optics.satinGlowStrength)
         GLES20.glUniform2f(
             GLES20.glGetUniformLocation(lipMeshProgram, "uIlluminationSampleStep"),
             ILLUMINATION_SAMPLE_RADIUS_PIXELS / viewportWidth,
@@ -668,7 +672,11 @@ internal class ArCoreFaceAnchorRenderer(
         val GREEN = floatArrayOf(0.1f, 1f, 0.15f)
         val DARK_GREEN = floatArrayOf(0f, 0.25f, 0.02f)
         val WHITE = floatArrayOf(1f, 1f, 1f)
-        val PRODUCT_PIGMENT = floatArrayOf(0.735f, 0.325f, 0.314f)
+        val PRODUCT_PIGMENT = floatArrayOf(
+            ReferenceLipstickPigments.PRODUCT_CLASSIC_RED_999_RED_SRGB,
+            ReferenceLipstickPigments.PRODUCT_CLASSIC_RED_999_GREEN_SRGB,
+            ReferenceLipstickPigments.PRODUCT_CLASSIC_RED_999_BLUE_SRGB,
+        )
         val TRACKING_PIGMENT = floatArrayOf(1f, 0f, 0.831f)
 
         val FULLSCREEN_QUAD: FloatBuffer = directFloatBuffer(
@@ -729,12 +737,15 @@ internal class ArCoreFaceAnchorRenderer(
             uniform vec3 uPigment;
             uniform float uCoverageMultiplier;
             uniform float uLuminancePreservation;
+            uniform float uMinimumLuminanceGain;
+            uniform float uMaximumLuminanceGain;
             uniform float uRoughness;
             uniform float uSpecularStrength;
             uniform float uHighlightRetention;
             uniform float uMicroTextureRetention;
             uniform float uWetInnerEdgeStrength;
             uniform float uSurfaceDetailRetention;
+            uniform float uSatinGlowStrength;
             uniform vec2 uIlluminationSampleStep;
             varying vec2 vDisplayUv;
             varying vec3 vNormal;
@@ -811,8 +822,13 @@ internal class ArCoreFaceAnchorRenderer(
                 float materialLuminance = max(surfaceLuminance - suppressedHighlight, 0.0001);
                 vec3 pigmentLinear = srgbToLinear(uPigment);
                 float pigmentLuminance = max(dot(pigmentLinear, luminanceWeights), 0.0001);
-                vec3 luminancePreservingPigment = pigmentLinear *
-                    (materialLuminance / pigmentLuminance);
+                float luminanceGain = clamp(
+                    materialLuminance / pigmentLuminance,
+                    uMinimumLuminanceGain,
+                    uMaximumLuminanceGain
+                );
+                vec3 luminancePreservingPigment =
+                    pigmentLinear * luminanceGain;
                 vec3 renderedPigment = mix(
                     pigmentLinear,
                     luminancePreservingPigment,
@@ -880,6 +896,22 @@ internal class ArCoreFaceAnchorRenderer(
                     vec3(0.72),
                     vec3(1.28)
                 );
+                float satinGlow = clamp(uSatinGlowStrength, 0.0, 1.0);
+                float satinBroadLobe = pow(
+                    max(dot(lipNormal, halfDirection), 0.0),
+                    4.0
+                );
+                float satinLightResponse = mix(
+                    0.42,
+                    1.0,
+                    max(sceneLightLevel, illuminationConfidence)
+                );
+                float satinSpecular = uSpecularStrength * coverage * 0.060 *
+                    satinBroadLobe * satinLightResponse;
+                vec3 satinNativeHighlightColor = min(
+                    max(cameraLinear - neighborhoodLinear, vec3(0.0)),
+                    vec3(0.12)
+                ) * uHighlightRetention * uSpecularStrength * coverage * 0.34;
                 vec3 nativeSpecularColor = min(
                     max(cameraLinear - neighborhoodLinear, vec3(0.0)),
                     vec3(0.22)
@@ -887,8 +919,15 @@ internal class ArCoreFaceAnchorRenderer(
                 vec3 legacySpecularColor = vec3(1.0, 0.94, 0.92) * legacySpecular;
                 vec3 adaptiveSpecularColor =
                     illuminationTint * adaptiveSpecular + nativeSpecularColor;
-                vec3 specularColor = mix(
+                vec3 satinSpecularColor =
+                    illuminationTint * satinSpecular + satinNativeHighlightColor;
+                vec3 baseSpecularColor = mix(
                     legacySpecularColor,
+                    satinSpecularColor,
+                    satinGlow
+                );
+                vec3 specularColor = mix(
+                    baseSpecularColor,
                     adaptiveSpecularColor,
                     adaptiveGloss
                 );
@@ -896,6 +935,9 @@ internal class ArCoreFaceAnchorRenderer(
                 float textureDetail = cameraLuminance - neighborhoodLuminance;
                 float textureCorrection = textureDetail * uMicroTextureRetention *
                     coverage * 0.055;
+                float satinDiffuseGlow = satinGlow * coverage * sceneLightLevel *
+                    (0.022 + 0.032 * satinBroadLobe);
+                pigmented *= 1.0 + satinDiffuseGlow;
                 vec3 chromaDirection = pigmented / max(
                     dot(pigmented, luminanceWeights),
                     0.0001

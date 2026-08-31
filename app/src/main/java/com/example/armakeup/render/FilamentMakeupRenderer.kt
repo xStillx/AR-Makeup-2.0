@@ -25,6 +25,7 @@ import com.example.armakeup.makeup.LipstickFinish
 import com.example.armakeup.makeup.LipstickOpticalProfile
 import com.example.armakeup.makeup.LipstickPigmentPalette
 import com.example.armakeup.makeup.ReferenceMatteLipstickProfile
+import com.example.armakeup.makeup.ReferenceLipstickPigments
 import com.example.armakeup.makeup.ReferenceLipstickRenderProfiles
 import com.example.armakeup.tracking.FillCenterTransform
 import com.example.armakeup.tracking.AndroidGyroscopeSource
@@ -101,10 +102,11 @@ internal class FilamentMakeupRenderer(
     private val cameraMaterialInstance = materials.camera.createInstance()
     private val upperLipMaterialInstance = materials.lipstick.createInstance()
     private val lowerLipMaterialInstance = materials.lipstick.createInstance()
-    private val productUpperPigment =
-        ContextCompat.getColor(context, R.color.lipstick_matte_upper)
-    private val productLowerPigment =
-        ContextCompat.getColor(context, R.color.lipstick_matte_lower)
+    private val productPigment = Color.rgb(
+        ReferenceLipstickPigments.PRODUCT_CLASSIC_RED_999_RED_8BIT,
+        ReferenceLipstickPigments.PRODUCT_CLASSIC_RED_999_GREEN_8BIT,
+        ReferenceLipstickPigments.PRODUCT_CLASSIC_RED_999_BLUE_8BIT,
+    )
     private val trackingTestPigment =
         ContextCompat.getColor(context, R.color.lipstick_tracking_test)
     private val cameraTexture = Texture.Builder()
@@ -367,9 +369,9 @@ internal class FilamentMakeupRenderer(
         val upperPigment: Int
         val lowerPigment: Int
         when (profile.pigmentPalette) {
-            LipstickPigmentPalette.PRODUCT_ROSE -> {
-                upperPigment = productUpperPigment
-                lowerPigment = productLowerPigment
+            LipstickPigmentPalette.PRODUCT_CLASSIC_RED_999 -> {
+                upperPigment = productPigment
+                lowerPigment = productPigment
             }
             LipstickPigmentPalette.TRACKING_MAGENTA -> {
                 upperPigment = trackingTestPigment
@@ -381,6 +383,8 @@ internal class FilamentMakeupRenderer(
         listOf(upperLipMaterialInstance, lowerLipMaterialInstance).forEach { material ->
             material.setParameter("coverageMultiplier", profile.coverageMultiplier)
             material.setParameter("luminancePreservation", profile.luminancePreservation)
+            material.setParameter("minimumLuminanceGain", profile.minimumLuminanceGain)
+            material.setParameter("maximumLuminanceGain", profile.maximumLuminanceGain)
         }
         applyLipstickOptics(profile.optics)
         applyCurrentCameraDetailCoherence()
@@ -393,6 +397,7 @@ internal class FilamentMakeupRenderer(
             material.setParameter("highlightRetention", profile.highlightRetention)
             material.setParameter("microTextureRetention", profile.microTextureRetention)
             material.setParameter("surfaceDetailRetention", profile.surfaceDetailRetention)
+            material.setParameter("satinGlowStrength", profile.satinGlowStrength)
             material.setParameter("wetInnerEdgeStrength", profile.wetInnerEdgeStrength)
         }
     }
