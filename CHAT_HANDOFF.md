@@ -1,14 +1,12 @@
 # ARMakeup — компактный контекст для нового чата
 
-Актуально на 2026-08-26. Полный источник истины — `PROJECT_CONTEXT.md`; правила репозитория — `AGENTS.md`.
+Актуально на 2026-08-31. Полный источник истины — `PROJECT_CONTEXT.md`; правила репозитория — `AGENTS.md`.
 
 ## Цель и приоритет
 
 Native Android-приложение виртуальной примерки макияжа через фронтальную камеру. Главный приоритет — максимально реалистичный результат и стабильный трекинг в реальном времени. Скорость разработки и простота реализации вторичны. Нельзя заменять GPU/ML-пайплайн простым 2D alpha overlay.
 
-Целевой продукт включает помаду/контур губ, румяна, тени и подводку. Поэтому следующий tracking design обязан быть full-face: один timestamped 3D pose/canonical face state, единая temporal fusion и согласованные visibility/occlusion для губ, щёк и обоих глаз. Нельзя добавлять независимый tracker/filter для каждого продукта.
-
-Принятый детальный порядок дальнейшей разработки находится в `FULL_FACE_ROADMAP.md`. Этапы: `FF0` сохранить V6.3 experimental checkpoint; `FF1` разложить end-to-end latency; `FF2` записывать MediaPipe facial transformation matrix в shadow-режиме; `FF3` ввести `FaceTrackingBackend`/`FaceObservation`/`FullFaceRenderState`; `FF4` построить единый visual-inertial 3D tracker с late reprojection; `FF5` перейти к видимому canonical 3D face renderer; `FF6A` собрать бесплатный baseline без обучения (3D/product masks/Vulkan refinement и optional Apache Selfie Multiclass только для broad skin/hair/background); `FF6B` обучать собственный beauty parser в бесплатном cloud runtime только если FF6A недостаточно; `FF7` реализовать продукты поверх общего state; `FF8` только по результатам benchmark решить вопрос собственной landmark/mesh model.
+Целевой продукт включает помаду/контур губ, румяна, тени и подводку. Принято 2D-first направление: один timestamped full-face state с быстрым глобальным ARCore anchor/pose, локальными MediaPipe 2D-контурами и согласованными visibility/occlusion. Видимый canonical 3D renderer отклонён из-за деформаций и неточных контуров; ARCore 3D остаётся только внутренним источником глобального якоря. `FULL_FACE_ROADMAP.md` сохранён как superseded historical plan; активный порядок находится в верхней части `PROJECT_CONTEXT.md`.
 
 ## Основной tracking baseline — ARCore + MediaPipe timestamped anchor
 
@@ -16,21 +14,21 @@ Native Android-приложение виртуальной примерки ма
 
 Пользовательский verdict: резкие движения головы/устройства не вызывают прежних слётов, открытие/закрытие рта успевает, текущая отрисовка визуально лучше всех проверенных вариантов. Диагностические landmark-точки выключены. Рендер запрашивается с целевыми 60 FPS и даёт примерно `56–60`, MediaPipe — `26–30 FPS`, conversion обычно `2–5 ms`, ML примерно `20–34 ms`, age обычно `42–85 ms`. При pitch `>=24°` три кадра маска скрывается и возвращается после трёх кадров `<=18°`; device-лог подтвердил гистерезис без мигания. Текущий gate: `162` unit-теста, 0 failures/errors, lint и debug APK успешны.
 
-`ArCoreFaceAnchorActivity` назначена обычным `MAIN/LAUNCHER`, специальный intent-extra больше не нужен. XML/View UI восстановил переключатели `Матовая / Сатин / Глянец / Трек`. OpenGL ES lip shader повторно семплирует ARCore camera texture и композитит coverage, reconstructed normals, camera luminance/gradient и lip-local UV с общими профилями roughness/specular/highlight/microtexture/wet edge. Product pigment обязательно преобразуется из sRGB в linear RGB до luminance-preserving mix; пользователь визуально принял исправленный цвет всех продуктовых режимов. Production Vulkan compositor, semantic boundaries, full-face state и fallback ещё не готовы. Следующий этап — `FaceObservation`/`FullFaceRenderState`, затем перенос принятой tracking/material-семантики в единый Vulkan timeline.
+`ArCoreFaceAnchorActivity` назначена обычным `MAIN/LAUNCHER`, специальный intent-extra больше не нужен. XML/View UI переключает `Матовая / Сатин / Глянец / Трек`. `af33129` сохраняет раздельные matte/satin/lacquer-gloss profiles и gloss surface smoothing. `5e046da` локализует gloss-блик по яркости, цвету и направлению camera lighting вместо фиксированной белой полосы на всю длину губ. Пользователь принял результат как рабочую базу, не как финальный материал. Следующие material-задачи: controlled lighting A/B, temporal stability, BRDF/HDR и edge refinement.
 
 ## Репозиторий и состояние
 
 - Путь: `C:\Users\User\AndroidStudioProjects\ARMakeup`.
-- Ветка: `codex/arcore-point-2d-baseline`; основной timestamped launcher checkpoint — `ad51128`, predecessor accepted proof — `782778c`. Исторические точки отката: `cc82370` / `tracking-v6.2-stable-2026-08-17`, `d4636ac`, `ab8796a`, `dd095f7`; FF1/FF2/native commits `0554924`, `19a2280`, `3419063`, `7bd498f`, `6be330f`, `9bc3efb`, `2fb7cd7`, `082d88e`, `be35764`, `1406c24`. Обычный запуск открывает ARCore hybrid с принятыми материалами; legacy CameraX/Filament остаётся внутренним rollback.
-- Основные коммиты: `ad51128 [Tracking]`, `782778c [FF4]`, `cc82370 [V6.2]`, `8d48b46 [V6]`, `4f8039b [V5]`, `3d3572e [V4]`, `395d3f3 [V3]`.
+- Ветка: `codex/lipstick-material-v2`. Основные актуальные checkpoints: `ad51128` timestamped 2D anchor launcher, `66189d5` product UI/material foundation, `af33129` finish candidates, `5e046da` localized camera-lighting gloss baseline. Legacy CameraX/Filament/Vulkan и прежние 3D/predictor/gyro эксперименты остаются rollback/history.
+- Основные коммиты: `5e046da [Material]`, `af33129 [Material]`, `66189d5 [Material]`, `ad51128 [Tracking]`, `782778c [FF4]`, `cc82370 [V6.2]`.
 - Kotlin, XML/View UI, один модуль `:app`; `minSdk 24`, `targetSdk/compileSdk 37`.
-- Последняя локальная проверка: `162` unit-теста, 0 failures/errors, lint и debug APK успешно. Exact launcher APK установлен на SM-G990B; GLSL с camera-conditioned material успешно скомпилирован драйвером Adreno 660, Matte/Satin/Gloss/Track переключаются без перезапуска камеры или runtime-ошибок. Production Vulkan/material cutover не начат.
+- Последняя проверка: unit-тесты, lint и debug APK успешны. Exact launcher APK с `5e046da` установлен на Redmi Note 8; OpenGL shader с локализованным бликом скомпилирован Adreno без GLSL/compile/link ошибок, процесс и face tracking работают. Финальная visual/lighting/thermal acceptance не выполнена.
 
 ## Текущий pipeline
 
-- Основной path: ARCore 1.54.0 владеет фронтальной камерой и OpenGL ES сценой; MediaPipe Face Landmarker 1.0.0 использует latest-only analysis image той же ARCore session. Второй CameraX owner не создаётся. Эта же сцена рисует принятый camera-conditioned lipstick material с Matte/Satin/Gloss/Track.
+- Основной path: ARCore 1.54.0 владеет фронтальной камерой, timeline и глобальным mouth anchor; MediaPipe Face Landmarker 1.0.0 выдаёт latest-only локальный 2D lip contour той же session. Второй CameraX owner не создаётся. Эта же OpenGL ES сцена рисует рабочую camera-conditioned lipstick base с Matte/Satin/Gloss/Track.
 - Legacy rollback: CameraX 1.6.1 + MediaPipe + Filament 1.74.0/Vulkan experiments сохранены в `MainActivity`, но больше не являются launcher/default.
-- Следующий архитектурный слой должен скрыть обе библиотеки за `FaceTrackingBackend`/`FaceObservation`, чтобы Vulkan renderer и makeup materials зависели только от единого render state.
+- Следующий архитектурный слой должен скрыть обе библиотеки за model-independent 2D observation/render state; видимый 3D face/lip mesh возвращать не планируется.
 - Native Vulkan V3 напрямую импортирует camera `AHardwareBuffer`, использует YCbCr sampling и fences без CPU-копии. V4 luma pyramid + pyramidal LK optical flow + similarity fit остаётся невидимым и в V6.2 вообще не запускается вне активной telemetry-записи.
 - Ориентация, front-camera mirror и lip/camera alignment на SM-G990B исправлены и покрыты тестами. Не менять display/camera transforms без отдельной regression-проверки.
 
@@ -117,7 +115,7 @@ Head-motion native/Filament: lag `33/33 ms`, overshoot `0.008375/0.008626`, jitt
 
 Checkpoint `1406c24` не меняет `LandmarkMotionPredictor`: native render-only слой добавляет максимум `32 ms` только при высокой rigid-anchor velocity/coverage и плавно выключается по gyro magnitude, чтобы не удваивать phone correction. Отдельный `FaceAnchoredLipContourStabilizer` переносит contour по eye/nose/cheek similarity pose без задержки и фильтрует `8 Hz` только lip-local residual. Head replay: moving RMS `0.014438→0.012274`, median signed lag `0.009575→0.006733`; stationary still RMS `0.001466→0.001488`, phone all-frame RMS `0.023901→0.023837`. Gate `147/147`, lint/APK/четыре ABI. Exact APK был установлен на SM-G990B; functional native cadence `16.692/16.748 ms`, reuse `0.496`, crash нет. Этот historical candidate позднее был superseded ARCore hybrid proof.
 
-Этот historical plan superseded: visual A/B старых predictor/gyro вариантов не дал нужного global attachment, а ARKit-гипотеза уже проверена Android ARCore proof. Актуальные действия находятся в верхнем разделе и в `FULL_FACE_ROADMAP.md`.
+Этот historical plan superseded: visual A/B старых predictor/gyro/visible-3D вариантов не дал нужного сочетания global attachment и точного локального контура. Актуальные действия находятся в верхнем разделе и в `PROJECT_CONTEXT.md`; `FULL_FACE_ROADMAP.md` оставлен только как история.
 
 Acceptance V6: нет заметного jitter на неподвижном лице, отставания при движении и скачка после остановки; нет regressions orientation/mirror/lip alignment; pipeline остаётся latest-only и укладывается в GPU compositor budget 6–8 ms на целевом устройстве.
 
@@ -159,4 +157,4 @@ V5 реализует reconstructed lip normals, camera-conditioned lighting и 
 - `app/src/main/java/com/example/armakeup/render/FilamentMaterialFactory.kt` — lipstick shader, включая диагностические coverage/luminance uniforms.
 - `app/src/test/java/com/example/armakeup/tracking/` — tracking regression tests.
 
-Начни новый чат с изучения `AGENTS.md`, `PROJECT_CONTEXT.md`, `FULL_FACE_ROADMAP.md`, `LICENSE_COMPLIANCE.md` и перечисленных ARCore/tracking/render-файлов. Текущая основа — принятый 2026-08-26 ARCore + MediaPipe timestamped-anchor launcher с camera-conditioned Matte/Satin/Gloss/Track material foundation; tracking checkpoint `ad51128`. При продолжении сначала создать model-independent full-face contract, затем переносить гибрид и визуально принятые материалы в production Vulkan path без регрессии; старый predictor/gyro не настраивать дальше без нового измеримого основания.
+Начни новый чат с изучения `AGENTS.md`, `PROJECT_CONTEXT.md`, `LICENSE_COMPLIANCE.md` и верхнего superseded-примечания в `FULL_FACE_ROADMAP.md`. Текущая основа — MediaPipe 2D lip contour + timestamped ARCore global anchor (`ad51128`), product UI/material foundation (`66189d5`), finish profiles (`af33129`) и локализованный camera-lighting gloss baseline (`5e046da`). Это рабочая, но не финальная material-версия. Дальше продолжать 2D-first roadmap из `PROJECT_CONTEXT.md`; visible 3D, старый predictor и gyro не возвращать без нового controlled evidence.

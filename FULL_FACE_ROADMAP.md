@@ -1,4 +1,6 @@
-# AR Makeup — план перехода к full-face 3D tracking
+# AR Makeup — исторический план перехода к full-face 3D tracking
+
+> **SUPERSEDED 2026-08-31.** Видимый canonical 3D face/lip renderer отклонён после device-итераций из-за деформаций и потери точности контуров. Текущий production-вектор — MediaPipe 2D local contours + timestamped ARCore global anchor, затем общие 2D semantic masks для губ/глаз/щёк. Активный roadmap находится в разделе «Принятый план дальнейшей разработки» файла `PROJECT_CONTEXT.md`. Нижеследующие FF0–FF8 сохранены только как история исследований и точки отката.
 
 Статус: принят 2026-08-17.
 

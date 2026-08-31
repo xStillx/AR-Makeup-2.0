@@ -1,6 +1,6 @@
 # AR Makeup — контекст и технические решения
 
-Последнее обновление: 2026-08-26.
+Последнее обновление: 2026-08-31.
 
 Этот файл — источник долгоживущего контекста проекта. Его нужно обновлять, когда меняются продуктовые требования, выбранный стек, архитектура или измеренные ограничения устройств.
 
@@ -18,7 +18,7 @@ Android-приложение для виртуальной примерки ма
 
 Главный приоритет — максимально правдоподобный результат. Скорость разработки, простота кода и количество эффектов вторичны по отношению к качеству трекинга, правильному наложению, сохранению фактуры кожи и низкой задержке.
 
-Трекинг больше нельзя проектировать как отдельное решение только для губ. Помада остаётся первым вертикальным срезом, но production-архитектура должна выдавать один согласованный full-face state для губ, щёк и обоих глаз: общую 3D-позу, деформацию мимики, visibility/confidence, окклюзии и привязанные к тому же camera timestamp семантические области. Помада, румяна, тени и подводка обязаны потреблять этот общий state, а не иметь независимые трекеры и фильтры с разной задержкой.
+Трекинг больше нельзя проектировать как отдельное решение только для губ. Помада остаётся первым вертикальным срезом, но production-архитектура должна выдавать один согласованный timestamped full-face state для губ, щёк и обоих глаз: быстрый глобальный anchor/pose, локальные 2D-контуры мимики, visibility/confidence, окклюзии и семантические области. Помада, румяна, тени и подводка обязаны потреблять этот общий state, а не иметь независимые трекеры и фильтры с разной задержкой. Видимый canonical 3D face/lip renderer больше не является целевым направлением.
 
 ## Лицензии ML-компонентов и заменяемая граница модели — решение 2026-08-17
 
@@ -34,19 +34,21 @@ Android-приложение для виртуальной примерки ма
 - Apache 2.0 не содержит ограничения «только non-commercial», но при распространении нужно выполнить требования лицензии и сохранить применимые copyright/attribution/NOTICE;
 - это инженерная проверка первичных источников, а не юридическое заключение: перед релизом обязателен повторный dependency/model audit и оформление third-party notices.
 
-Поэтому MediaPipe Face Landmarker сохраняется как текущий коммерчески допустимый кандидат и anchor-backend. Он не должен быть жёстко зашит в renderer. Вводится архитектурная граница `FaceTrackingBackend` с модель-независимым результатом `FaceObservation`, содержащим как минимум camera sensor timestamp, 3D landmarks/canonical face mapping, 6DoF head pose, confidence/visibility, состояние глаз/рта и версию topology. Текущие MediaPipe-specific типы не должны распространяться в material/render API.
+Поэтому MediaPipe Face Landmarker сохраняется как текущий коммерчески допустимый кандидат локальных 2D-контуров. Он не должен быть жёстко зашит в renderer. Будущий модель-независимый `FaceObservation` должен содержать camera sensor timestamp, локальные контуры губ/глаз/щёк, глобальный anchor/pose от доступного backend, confidence/visibility, состояние глаз/рта и версию topology. MediaPipe- и ARCore-specific типы не должны распространяться в material/render API.
 
-Production temporal fusion также становится общей для всего лица: camera-frame optical flow, IMU prior и периодические model anchors обновляют один timestamped 3D face state. Поздняя репроекция к реально показанному camera frame применяется к общей позе и canonical surface до построения масок отдельных продуктов. Это исключает ситуацию, когда помада, тени и подводка имеют разные lag/jitter.
+Production temporal alignment также должно быть общим для всего лица: camera timeline, быстрый ARCore anchor и периодические MediaPipe-контуры обновляют один согласованный 2D render state. ARCore может внутренне использовать 3D-позу лица, но наружу остаётся вспомогательным глобальным якорем; продуктовая геометрия и границы строятся по 2D-контурам/семантическим маскам. Это исключает разные lag/jitter у помады, теней и подводки без возвращения к видимому 3D mesh.
 
 Для реалистичных границ всё равно понадобится отдельный semantic face parsing backend с вероятностями как минимум `skin / lips / mouth-teeth / left-right eyelid / eye / brow / hair-background`. MediaPipe Image Segmenter можно использовать как inference API, но он сам по себе не предоставляет подходящую beauty parsing model. Базовый план — своя компактная LiteRT-модель, обученная только на данных с документированным правом коммерческого использования. «Обучили сами» не является достаточной лицензией: отдельно проверяются датасет, разметка, исходные weights/teacher models, synthetic generator/assets и право распространять получившиеся weights.
 
 Собственная landmark/mesh model рассматривается как возможная замена MediaPipe, но не как автоматическое следствие коммерческого релиза. Переход оправдан только если контролируемый benchmark покажет, что MediaPipe не достигает требований по lag, jitter, окклюзиям глаз/губ или нужной topology, и одновременно подготовлен полностью прослеживаемый коммерчески пригодный training pipeline. Интерфейс backend должен позволить такую замену без переписывания Vulkan compositor, temporal fusion и makeup materials.
 
-## Принятый план дальнейшей разработки
+## Принятый план дальнейшей разработки — 2D hybrid, решение 2026-08-31
 
-Детальный исполняемый roadmap зафиксирован в `FULL_FACE_ROADMAP.md`. Он задаёт этапы `FF0–FF8`: сохранение V6.3 experimental checkpoint, разложение end-to-end latency, shadow-проверку MediaPipe facial transformation matrix, модель-независимый full-face контракт, visual-inertial 3D fusion и late reprojection, видимый canonical 3D renderer, semantic parsing, продуктовые эффекты и только затем условное решение о собственной landmark/mesh model.
+Полноценный видимый 3D face/lip renderer отклонён после device-итераций: он ухудшал точность контуров при мимике и сильных поворотах и добавлял деформации/дрожание. `FULL_FACE_ROADMAP.md` сохранён как исторический исследовательский план и помечен superseded; его этапы FF3–FF5 не являются текущими задачами.
 
-Совместный shadow vertical slice `FF1/FF2` разложил latency и actual-present, но варианты на базе дополнительной экранной экстраполяции, gyro correction, predictor, residual smoothing и face-wide affine/projective correction не дали одновременно требуемой точности контура, отсутствия jitter и устойчивости к движениям головы/телефона. Эти варианты остаются только в истории и отдельных stashes и не являются направлением основного трекера.
+Активный порядок: (1) довести и визуально принять matte/satin/gloss; (2) улучшать принятый MediaPipe 2D contour + timestamped ARCore anchor без predictor/gyro; (3) уточнить губы, рот/зубы и будущие области глаз/щёк семантическими 2D-масками, начиная с решения без собственного обучения; (4) сформировать общий model-independent 2D full-face state; (5) добавить контур губ, румяна, тени и подводку; (6) выполнить GPU/Vulkan-оптимизацию, multi-device/thermal/fallback gates и лицензионную подготовку релиза.
+
+Совместный shadow vertical slice `FF1/FF2` остаётся полезной историей latency/actual-present, но варианты на базе дополнительной экранной экстраполяции, gyro correction, predictor, residual smoothing, visible canonical 3D mesh и face-wide affine/projective correction не дали одновременно требуемой точности контура, отсутствия jitter и устойчивости к движениям головы/телефона. Они не являются направлением основного трекера.
 
 ### Принятый ARCore + MediaPipe tracking baseline — 2026-08-26
 
@@ -56,9 +58,9 @@ ARCore владеет фронтальной камерой, её timeline и т
 
 `ArCoreFaceAnchorActivity` является обычным `MAIN/LAUNCHER`, поэтому принятый гибрид открывается без debug intent-extra. Прежний CameraX/Filament/Vulkan экспериментальный экран сохранён в `MainActivity` как внутренний rollback. Основной XML/View экран восстановил прежнюю продуктовую логику и позволяет переключать `Матовая / Сатин / Глянец / Трек` без перезапуска camera session или изменения tracking geometry.
 
-Текущий OpenGL ES compositor семплирует тот же ARCore external camera texture внутри tessellated lip mesh, использует мягкое coverage, reconstructed normals, lip-local UV, camera luminance/gradient и общие `ReferenceLipstickRenderProfiles`. Matte/satin/gloss различаются roughness, specular, сохранением бликов/микротекстуры и wet inner edge; `TRACKING_TEST` остаётся плотной magenta-маской для оценки контура. Product pigment приходит как sRGB и явно переводится в linear RGB перед luminance-preserving mix — отсутствие этого шага обесцвечивало продуктовые режимы. После исправления пользователь визуально принял цвет и все четыре режима на SM-G990B. Это принятый material foundation, но не финальный production Vulkan/BRDF/HDR: всё ещё нужны model-independent full-face contract, semantic boundary refinement, ARCore fallback policy и multi-device/thermal acceptance.
+Текущий OpenGL ES compositor семплирует тот же ARCore external camera texture внутри tessellated lip mesh, использует мягкое coverage, reconstructed normals, lip-local UV, camera luminance/gradient и общие `ReferenceLipstickRenderProfiles`. Коммит `af33129` разделил optically opaque matte, более лёгкий satin и плотный lacquer gloss и добавил отдельное сглаживание surface detail. Коммит `5e046da` превратил фиксированную полноразмерную белую полосу gloss в локальный camera-conditioned блик: яркость, цвет и направление берутся из соседних camera samples, горизонтальный центр смещается по градиенту света, а ширина сокращается при направленном освещении; реальные локальные блики камеры сохраняются. Пользователь принял это как рабочую material-базу, но не как конечный вариант. Ещё нужны controlled A/B при разном освещении, защита от temporal shimmer/auto-exposure, дальнейшая BRDF/HDR/edge калибровка и multi-device acceptance.
 
-Этап semantic parsing разделён на `FF6A/FF6B`. `FF6A` — бесплатный baseline без собственного обучения: MediaPipe 3D geometry, canonical/product masks, Vulkan edge refinement/flow и опциональный официальный Apache 2.0 Selfie Multiclass Segmenter только для broad `face-skin/hair/background`. `FF6B` — собственная детальная модель для lips/mouth-teeth/eyelids только если FF6A не проходит visual acceptance; мощный локальный ПК не обязателен, допускается бесплатный cloud training, но права на dataset/labels/weights остаются обязательным gate.
+Semantic parsing начинается с бесплатного 2D baseline без собственного обучения: текущие MediaPipe-контуры, product masks, GPU edge refinement/flow и опциональный официальный Apache 2.0 Selfie Multiclass Segmenter только для broad `face-skin/hair/background`. Собственная компактная модель для lips/mouth-teeth/eyelids рассматривается только если этот baseline не проходит visual acceptance; права на dataset/labels/weights остаются обязательным gate.
 
 ## Текущее состояние репозитория
 
@@ -67,9 +69,9 @@ ARCore владеет фронтальной камерой, её timeline и т
 - UI: XML/View system и `AppCompatActivity`.
 - `minSdk = 24`, `targetSdk = 37`, `compileSdk = 37`.
 - Android Gradle Plugin 9.3.1.
-- Основной launcher использует ARCore 1.54.0 + MediaPipe hybrid и OpenGL ES camera-conditioned lipstick compositor с переключаемыми matte/satin/gloss/tracking profiles. ARCore даёт camera-synchronized global mouth anchor, MediaPipe — 40-точечный внешний/внутренний контур, а timestamped translation transport совмещает measurement и render frames. Predictor, gyro и face-wide affine/projective correction в видимом пути выключены. Semantic parsing и финальная production Vulkan/BRDF/HDR-калибровка не добавлены.
-- Roadmap перехода к model-independent full-face tracking находится в `FULL_FACE_ROADMAP.md`. Принятый baseline подтверждает разделение global pose и local deformation, но интерфейсы `FaceTrackingBackend`/`FaceObservation`/`FullFaceRenderState`, production Vulkan cutover, full-face masks и fallback для устройств без ARCore ещё не реализованы.
-- Git checkpoints до текущего baseline: V6.0 — `8d48b46`; стабильный V6.2 — `cc82370` / `tracking-v6.2-stable-2026-08-17`; V6.3 gyro experimental — `dd095f7`; FF1/FF2 shadow telemetry — `0554924`; canonical transform contract — `19a2280`; native residual candidate — `1406c24`; первый принятый ARCore + MediaPipe hybrid proof — `782778c`; основной timestamped launcher — `ad51128`.
+- Основной launcher использует ARCore 1.54.0 + MediaPipe hybrid и OpenGL ES camera-conditioned lipstick compositor с переключаемыми matte/satin/gloss/tracking profiles. ARCore даёт camera-synchronized global mouth anchor, MediaPipe — 40-точечный внешний/внутренний 2D-контур, а timestamped translation transport совмещает measurement и render frames. Predictor, gyro, visible 3D mesh и face-wide affine/projective correction в основном пути выключены. Semantic parsing и финальная BRDF/HDR-калибровка не добавлены.
+- Активный roadmap теперь 2D-first и зафиксирован выше; `FULL_FACE_ROADMAP.md` — историческая superseded-документация. Model-independent 2D full-face contract, semantic masks, GPU/Vulkan optimization и fallback для устройств без ARCore ещё не реализованы.
+- Git checkpoints до текущей material-базы: V6.0 — `8d48b46`; стабильный V6.2 — `cc82370` / `tracking-v6.2-stable-2026-08-17`; V6.3 gyro experimental — `dd095f7`; FF1/FF2 shadow telemetry — `0554924`; canonical transform contract — `19a2280`; native residual candidate — `1406c24`; ARCore + MediaPipe hybrid proof — `782778c`; timestamped launcher — `ad51128`; основной product UI/material foundation — `66189d5`; finish candidates — `af33129`; локализованный camera-lighting gloss baseline — `5e046da`.
 
 Пока нет причин менять `minSdk = 24`: он совместим с выбранным ML-стеком и позволяет использовать современный GPU-пайплайн на Android 7+.
 
@@ -449,13 +451,13 @@ UI первого этапа остаётся на Views: камера и мак
 - сначала пробовать GPU delegate, иметь CPU fallback;
 - результаты всегда связывать с timestamp исходного кадра.
 
-Для full-face эффектов facial transformation matrix нужно отдельно включить и измерить как источник canonical 3D pose; blendshapes включать только если они измеримо улучшают моргание, смыкание век, мимику губ или confidence gating. Это не меняет модель-независимый контракт `FaceObservation`.
+Facial transformation matrix остаётся выключенной и может включаться только как диагностический/вспомогательный сигнал глобальной позы, если controlled A/B покажет пользу; она больше не является входом целевого canonical 3D renderer. Blendshapes включать только если они измеримо улучшают моргание, смыкание век, мимику губ или confidence gating.
 
 Роль ARCore Augmented Faces после device proof:
 
-- на ARCore-certified устройствах он принят как основной кандидат для camera-synchronized global face pose и 468-point mesh;
+- на ARCore-certified устройствах он принят для camera-synchronized global face pose и mouth/feature anchors; его 468-point mesh не используется как продуктовая геометрия;
 - он требует Google Play Services for AR и поэтому не может быть единственным backend без явно спроектированного compatibility/fallback поведения;
-- ARCore mesh хорошо удерживает глобальную позу, но сам по себе не заменяет более детальную локальную форму губ/глаз, confidence и optional blendshapes MediaPipe;
+- ARCore anchor хорошо удерживает глобальное движение, но локальная форма губ/глаз и product boundaries остаются 2D-контуром/семантической маской MediaPipe-compatible backend;
 - MediaPipe остаётся локальным expression/semantic-shape backend, а renderer не должен зависеть от классов конкретной библиотеки;
 - две библиотеки допустимы только в одном согласованном camera/timestamp pipeline: ARCore владеет камерой, MediaPipe получает latest-only analysis image, а не запускает вторую CameraX session.
 
@@ -534,10 +536,10 @@ Preview и ImageAnalysis должны использовать общий `ViewP
 
 **Румяна**
 
-- Мягкая анатомическая маска в UV лица, ограниченная skin confidence mask.
+- Мягкая анатомическая 2D-маска щёк, ограниченная skin confidence mask.
 - Плавное падение плотности; исключение глаз, губ, волос и ноздрей.
 - Цвет должен смешиваться с исходным тоном кожи, сохраняя поры и светотень.
-- Обе щеки привязываются к canonical 3D surface и общей позе головы, чтобы не плавать независимо при yaw/pitch и движении камеры.
+- Обе щеки используют один timestamped global anchor/pose и согласованные 2D semantic masks, чтобы не плавать независимо при yaw/pitch и движении камеры.
 
 **Тени**
 
