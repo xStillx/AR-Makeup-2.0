@@ -427,6 +427,7 @@ internal class ArCoreFaceAnchorRenderer(
         GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uHighlightRetention"), profile.optics.highlightRetention)
         GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uMicroTextureRetention"), profile.optics.microTextureRetention)
         GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uWetInnerEdgeStrength"), profile.optics.wetInnerEdgeStrength)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uSurfaceDetailRetention"), profile.optics.surfaceDetailRetention)
         GLES20.glUniform2f(
             GLES20.glGetUniformLocation(lipMeshProgram, "uIlluminationSampleStep"),
             ILLUMINATION_SAMPLE_RADIUS_PIXELS / viewportWidth,
@@ -733,6 +734,7 @@ internal class ArCoreFaceAnchorRenderer(
             uniform float uHighlightRetention;
             uniform float uMicroTextureRetention;
             uniform float uWetInnerEdgeStrength;
+            uniform float uSurfaceDetailRetention;
             uniform vec2 uIlluminationSampleStep;
             varying vec2 vDisplayUv;
             varying vec3 vNormal;
@@ -764,24 +766,28 @@ internal class ArCoreFaceAnchorRenderer(
                 float coverage = clamp(vCoverage * uCoverageMultiplier, 0.0, 1.0);
                 float cameraLuminance = max(dot(cameraLinear, luminanceWeights), 0.0001);
 
-                float luminanceLeft = dot(
-                    cameraLinearAt(vDisplayUv - vec2(uIlluminationSampleStep.x, 0.0)),
-                    luminanceWeights
+                vec3 cameraLeft = cameraLinearAt(
+                    vDisplayUv - vec2(uIlluminationSampleStep.x, 0.0)
                 );
-                float luminanceRight = dot(
-                    cameraLinearAt(vDisplayUv + vec2(uIlluminationSampleStep.x, 0.0)),
-                    luminanceWeights
+                vec3 cameraRight = cameraLinearAt(
+                    vDisplayUv + vec2(uIlluminationSampleStep.x, 0.0)
                 );
-                float luminanceBottom = dot(
-                    cameraLinearAt(vDisplayUv - vec2(0.0, uIlluminationSampleStep.y)),
-                    luminanceWeights
+                vec3 cameraBottom = cameraLinearAt(
+                    vDisplayUv - vec2(0.0, uIlluminationSampleStep.y)
                 );
-                float luminanceTop = dot(
-                    cameraLinearAt(vDisplayUv + vec2(0.0, uIlluminationSampleStep.y)),
-                    luminanceWeights
+                vec3 cameraTop = cameraLinearAt(
+                    vDisplayUv + vec2(0.0, uIlluminationSampleStep.y)
                 );
-                float neighborhoodLuminance = 0.25 * (
-                    luminanceLeft + luminanceRight + luminanceBottom + luminanceTop
+                float luminanceLeft = dot(cameraLeft, luminanceWeights);
+                float luminanceRight = dot(cameraRight, luminanceWeights);
+                float luminanceBottom = dot(cameraBottom, luminanceWeights);
+                float luminanceTop = dot(cameraTop, luminanceWeights);
+                vec3 neighborhoodLinear = 0.25 * (
+                    cameraLeft + cameraRight + cameraBottom + cameraTop
+                );
+                float neighborhoodLuminance = max(
+                    dot(neighborhoodLinear, luminanceWeights),
+                    0.0001
                 );
                 vec2 illuminationGradient = clamp(
                     vec2(luminanceRight - luminanceLeft, luminanceTop - luminanceBottom) * 4.5,
@@ -795,9 +801,14 @@ internal class ArCoreFaceAnchorRenderer(
                     cameraLuminance - neighborhoodLuminance,
                     0.0
                 );
+                float surfaceLuminance = mix(
+                    neighborhoodLuminance,
+                    cameraLuminance,
+                    uSurfaceDetailRetention
+                );
                 float suppressedHighlight = positiveCameraDetail *
                     (1.0 - uHighlightRetention) * coverage;
-                float materialLuminance = max(cameraLuminance - suppressedHighlight, 0.0001);
+                float materialLuminance = max(surfaceLuminance - suppressedHighlight, 0.0001);
                 vec3 pigmentLinear = srgbToLinear(uPigment);
                 float pigmentLuminance = max(dot(pigmentLinear, luminanceWeights), 0.0001);
                 vec3 luminancePreservingPigment = pigmentLinear *
@@ -830,11 +841,39 @@ internal class ArCoreFaceAnchorRenderer(
                 float arcCenter = sin(3.14159265 * clamp(vLipUv.y, 0.0, 1.0));
                 float innerEdge = smoothstep(0.56, 0.88, vLipUv.x) *
                     (1.0 - smoothstep(0.93, 1.0, vLipUv.x)) * arcCenter;
-                float wetEdgeGain = 1.0 + uWetInnerEdgeStrength * innerEdge * 2.2;
+                float legacyWetEdgeGain = 1.0 + uWetInnerEdgeStrength * innerEdge * 2.2;
                 float retainedNativeSpecular = positiveCameraDetail *
                     uHighlightRetention * 0.55;
-                float reconstructedSpecular = uSpecularStrength * coverage *
-                    wetEdgeGain * (0.045 * cameraAnchoredLobe + retainedNativeSpecular);
+                float legacySpecular = uSpecularStrength * coverage *
+                    legacyWetEdgeGain * (0.045 * cameraAnchoredLobe + retainedNativeSpecular);
+
+                float adaptiveGloss = smoothstep(0.12, 0.32, uWetInnerEdgeStrength);
+                float sceneLightLevel = smoothstep(0.015, 0.45, neighborhoodLuminance);
+                float lightingEvidence = max(
+                    nativeHighlight,
+                    max(illuminationConfidence, sceneLightLevel * 0.42)
+                );
+                float adaptiveFilmGain = 1.0 +
+                    uWetInnerEdgeStrength * sceneLightLevel * 0.35;
+                float adaptiveSpecular = uSpecularStrength * coverage *
+                    adaptiveFilmGain * 0.065 * normalLobe * lightingEvidence;
+                vec3 illuminationTint = clamp(
+                    neighborhoodLinear / neighborhoodLuminance,
+                    vec3(0.72),
+                    vec3(1.28)
+                );
+                vec3 nativeSpecularColor = min(
+                    max(cameraLinear - neighborhoodLinear, vec3(0.0)),
+                    vec3(0.22)
+                ) * uHighlightRetention * uSpecularStrength * coverage * 0.72;
+                vec3 legacySpecularColor = vec3(1.0, 0.94, 0.92) * legacySpecular;
+                vec3 adaptiveSpecularColor =
+                    illuminationTint * adaptiveSpecular + nativeSpecularColor;
+                vec3 specularColor = mix(
+                    legacySpecularColor,
+                    adaptiveSpecularColor,
+                    adaptiveGloss
+                );
 
                 float textureDetail = cameraLuminance - neighborhoodLuminance;
                 float textureCorrection = textureDetail * uMicroTextureRetention *
@@ -844,7 +883,7 @@ internal class ArCoreFaceAnchorRenderer(
                     0.0001
                 );
                 pigmented += chromaDirection * textureCorrection;
-                pigmented += vec3(1.0, 0.94, 0.92) * reconstructedSpecular;
+                pigmented += specularColor;
                 gl_FragColor = vec4(linearToSrgb(max(pigmented, vec3(0.0))), 1.0);
             }
         """

@@ -76,20 +76,74 @@ class LipstickMaterialProfileTest {
         assertTrue(matte.highlightRetention < satin.highlightRetention)
         assertTrue(satin.highlightRetention < gloss.highlightRetention)
         assertTrue(matte.microTextureRetention > gloss.microTextureRetention)
+        assertTrue(satin.surfaceDetailRetention > gloss.surfaceDetailRetention)
         assertTrue(matte.wetInnerEdgeStrength < gloss.wetInnerEdgeStrength)
     }
 
     @Test
-    fun productFinishesKeepTheReferencePigmentMix() {
-        listOf(
-            ReferenceLipstickRenderProfiles.matte,
-            ReferenceLipstickRenderProfiles.satin,
-            ReferenceLipstickRenderProfiles.gloss,
-        ).forEach { profile ->
-            assertEquals(LipstickPigmentPalette.PRODUCT_ROSE, profile.pigmentPalette)
-            assertEquals(1f, profile.coverageMultiplier, 0f)
-            assertEquals(1f, profile.luminancePreservation, 0f)
-        }
+    fun matteProfileProducesOpaqueCoreWithoutWetReflection() {
+        val profile = ReferenceLipstickRenderProfiles.matte
+
+        assertEquals(LipstickPigmentPalette.PRODUCT_ROSE, profile.pigmentPalette)
+        assertTrue(
+            ReferenceMatteLipstickProfile.upper.effectiveCoreCoverage *
+                profile.coverageMultiplier >= 1f,
+        )
+        assertTrue(
+            ReferenceMatteLipstickProfile.lower.effectiveCoreCoverage *
+                profile.coverageMultiplier >= 1f,
+        )
+        assertEquals(1f, profile.optics.roughness, 0f)
+        assertEquals(0f, profile.optics.specularStrength, 0f)
+        assertEquals(0f, profile.optics.highlightRetention, 0f)
+        assertEquals(0f, profile.optics.wetInnerEdgeStrength, 0f)
+        assertTrue(profile.optics.microTextureRetention > 0f)
+        assertEquals(1f, profile.optics.surfaceDetailRetention, 0f)
+        assertTrue(profile.luminancePreservation > 0.8f)
+    }
+
+    @Test
+    fun satinProfileIsRichButLighterAndSofterThanMatte() {
+        val matte = ReferenceLipstickRenderProfiles.matte
+        val satin = ReferenceLipstickRenderProfiles.satin
+        val lowerCoreCoverage =
+            ReferenceMatteLipstickProfile.lower.effectiveCoreCoverage *
+                satin.coverageMultiplier
+
+        assertEquals(LipstickPigmentPalette.PRODUCT_ROSE, satin.pigmentPalette)
+        assertTrue(satin.coverageMultiplier < matte.coverageMultiplier)
+        assertTrue(satin.coverageMultiplier > 1f)
+        assertTrue(lowerCoreCoverage > 0.75f)
+        assertTrue(lowerCoreCoverage < 1f)
+        assertTrue(satin.luminancePreservation > matte.luminancePreservation)
+        assertTrue(satin.luminancePreservation < 1f)
+        assertTrue(satin.optics.roughness > 0.5f)
+        assertTrue(satin.optics.specularStrength in 0.1f..0.25f)
+        assertTrue(satin.optics.wetInnerEdgeStrength < 0.1f)
+        assertTrue(satin.optics.microTextureRetention < matte.optics.microTextureRetention)
+        assertEquals(1f, satin.optics.surfaceDetailRetention, 0f)
+    }
+
+    @Test
+    fun glossProducesDenseLacquerWithSmoothedSurfaceAndWetReflection() {
+        val matte = ReferenceLipstickRenderProfiles.matte
+        val gloss = ReferenceLipstickRenderProfiles.gloss
+        val lowerCoreCoverage =
+            ReferenceMatteLipstickProfile.lower.effectiveCoreCoverage *
+                gloss.coverageMultiplier
+
+        assertEquals(LipstickPigmentPalette.PRODUCT_ROSE, gloss.pigmentPalette)
+        assertTrue(gloss.coverageMultiplier < matte.coverageMultiplier)
+        assertTrue(gloss.coverageMultiplier >= 1.5f)
+        assertTrue(lowerCoreCoverage > 0.8f)
+        assertTrue(lowerCoreCoverage < 1f)
+        assertTrue(gloss.luminancePreservation in 0.85f..0.95f)
+        assertTrue(gloss.optics.roughness <= 0.15f)
+        assertTrue(gloss.optics.specularStrength >= 0.75f)
+        assertEquals(1f, gloss.optics.highlightRetention, 0f)
+        assertTrue(gloss.optics.microTextureRetention <= 0.2f)
+        assertTrue(gloss.optics.surfaceDetailRetention <= 0.2f)
+        assertTrue(gloss.optics.wetInnerEdgeStrength >= 0.6f)
     }
 
     @Test
@@ -111,6 +165,7 @@ class LipstickMaterialProfileTest {
         assertEquals(0f, profile.optics.highlightRetention, 0f)
         assertEquals(0f, profile.optics.microTextureRetention, 0f)
         assertEquals(0f, profile.optics.wetInnerEdgeStrength, 0f)
+        assertEquals(0f, profile.optics.surfaceDetailRetention, 0f)
     }
 
     @Test(expected = IllegalArgumentException::class)
@@ -121,6 +176,7 @@ class LipstickMaterialProfileTest {
             highlightRetention = 0.5f,
             microTextureRetention = 0.8f,
             wetInnerEdgeStrength = 0.1f,
+            surfaceDetailRetention = 0.8f,
         )
     }
 }

@@ -72,6 +72,7 @@ internal data class LipstickOpticalProfile(
     val specularStrength: Float,
     val highlightRetention: Float,
     val microTextureRetention: Float,
+    val surfaceDetailRetention: Float,
     val wetInnerEdgeStrength: Float,
 ) {
     init {
@@ -79,6 +80,7 @@ internal data class LipstickOpticalProfile(
         require(specularStrength in UNIT_RANGE)
         require(highlightRetention in UNIT_RANGE)
         require(microTextureRetention in UNIT_RANGE)
+        require(surfaceDetailRetention in UNIT_RANGE)
         require(wetInnerEdgeStrength in UNIT_RANGE)
     }
 
@@ -90,25 +92,28 @@ internal data class LipstickOpticalProfile(
 
 internal object ReferenceLipstickOptics {
     val matte = LipstickOpticalProfile(
-        roughness = 0.82f,
-        specularStrength = 0.07f,
-        highlightRetention = 0.24f,
-        microTextureRetention = 0.94f,
-        wetInnerEdgeStrength = 0.03f,
+        roughness = 1f,
+        specularStrength = 0f,
+        highlightRetention = 0f,
+        microTextureRetention = 0.82f,
+        surfaceDetailRetention = 1f,
+        wetInnerEdgeStrength = 0f,
     )
     val satin = LipstickOpticalProfile(
-        roughness = 0.48f,
-        specularStrength = 0.20f,
-        highlightRetention = 0.68f,
-        microTextureRetention = 0.86f,
-        wetInnerEdgeStrength = 0.11f,
+        roughness = 0.68f,
+        specularStrength = 0.18f,
+        highlightRetention = 0.62f,
+        microTextureRetention = 0.48f,
+        surfaceDetailRetention = 1f,
+        wetInnerEdgeStrength = 0.06f,
     )
     val gloss = LipstickOpticalProfile(
-        roughness = 0.20f,
-        specularStrength = 0.46f,
+        roughness = 0.12f,
+        specularStrength = 0.82f,
         highlightRetention = 1f,
-        microTextureRetention = 0.72f,
-        wetInnerEdgeStrength = 0.32f,
+        microTextureRetention = 0.12f,
+        surfaceDetailRetention = 0.18f,
+        wetInnerEdgeStrength = 0.68f,
     )
 }
 
@@ -119,7 +124,8 @@ internal enum class LipstickPigmentPalette {
 
 /**
  * Parameters that alter pigment rendering without changing lip geometry or tracking coordinates.
- * Product finishes intentionally share identical coverage and luminance-preserving color mixing.
+ * Coverage is calibrated per finish: an ideal matte coat is optically opaque at the lip core,
+ * while satin and gloss retain more of the native lip/camera response.
  */
 internal data class LipstickRenderProfile(
     val optics: LipstickOpticalProfile,
@@ -138,17 +144,27 @@ internal data class LipstickRenderProfile(
 }
 
 internal object ReferenceLipstickRenderProfiles {
-    private const val PRODUCT_COVERAGE_MULTIPLIER = 1f
-    private const val PRODUCT_LUMINANCE_PRESERVATION = 1f
-
-    val matte = productProfile(ReferenceLipstickOptics.matte)
-    val satin = productProfile(ReferenceLipstickOptics.satin)
-    val gloss = productProfile(ReferenceLipstickOptics.gloss)
+    val matte = productProfile(
+        optics = ReferenceLipstickOptics.matte,
+        coverageMultiplier = 2f,
+        luminancePreservation = 0.88f,
+    )
+    val satin = productProfile(
+        optics = ReferenceLipstickOptics.satin,
+        coverageMultiplier = 1.55f,
+        luminancePreservation = 0.92f,
+    )
+    val gloss = productProfile(
+        optics = ReferenceLipstickOptics.gloss,
+        coverageMultiplier = 1.6f,
+        luminancePreservation = 0.9f,
+    )
     private val trackingTestOptics = LipstickOpticalProfile(
         roughness = 1f,
         specularStrength = 0f,
         highlightRetention = 0f,
         microTextureRetention = 0f,
+        surfaceDetailRetention = 0f,
         wetInnerEdgeStrength = 0f,
     )
 
@@ -167,10 +183,14 @@ internal object ReferenceLipstickRenderProfiles {
         LipstickFinish.TRACKING_TEST -> trackingTest
     }
 
-    private fun productProfile(optics: LipstickOpticalProfile) = LipstickRenderProfile(
+    private fun productProfile(
+        optics: LipstickOpticalProfile,
+        coverageMultiplier: Float = 1f,
+        luminancePreservation: Float = 1f,
+    ) = LipstickRenderProfile(
         optics = optics,
         pigmentPalette = LipstickPigmentPalette.PRODUCT_ROSE,
-        coverageMultiplier = PRODUCT_COVERAGE_MULTIPLIER,
-        luminancePreservation = PRODUCT_LUMINANCE_PRESERVATION,
+        coverageMultiplier = coverageMultiplier,
+        luminancePreservation = luminancePreservation,
     )
 }

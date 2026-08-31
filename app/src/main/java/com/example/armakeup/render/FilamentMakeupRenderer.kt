@@ -392,6 +392,7 @@ internal class FilamentMakeupRenderer(
             material.setParameter("specularStrength", profile.specularStrength)
             material.setParameter("highlightRetention", profile.highlightRetention)
             material.setParameter("microTextureRetention", profile.microTextureRetention)
+            material.setParameter("surfaceDetailRetention", profile.surfaceDetailRetention)
             material.setParameter("wetInnerEdgeStrength", profile.wetInnerEdgeStrength)
         }
     }

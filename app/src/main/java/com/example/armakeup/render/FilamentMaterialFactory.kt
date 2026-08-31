@@ -51,6 +51,7 @@ internal object FilamentMaterialFactory {
             .uniformParameter(MaterialBuilder.UniformType.FLOAT, "specularStrength")
             .uniformParameter(MaterialBuilder.UniformType.FLOAT, "highlightRetention")
             .uniformParameter(MaterialBuilder.UniformType.FLOAT, "microTextureRetention")
+            .uniformParameter(MaterialBuilder.UniformType.FLOAT, "surfaceDetailRetention")
             .uniformParameter(MaterialBuilder.UniformType.FLOAT, "wetInnerEdgeStrength")
             .uniformParameter(MaterialBuilder.UniformType.FLOAT, "cameraDetailCoherence")
             .material(LIPSTICK_FRAGMENT),
@@ -142,24 +143,28 @@ internal object FilamentMaterialFactory {
                 materialParams.illuminationSampleStep,
                 vec2(0.0001)
             );
-            float luminanceLeft = dot(
-                cameraLinearAt(displayUv - vec2(sampleStep.x, 0.0)),
-                luminanceWeights
+            vec3 cameraLeft = cameraLinearAt(
+                displayUv - vec2(sampleStep.x, 0.0)
             );
-            float luminanceRight = dot(
-                cameraLinearAt(displayUv + vec2(sampleStep.x, 0.0)),
-                luminanceWeights
+            vec3 cameraRight = cameraLinearAt(
+                displayUv + vec2(sampleStep.x, 0.0)
             );
-            float luminanceBottom = dot(
-                cameraLinearAt(displayUv - vec2(0.0, sampleStep.y)),
-                luminanceWeights
+            vec3 cameraBottom = cameraLinearAt(
+                displayUv - vec2(0.0, sampleStep.y)
             );
-            float luminanceTop = dot(
-                cameraLinearAt(displayUv + vec2(0.0, sampleStep.y)),
-                luminanceWeights
+            vec3 cameraTop = cameraLinearAt(
+                displayUv + vec2(0.0, sampleStep.y)
             );
-            float neighborhoodLuminance = 0.25 * (
-                luminanceLeft + luminanceRight + luminanceBottom + luminanceTop
+            float luminanceLeft = dot(cameraLeft, luminanceWeights);
+            float luminanceRight = dot(cameraRight, luminanceWeights);
+            float luminanceBottom = dot(cameraBottom, luminanceWeights);
+            float luminanceTop = dot(cameraTop, luminanceWeights);
+            vec3 neighborhoodLinear = 0.25 * (
+                cameraLeft + cameraRight + cameraBottom + cameraTop
+            );
+            float neighborhoodLuminance = max(
+                dot(neighborhoodLinear, luminanceWeights),
+                0.0001
             );
             vec2 rawIlluminationGradient = clamp(
                 vec2(
@@ -182,6 +187,11 @@ internal object FilamentMaterialFactory {
                 cameraLuminance,
                 cameraDetailCoherence
             );
+            float surfaceLuminance = mix(
+                neighborhoodLuminance,
+                coherentCameraLuminance,
+                materialParams.surfaceDetailRetention
+            );
             float positiveCameraDetail = max(
                 cameraLuminance - neighborhoodLuminance,
                 0.0
@@ -189,7 +199,7 @@ internal object FilamentMaterialFactory {
             float suppressedHighlight = positiveCameraDetail *
                 (1.0 - materialParams.highlightRetention) * coverage;
             float materialLuminance = max(
-                coherentCameraLuminance - suppressedHighlight,
+                surfaceLuminance - suppressedHighlight,
                 0.0001
             );
             float pigmentLuminance = max(dot(materialParams.pigmentColor, luminanceWeights), 0.0001);
@@ -222,12 +232,45 @@ internal object FilamentMaterialFactory {
             float arcCenter = sin(3.14159265 * clamp(lipUv.y, 0.0, 1.0));
             float innerEdge = smoothstep(0.56, 0.88, lipUv.x) *
                 (1.0 - smoothstep(0.93, 1.0, lipUv.x)) * arcCenter;
-            float wetEdgeGain = 1.0 +
+            float legacyWetEdgeGain = 1.0 +
                 materialParams.wetInnerEdgeStrength * innerEdge * 2.2;
             float retainedNativeSpecular = positiveCameraDetail *
                 materialParams.highlightRetention * 0.55;
-            float reconstructedSpecular = materialParams.specularStrength * coverage *
-                wetEdgeGain * (0.045 * cameraAnchoredLobe + retainedNativeSpecular);
+            float legacySpecular = materialParams.specularStrength * coverage *
+                legacyWetEdgeGain * (0.045 * cameraAnchoredLobe + retainedNativeSpecular);
+
+            float adaptiveGloss = smoothstep(
+                0.12,
+                0.32,
+                materialParams.wetInnerEdgeStrength
+            );
+            float sceneLightLevel = smoothstep(0.015, 0.45, neighborhoodLuminance);
+            float lightingEvidence = max(
+                nativeHighlight,
+                max(illuminationConfidence, sceneLightLevel * 0.42)
+            );
+            float adaptiveFilmGain = 1.0 +
+                materialParams.wetInnerEdgeStrength * sceneLightLevel * 0.35;
+            float adaptiveSpecular = materialParams.specularStrength * coverage *
+                adaptiveFilmGain * 0.065 * normalLobe * lightingEvidence;
+            vec3 illuminationTint = clamp(
+                neighborhoodLinear / neighborhoodLuminance,
+                vec3(0.72),
+                vec3(1.28)
+            );
+            vec3 nativeSpecularColor = min(
+                max(cameraLinear - neighborhoodLinear, vec3(0.0)),
+                vec3(0.22)
+            ) * materialParams.highlightRetention * materialParams.specularStrength *
+                coverage * cameraDetailCoherence * 0.72;
+            vec3 legacySpecularColor = vec3(1.0, 0.94, 0.92) * legacySpecular;
+            vec3 adaptiveSpecularColor =
+                illuminationTint * adaptiveSpecular + nativeSpecularColor;
+            vec3 specularColor = mix(
+                legacySpecularColor,
+                adaptiveSpecularColor,
+                adaptiveGloss
+            );
 
             float textureDetail = (cameraLuminance - neighborhoodLuminance) *
                 cameraDetailCoherence;
@@ -238,7 +281,7 @@ internal object FilamentMaterialFactory {
                 0.0001
             );
             pigmented += chromaDirection * textureCorrection;
-            pigmented += vec3(1.0, 0.94, 0.92) * reconstructedSpecular;
+            pigmented += specularColor;
             material.baseColor = vec4(max(pigmented, vec3(0.0)), 1.0);
         }
     """
