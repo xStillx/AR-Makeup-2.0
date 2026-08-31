@@ -853,10 +853,28 @@ internal class ArCoreFaceAnchorRenderer(
                     nativeHighlight,
                     max(illuminationConfidence, sceneLightLevel * 0.42)
                 );
+                float directionalContrast = smoothstep(
+                    0.04,
+                    0.55,
+                    length(illuminationGradient)
+                );
+                float highlightArcCenter = clamp(
+                    0.5 + illuminationGradient.x * 0.38,
+                    0.16,
+                    0.84
+                );
+                float highlightArcHalfWidth = mix(0.32, 0.14, directionalContrast);
+                float highlightArcDistance = abs(vLipUv.y - highlightArcCenter);
+                float localizedArcHighlight = 1.0 - smoothstep(
+                    highlightArcHalfWidth * 0.62,
+                    highlightArcHalfWidth,
+                    highlightArcDistance
+                );
                 float adaptiveFilmGain = 1.0 +
                     uWetInnerEdgeStrength * sceneLightLevel * 0.35;
                 float adaptiveSpecular = uSpecularStrength * coverage *
-                    adaptiveFilmGain * 0.065 * normalLobe * lightingEvidence;
+                    adaptiveFilmGain * 0.065 * normalLobe * lightingEvidence *
+                    localizedArcHighlight;
                 vec3 illuminationTint = clamp(
                     neighborhoodLinear / neighborhoodLuminance,
                     vec3(0.72),
