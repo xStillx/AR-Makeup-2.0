@@ -2,6 +2,7 @@ package com.example.armakeup.arcore
 
 import android.os.SystemClock
 import android.util.Log
+import com.example.armakeup.tracking.FaceObservation
 import com.google.ar.core.Frame
 import com.google.ar.core.exceptions.NotYetAvailableException
 import com.google.mediapipe.framework.image.ByteBufferImageBuilder
@@ -238,6 +239,17 @@ internal class ArCoreMediaPipeLipTracker(
                 coordinates[output + 1] = landmark.y()
                 coordinates[output + 2] = landmark.z()
             }
+            val faceObservation = MediaPipeFaceObservationAdapter.create(
+                coordinates = coordinates,
+                sensorTimestampNs = sensorTimestampNs,
+                sourceWidth = inputWidth,
+                sourceHeight = inputHeight,
+                rotationDegrees = rotationDegrees,
+            )
+            if (faceObservation == null) {
+                releaseActiveInput(inputImage)
+                return
+            }
             val intervalNs = resultAtNs - lastResultTimestampNs
             val instantaneousFps = if (lastResultTimestampNs > 0L && intervalNs > 0L) {
                 NANOS_PER_SECOND / intervalNs.toFloat()
@@ -252,6 +264,7 @@ internal class ArCoreMediaPipeLipTracker(
             lastResultTimestampNs = resultAtNs
             latestObservation.set(
                 Observation(
+                    face = faceObservation,
                     coordinates = coordinates,
                     sensorTimestampNs = sensorTimestampNs,
                     inferenceDurationMs = (resultAtNs - submittedAtNs).coerceAtLeast(0L) /
@@ -313,6 +326,7 @@ internal class ArCoreMediaPipeLipTracker(
     }
 
     data class Observation(
+        val face: FaceObservation,
         val coordinates: FloatArray,
         val sensorTimestampNs: Long,
         val inferenceDurationMs: Float,

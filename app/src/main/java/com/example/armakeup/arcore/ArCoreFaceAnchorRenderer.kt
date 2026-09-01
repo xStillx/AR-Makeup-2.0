@@ -15,6 +15,8 @@ import com.example.armakeup.makeup.ReferenceLipstickRenderProfiles
 import com.example.armakeup.tracking.CanonicalFaceTransform
 import com.example.armakeup.tracking.FillCenterTransform
 import com.example.armakeup.tracking.NormalizedImageTransform
+import com.example.armakeup.tracking.LipContourTemporalRefiner
+import com.example.armakeup.tracking.LipSemanticState
 import com.google.ar.core.AugmentedFace
 import com.google.ar.core.Coordinates2d
 import com.google.ar.core.Session
@@ -54,6 +56,8 @@ internal class ArCoreFaceAnchorRenderer(
 
     private val transformedCameraUvs = directFloatBuffer(8)
     private val lipAnchorVertex = directFloatBuffer(3)
+    private val stableLipAnchorLocal = FloatArray(3)
+    private var hasStableLipAnchor = false
     private val mappedMediaPipeOuterLipVertices =
         directFloatBuffer(LipLandmarkTopology.outerContour.size * 3)
     private val mappedMediaPipeInnerLipVertices =
@@ -63,7 +67,10 @@ internal class ArCoreFaceAnchorRenderer(
     )
     private val anchorTransport = TimestampedLipAnchorTransport()
     private val lipVisibilityGate = HeadDownLipVisibilityGate()
+    private val lipContourRefiner = LipContourTemporalRefiner()
     private val lipTessellator = LipMeshTessellator()
+    private val measuredOuterContourPoints = FloatArray(LipLandmarkTopology.outerContour.size * 2)
+    private val measuredInnerContourPoints = FloatArray(LipLandmarkTopology.innerContour.size * 2)
     private val outerContourPoints = FloatArray(LipLandmarkTopology.outerContour.size * 2)
     private val innerContourPoints = FloatArray(LipLandmarkTopology.innerContour.size * 2)
     private val tessellatedLipVertices = directFloatBuffer(
@@ -90,12 +97,18 @@ internal class ArCoreFaceAnchorRenderer(
 
     private var statusWindowStartNs = 0L
     private var statusWindowFrames = 0
+    private var lastLipMetricsTimestampNs = 0L
+    private var missingFaceFrameCount = 0
 
     fun bindSession(value: Session?) {
         session = value
         cameraTextureBoundSession = null
         anchorTransport.reset()
         lipVisibilityGate.reset()
+        lipContourRefiner.reset()
+        lastLipMetricsTimestampNs = 0L
+        hasStableLipAnchor = false
+        missingFaceFrameCount = 0
     }
 
     fun bindMediaPipeTracker(value: ArCoreMediaPipeLipTracker?) {
@@ -139,10 +152,16 @@ internal class ArCoreFaceAnchorRenderer(
                 .firstOrNull { it.trackingState == TrackingState.TRACKING }
             val screenPoint = face?.let { drawLipAnchor(frame.camera, it) }
             if (timestampNs != 0L && screenPoint != null) {
+                missingFaceFrameCount = 0
                 anchorTransport.record(timestampNs, screenPoint.first, screenPoint.second)
             } else if (face == null) {
                 anchorTransport.reset()
-                lipVisibilityGate.reset()
+                missingFaceFrameCount++
+                if (missingFaceFrameCount == FACE_LOSS_RESET_FRAME_COUNT) {
+                    lipVisibilityGate.reset()
+                    lipContourRefiner.reset()
+                    lastLipMetricsTimestampNs = 0L
+                }
             }
             val pitchRadians = face?.let {
                 CanonicalFaceTransform.fromColumnMajor(viewModel)?.metricPitchRadians
@@ -199,15 +218,36 @@ internal class ArCoreFaceAnchorRenderer(
         camera: com.google.ar.core.Camera,
         face: AugmentedFace,
     ): Pair<Float, Float>? {
-        val vertices = face.meshVertices
-        val requiredFloats = (maxOf(UPPER_INNER_LIP_INDEX, LOWER_INNER_LIP_INDEX) + 1) * 3
-        if (vertices.limit() < requiredFloats) return null
+        if (!hasStableLipAnchor) {
+            val vertices = face.meshVertices
+            val requiredFloats =
+                (maxOf(UPPER_INNER_LIP_INDEX, LOWER_INNER_LIP_INDEX) + 1) * 3
+            if (vertices.limit() < requiredFloats) return null
+            repeat(3) { axis ->
+                stableLipAnchorLocal[axis] = (
+                    vertices[UPPER_INNER_LIP_INDEX * 3 + axis] +
+                        vertices[LOWER_INNER_LIP_INDEX * 3 + axis]
+                    ) * 0.5f
+            }
+            hasStableLipAnchor = true
+            anchorTransport.reset()
+            lipContourRefiner.reset()
+            lastLipMetricsTimestampNs = 0L
+            Log.i(
+                TAG,
+                String.format(
+                    Locale.US,
+                    "Captured stable face-local lip anchor %.4f,%.4f,%.4f",
+                    stableLipAnchorLocal[0],
+                    stableLipAnchorLocal[1],
+                    stableLipAnchorLocal[2],
+                ),
+            )
+        }
 
-        val x = (vertices[UPPER_INNER_LIP_INDEX * 3] + vertices[LOWER_INNER_LIP_INDEX * 3]) * 0.5f
-        val y = (vertices[UPPER_INNER_LIP_INDEX * 3 + 1] +
-            vertices[LOWER_INNER_LIP_INDEX * 3 + 1]) * 0.5f
-        val z = (vertices[UPPER_INNER_LIP_INDEX * 3 + 2] +
-            vertices[LOWER_INNER_LIP_INDEX * 3 + 2]) * 0.5f
+        val x = stableLipAnchorLocal[0]
+        val y = stableLipAnchorLocal[1]
+        val z = stableLipAnchorLocal[2]
 
         lipAnchorVertex.position(0)
         lipAnchorVertex.put(x).put(y).put(z).position(0)
@@ -240,45 +280,44 @@ internal class ArCoreFaceAnchorRenderer(
         pitchRadians: Float?,
     ): HybridStatus? {
         val observation = mediaPipeTracker?.latest() ?: return null
-        if (observation.inputWidth <= 0 || observation.inputHeight <= 0) return null
-        val coordinates = observation.coordinates
-        val maximumRequiredIndex = maxOf(
-            LipLandmarkTopology.outerContour.maxOrNull() ?: 0,
-            LipLandmarkTopology.innerContour.maxOrNull() ?: 0,
-        )
-        if (coordinates.size / 3 <= maximumRequiredIndex) return null
+        val faceObservation = observation.face
+        val lips = faceObservation.lips
+        if (lips.outer.pointCount != LipLandmarkTopology.outerContour.size) return null
+        if (lips.inner.pointCount != LipLandmarkTopology.innerContour.size) return null
+        val inputWidth = faceObservation.sourceWidth
+        val inputHeight = faceObservation.sourceHeight
 
         val imageTransform = NormalizedImageTransform(
-            rotationDegrees = observation.rotationDegrees,
-            mirrorHorizontal = true,
+            rotationDegrees = faceObservation.rotationDegrees,
+            mirrorHorizontal = faceObservation.mirrorHorizontal,
         )
         val fillTransform = FillCenterTransform.calculate(
             viewWidth = viewportWidth,
             viewHeight = viewportHeight,
-            sourceWidth = observation.inputWidth,
-            sourceHeight = observation.inputHeight,
+            sourceWidth = inputWidth,
+            sourceHeight = inputHeight,
         )
         val anchorCorrection = anchorTransport.correctionFor(
-            measurementTimestampNs = observation.sensorTimestampNs,
+            measurementTimestampNs = faceObservation.sensorTimestampNs,
             renderTimestampNs = cameraTimestampNs,
         )
         val translationX = anchorCorrection?.translationX ?: 0f
         val translationY = anchorCorrection?.translationY ?: 0f
 
         fun writeLandmark(
-            landmark: Int,
+            normalizedContour: FloatArray,
             pointIndex: Int,
             points: FloatArray,
             vertices: FloatBuffer,
         ) {
-            val coordinateIndex = landmark * 3
-            val rawX = coordinates[coordinateIndex]
-            val rawY = coordinates[coordinateIndex + 1]
+            val coordinateIndex = pointIndex * 2
+            val rawX = normalizedContour[coordinateIndex]
+            val rawY = normalizedContour[coordinateIndex + 1]
             val displayX = imageTransform.mapX(rawX, rawY)
             val displayY = imageTransform.mapY(rawX, rawY)
-            val screenX = fillTransform.mapX(displayX, observation.inputWidth) /
+            val screenX = fillTransform.mapX(displayX, inputWidth) /
                 viewportWidth + translationX
-            val screenY = fillTransform.mapY(displayY, observation.inputHeight) /
+            val screenY = fillTransform.mapY(displayY, inputHeight) /
                 viewportHeight + translationY
             val outputIndex = pointIndex * 2
             points[outputIndex] = screenX
@@ -290,26 +329,67 @@ internal class ArCoreFaceAnchorRenderer(
         }
 
         mappedMediaPipeOuterLipVertices.clear()
-        LipLandmarkTopology.outerContour.forEachIndexed { pointIndex, landmark ->
+        repeat(lips.outer.pointCount) { pointIndex ->
             writeLandmark(
-                landmark,
+                lips.outer.points,
                 pointIndex,
-                outerContourPoints,
+                measuredOuterContourPoints,
                 mappedMediaPipeOuterLipVertices,
             )
         }
         mappedMediaPipeOuterLipVertices.position(0)
 
         mappedMediaPipeInnerLipVertices.clear()
-        LipLandmarkTopology.innerContour.forEachIndexed { pointIndex, landmark ->
+        repeat(lips.inner.pointCount) { pointIndex ->
             writeLandmark(
-                landmark,
+                lips.inner.points,
                 pointIndex,
-                innerContourPoints,
+                measuredInnerContourPoints,
                 mappedMediaPipeInnerLipVertices,
             )
         }
         mappedMediaPipeInnerLipVertices.position(0)
+        val refinement = lipContourRefiner.refine(
+            measuredOuter = measuredOuterContourPoints,
+            measuredInner = measuredInnerContourPoints,
+            sensorTimestampNs = faceObservation.sensorTimestampNs,
+            renderTimestampNs = cameraTimestampNs,
+            geometryConfidence = lips.geometryConfidence,
+            mouthOpenness = lips.mouthOpenness,
+            outputOuter = outerContourPoints,
+            outputInner = innerContourPoints,
+        )
+        val transition = refinement.diagnostics
+        if (faceObservation.sensorTimestampNs != lastLipMetricsTimestampNs) {
+            Log.i(
+                LIP_METRICS_TAG,
+                String.format(
+                    Locale.US,
+                    "ts=%d mouth=%.3f mouthV=%.2f/s response=%.2f upperR=%.2f " +
+                        "lowerR=%.2f/%.2f " +
+                        "upperCenter=%+.2f->%+.2f%% upperThickness=%+.2f->%+.2f%% " +
+                        "lowerCenter=%+.2f->%+.2f%% lowerThickness=%+.2f->%+.2f%% " +
+                        "anchorY=%+.1fpx",
+                    faceObservation.sensorTimestampNs,
+                    lips.mouthOpenness,
+                    transition.mouthOpennessSpeed,
+                    refinement.response,
+                    transition.upperVerticalResponse,
+                    transition.lowerVerticalResponse,
+                    transition.lowerThicknessResponse,
+                    transition.rawUpperCenterDelta * 100f,
+                    transition.filteredUpperCenterDelta * 100f,
+                    transition.rawUpperThicknessDelta * 100f,
+                    transition.filteredUpperThicknessDelta * 100f,
+                    transition.rawLowerCenterDelta * 100f,
+                    transition.filteredLowerCenterDelta * 100f,
+                    transition.rawLowerThicknessDelta * 100f,
+                    transition.filteredLowerThicknessDelta * 100f,
+                    translationY * viewportHeight,
+                ),
+            )
+            lastLipMetricsTimestampNs = faceObservation.sensorTimestampNs
+        }
 
         val tessellated = lipTessellator.tessellate(
             outerContour = outerContourPoints,
@@ -332,7 +412,7 @@ internal class ArCoreFaceAnchorRenderer(
             sourceIndex += LipMeshTessellator.VERTEX_COMPONENT_COUNT
         }
         tessellatedLipVertices.position(0)
-        if (lipVisible) drawLipMesh()
+        if (lipVisible) drawLipMesh(lips.semantics, lips.mouthOpenness)
 
         if (DRAW_DIAGNOSTIC_POINTS && lipVisible) drawPointCloud(
             vertices = mappedMediaPipeOuterLipVertices,
@@ -375,7 +455,7 @@ internal class ArCoreFaceAnchorRenderer(
             ringColor = DARK_GREEN,
         )
 
-        val observationAgeNs = (cameraTimestampNs - observation.sensorTimestampNs)
+        val observationAgeNs = (cameraTimestampNs - faceObservation.sensorTimestampNs)
             .coerceAtLeast(0L)
         val anchorTranslationPixels = hypot(
             translationX * viewportWidth,
@@ -390,6 +470,17 @@ internal class ArCoreFaceAnchorRenderer(
             anchorCorrectionAvailable = anchorCorrection != null,
             pitchDegrees = pitchRadians?.let { Math.toDegrees(it.toDouble()).toFloat() },
             lipVisible = lipVisible,
+            geometryConfidence = lips.geometryConfidence,
+            semanticConfidence = lips.semantics.lipConfidence,
+            refinementResponse = refinement.response,
+            localMotion = refinement.localMotion,
+            mouthOpenness = lips.mouthOpenness,
+            mouthOpennessSpeed = transition.mouthOpennessSpeed,
+            upperVerticalResponse = transition.upperVerticalResponse,
+            rawUpperCenterDelta = transition.rawUpperCenterDelta,
+            filteredUpperCenterDelta = transition.filteredUpperCenterDelta,
+            rawUpperThicknessDelta = transition.rawUpperThicknessDelta,
+            filteredUpperThicknessDelta = transition.filteredUpperThicknessDelta,
         )
     }
     private fun projectFaceVertex(vertices: FloatBuffer, landmarkIndex: Int): Pair<Float, Float>? {
@@ -404,7 +495,10 @@ internal class ArCoreFaceAnchorRenderer(
         return Pair((clipX / clipW + 1f) * 0.5f, (1f - clipY / clipW) * 0.5f)
     }
 
-    private fun drawLipMesh() {
+    private fun drawLipMesh(
+        semantics: LipSemanticState,
+        mouthOpenness: Float,
+    ) {
         GLES20.glDisable(GLES20.GL_DEPTH_TEST)
         GLES20.glDisable(GLES20.GL_BLEND)
         GLES20.glUseProgram(lipMeshProgram)
@@ -433,6 +527,22 @@ internal class ArCoreFaceAnchorRenderer(
         GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uWetInnerEdgeStrength"), profile.optics.wetInnerEdgeStrength)
         GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uSurfaceDetailRetention"), profile.optics.surfaceDetailRetention)
         GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uSatinGlowStrength"), profile.optics.satinGlowStrength)
+        GLES20.glUniform1f(
+            GLES20.glGetUniformLocation(lipMeshProgram, "uSemanticConfidence"),
+            semantics.lipConfidence,
+        )
+        GLES20.glUniform1f(
+            GLES20.glGetUniformLocation(lipMeshProgram, "uMouthExclusionConfidence"),
+            semantics.mouthTeethExclusionConfidence,
+        )
+        GLES20.glUniform1f(
+            GLES20.glGetUniformLocation(lipMeshProgram, "uSemanticEdgeStrength"),
+            semantics.edgeRefinementStrength,
+        )
+        GLES20.glUniform1f(
+            GLES20.glGetUniformLocation(lipMeshProgram, "uMouthOpenness"),
+            mouthOpenness,
+        )
         GLES20.glUniform1f(
             GLES20.glGetUniformLocation(lipMeshProgram, "uFinishMode"),
             when (lipstickFinish) {
@@ -568,14 +678,27 @@ internal class ArCoreFaceAnchorRenderer(
             String.format(
                 Locale.US,
                 "MediaPipe %.1f FPS · YUV %.0f + ML %.0f ms · age %.0f ms · %s · " +
-                    "pitch %s · %s",
+                    "pitch %s · shape %.2f · semantic %.2f · " +
+                    "refine %.2f/%.2f · mouth %.2f/%.2f s^-1 · %s\n" +
+                    "upper center %+.2f -> %+.2f%% · thickness %+.2f -> %+.2f%% · upperR %.2f",
                 status.mediaPipeFps,
                 status.conversionDurationMs,
                 status.inferenceDurationMs,
                 status.cameraAgeMs,
                 anchorLabel,
                 pitchLabel,
+                status.geometryConfidence,
+                status.semanticConfidence,
+                status.refinementResponse,
+                status.localMotion,
+                status.mouthOpenness,
+                status.mouthOpennessSpeed,
                 visibilityLabel,
+                status.rawUpperCenterDelta * 100f,
+                status.filteredUpperCenterDelta * 100f,
+                status.rawUpperThicknessDelta * 100f,
+                status.filteredUpperThicknessDelta * 100f,
+                status.upperVerticalResponse,
             )
         } ?: "MediaPipe: waiting for synchronized result"
         val text = String.format(
@@ -601,6 +724,17 @@ internal class ArCoreFaceAnchorRenderer(
         val anchorCorrectionAvailable: Boolean,
         val pitchDegrees: Float?,
         val lipVisible: Boolean,
+        val geometryConfidence: Float,
+        val semanticConfidence: Float,
+        val refinementResponse: Float,
+        val localMotion: Float,
+        val mouthOpenness: Float,
+        val mouthOpennessSpeed: Float,
+        val upperVerticalResponse: Float,
+        val rawUpperCenterDelta: Float,
+        val filteredUpperCenterDelta: Float,
+        val rawUpperThicknessDelta: Float,
+        val filteredUpperThicknessDelta: Float,
     )
 
     private fun createExternalTexture(): Int {
@@ -666,8 +800,10 @@ internal class ArCoreFaceAnchorRenderer(
 
     private companion object {
         const val TAG = "ARMakeupArCore"
+        const val LIP_METRICS_TAG = "LipJumpMetrics"
         const val UPPER_INNER_LIP_INDEX = 13
         const val LOWER_INNER_LIP_INDEX = 14
+        const val FACE_LOSS_RESET_FRAME_COUNT = 8
         const val NEAR_METERS = 0.05f
         const val FAR_METERS = 100f
         const val STATUS_INTERVAL_NS = 1_000_000_000L
@@ -763,6 +899,10 @@ internal class ArCoreFaceAnchorRenderer(
             uniform float uSatinGlowStrength;
             uniform float uFinishMode;
             uniform vec2 uIlluminationSampleStep;
+            uniform float uSemanticConfidence;
+            uniform float uMouthExclusionConfidence;
+            uniform float uSemanticEdgeStrength;
+            uniform float uMouthOpenness;
             varying vec2 vDisplayUv;
             varying vec3 vNormal;
             varying float vCoverage;
@@ -1127,10 +1267,48 @@ internal class ArCoreFaceAnchorRenderer(
             }
 
 
+            float semanticRefinedCoverage(float rawCoverage) {
+                vec2 edgeStep = uIlluminationSampleStep / 7.0;
+                vec3 center = cameraSrgbAt(vDisplayUv);
+                vec3 surround =
+                    cameraSrgbAt(vDisplayUv + vec2(edgeStep.x, 0.0)) +
+                    cameraSrgbAt(vDisplayUv - vec2(edgeStep.x, 0.0)) +
+                    cameraSrgbAt(vDisplayUv + vec2(0.0, edgeStep.y)) +
+                    cameraSrgbAt(vDisplayUv - vec2(0.0, edgeStep.y));
+                surround *= 0.25;
+                float cameraEdge = smoothstep(
+                    0.018,
+                    0.12,
+                    length(center - surround)
+                );
+                float edgeBand = 1.0 - smoothstep(
+                    0.18,
+                    0.50,
+                    abs(rawCoverage - 0.5)
+                );
+                float thresholdWidth = mix(0.18, 0.09, cameraEdge);
+                float sharpened = smoothstep(
+                    0.5 - thresholdWidth,
+                    0.5 + thresholdWidth,
+                    rawCoverage
+                );
+                float strength = uSemanticConfidence * uSemanticEdgeStrength *
+                    cameraEdge * edgeBand;
+                float refined = mix(rawCoverage, sharpened, strength);
+                float innerStart = mix(0.94, 0.88, uMouthOpenness);
+                float innerGuard = smoothstep(innerStart, 1.0, vLipUv.x);
+                return clamp(
+                    refined * (1.0 - innerGuard * uMouthExclusionConfidence),
+                    0.0,
+                    1.0
+                );
+            }
+
             void main() {
                 const vec3 luminanceWeights = vec3(0.2126, 0.7152, 0.0722);
                 vec3 cameraLinear = cameraLinearAt(vDisplayUv);
                 float coverage = clamp(vCoverage * uCoverageMultiplier, 0.0, 1.0);
+                coverage = semanticRefinedCoverage(coverage);
                 float cameraLuminance = max(dot(cameraLinear, luminanceWeights), 0.0001);
 
                 // Match the accepted iOS Metal matte/satin response in Android.
