@@ -107,6 +107,11 @@ internal class FilamentMakeupRenderer(
         ReferenceLipstickPigments.PRODUCT_CLASSIC_RED_999_GREEN_8BIT,
         ReferenceLipstickPigments.PRODUCT_CLASSIC_RED_999_BLUE_8BIT,
     )
+    private val satinPigment = Color.rgb(
+        ReferenceLipstickPigments.SATIN_RED_B8202D_RED_8BIT,
+        ReferenceLipstickPigments.SATIN_RED_B8202D_GREEN_8BIT,
+        ReferenceLipstickPigments.SATIN_RED_B8202D_BLUE_8BIT,
+    )
     private val trackingTestPigment =
         ContextCompat.getColor(context, R.color.lipstick_tracking_test)
     private val cameraTexture = Texture.Builder()
@@ -372,6 +377,10 @@ internal class FilamentMakeupRenderer(
             LipstickPigmentPalette.PRODUCT_CLASSIC_RED_999 -> {
                 upperPigment = productPigment
                 lowerPigment = productPigment
+            }
+            LipstickPigmentPalette.SATIN_RED_B8202D -> {
+                upperPigment = satinPigment
+                lowerPigment = satinPigment
             }
             LipstickPigmentPalette.TRACKING_MAGENTA -> {
                 upperPigment = trackingTestPigment

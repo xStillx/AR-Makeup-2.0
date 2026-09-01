@@ -411,6 +411,7 @@ internal class ArCoreFaceAnchorRenderer(
         val profile = ReferenceLipstickRenderProfiles.forFinish(lipstickFinish)
         val pigment = when (profile.pigmentPalette) {
             LipstickPigmentPalette.PRODUCT_CLASSIC_RED_999 -> PRODUCT_PIGMENT
+            LipstickPigmentPalette.SATIN_RED_B8202D -> SATIN_PIGMENT
             LipstickPigmentPalette.TRACKING_MAGENTA -> TRACKING_PIGMENT
         }
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
@@ -432,6 +433,15 @@ internal class ArCoreFaceAnchorRenderer(
         GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uWetInnerEdgeStrength"), profile.optics.wetInnerEdgeStrength)
         GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uSurfaceDetailRetention"), profile.optics.surfaceDetailRetention)
         GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uSatinGlowStrength"), profile.optics.satinGlowStrength)
+        GLES20.glUniform1f(
+            GLES20.glGetUniformLocation(lipMeshProgram, "uFinishMode"),
+            when (lipstickFinish) {
+                LipstickFinish.MATTE -> 0f
+                LipstickFinish.GLOSS -> 1f
+                LipstickFinish.SATIN -> 2f
+                LipstickFinish.TRACKING_TEST -> -1f
+            },
+        )
         GLES20.glUniform2f(
             GLES20.glGetUniformLocation(lipMeshProgram, "uIlluminationSampleStep"),
             ILLUMINATION_SAMPLE_RADIUS_PIXELS / viewportWidth,
@@ -677,6 +687,11 @@ internal class ArCoreFaceAnchorRenderer(
             ReferenceLipstickPigments.PRODUCT_CLASSIC_RED_999_GREEN_SRGB,
             ReferenceLipstickPigments.PRODUCT_CLASSIC_RED_999_BLUE_SRGB,
         )
+        val SATIN_PIGMENT = floatArrayOf(
+            ReferenceLipstickPigments.SATIN_RED_B8202D_RED_SRGB,
+            ReferenceLipstickPigments.SATIN_RED_B8202D_GREEN_SRGB,
+            ReferenceLipstickPigments.SATIN_RED_B8202D_BLUE_SRGB,
+        )
         val TRACKING_PIGMENT = floatArrayOf(1f, 0f, 0.831f)
 
         val FULLSCREEN_QUAD: FloatBuffer = directFloatBuffer(
@@ -746,6 +761,7 @@ internal class ArCoreFaceAnchorRenderer(
             uniform float uWetInnerEdgeStrength;
             uniform float uSurfaceDetailRetention;
             uniform float uSatinGlowStrength;
+            uniform float uFinishMode;
             uniform vec2 uIlluminationSampleStep;
             varying vec2 vDisplayUv;
             varying vec3 vNormal;
@@ -771,11 +787,361 @@ internal class ArCoreFaceAnchorRenderer(
                 return srgbToLinear(texture2D(uCamera, uv).rgb);
             }
 
+            vec3 cameraSrgbAt(vec2 displayUv) {
+                vec2 uv = cameraUv(clamp(displayUv, vec2(0.0), vec2(1.0)));
+                return texture2D(uCamera, uv).rgb;
+            }
+
+            float parityLuminance(vec3 color) {
+                return clamp(dot(color, vec3(0.299, 0.587, 0.114)), 0.0, 1.0);
+            }
+
+            vec3 parityColorWithLuminance(vec3 color, float targetLuminance) {
+                float sourceLuminance = max(parityLuminance(color), 0.0001);
+                vec3 adjusted = color * (targetLuminance / sourceLuminance);
+                float maximum = max(adjusted.r, max(adjusted.g, adjusted.b));
+                if (maximum > 1.0) {
+                    adjusted /= maximum;
+                }
+                return clamp(adjusted, vec3(0.0), vec3(1.0));
+            }
+
+            float stableHighlightHash(vec2 cell) {
+                return fract(sin(dot(cell, vec2(127.1, 311.7))) * 43758.5453);
+            }
+
+            float satinHighlightBreakup(vec2 lipUv) {
+                vec2 orientedUv = vec2(lipUv.y, lipUv.x);
+
+                vec2 segmentPosition = orientedUv * vec2(13.0, 5.5);
+                vec2 segmentCell = floor(segmentPosition);
+                vec2 segmentLocal = fract(segmentPosition);
+                float segmentSeed = stableHighlightHash(segmentCell);
+                float segmentCenter = 0.32 +
+                    0.36 * stableHighlightHash(segmentCell + vec2(4.0, 9.0));
+                float segmentHalfHeight = 0.07 + 0.06 * segmentSeed;
+                float brokenStrip = 1.0 - smoothstep(
+                    segmentHalfHeight,
+                    segmentHalfHeight + 0.09,
+                    abs(segmentLocal.y - segmentCenter)
+                );
+                float segmentEnd = 0.54 + 0.34 *
+                    stableHighlightHash(segmentCell + vec2(8.0, 2.0));
+                brokenStrip *= smoothstep(0.06, 0.18, segmentLocal.x) *
+                    (1.0 - smoothstep(
+                        segmentEnd,
+                        min(segmentEnd + 0.14, 1.0),
+                        segmentLocal.x
+                    ));
+                brokenStrip *= smoothstep(0.34, 0.68, segmentSeed);
+
+                vec2 dotPosition = orientedUv * vec2(19.0, 8.0);
+                vec2 dotCell = floor(dotPosition);
+                vec2 dotLocal = fract(dotPosition);
+                float dotSeed =
+                    stableHighlightHash(dotCell + vec2(17.0, 3.0));
+                vec2 dotCenter = vec2(
+                    0.20 + 0.60 *
+                        stableHighlightHash(dotCell + vec2(1.0, 7.0)),
+                    0.20 + 0.60 *
+                        stableHighlightHash(dotCell + vec2(6.0, 1.0))
+                );
+                float dotRadius = 0.11 + 0.10 * dotSeed;
+                float highlightDot = 1.0 - smoothstep(
+                    dotRadius,
+                    dotRadius + 0.09,
+                    length((dotLocal - dotCenter) * vec2(0.82, 1.22))
+                );
+                highlightDot *= smoothstep(0.28, 0.62, dotSeed);
+
+                vec2 speckPosition = orientedUv * vec2(31.0, 12.0);
+                vec2 speckCell = floor(speckPosition);
+                vec2 speckLocal = fract(speckPosition);
+                float speckSeed =
+                    stableHighlightHash(speckCell + vec2(23.0, 19.0));
+                vec2 speckCenter = vec2(
+                    stableHighlightHash(speckCell + vec2(2.0, 5.0)),
+                    stableHighlightHash(speckCell + vec2(9.0, 4.0))
+                );
+                float speck = 1.0 - smoothstep(
+                    0.075,
+                    0.15,
+                    length(speckLocal - speckCenter)
+                );
+                speck *= smoothstep(0.58, 0.82, speckSeed);
+
+                float breakup = clamp(
+                    brokenStrip * 0.82 +
+                        highlightDot * 0.95 +
+                        speck * 0.42,
+                    0.0,
+                    1.0
+                );
+                return 0.12 + breakup * 0.88;
+            }
+
+            float glossCircleLayer(
+                vec2 lipUv,
+                vec2 gridScale,
+                vec2 seedOffset,
+                float radius,
+                float feather,
+                float densityThreshold
+            ) {
+                vec2 orientedUv = vec2(lipUv.y, lipUv.x);
+                vec2 position = orientedUv * gridScale;
+                vec2 cell = floor(position);
+                vec2 local = fract(position);
+                float seed = stableHighlightHash(cell + seedOffset);
+                vec2 center = vec2(
+                    0.36 + 0.28 * stableHighlightHash(
+                        cell + seedOffset.yx + vec2(3.0, 7.0)
+                    ),
+                    0.36 + 0.28 * stableHighlightHash(
+                        cell + seedOffset + vec2(8.0, 2.0)
+                    )
+                );
+                float softCircle = 1.0 - smoothstep(
+                    radius,
+                    radius + feather,
+                    length(local - center)
+                );
+                float enabled = smoothstep(
+                    densityThreshold,
+                    min(densityThreshold + 0.22, 1.0),
+                    seed
+                );
+                return softCircle * enabled;
+            }
+
+            float glossHighlightBreakup(vec2 lipUv) {
+                float largeCircles = glossCircleLayer(
+                    lipUv,
+                    vec2(12.0, 5.0),
+                    vec2(5.0, 13.0),
+                    0.22,
+                    0.14,
+                    0.44
+                );
+                float mediumCircles = glossCircleLayer(
+                    lipUv,
+                    vec2(18.0, 7.0),
+                    vec2(17.0, 3.0),
+                    0.18,
+                    0.15,
+                    0.32
+                );
+                float smallCircles = glossCircleLayer(
+                    lipUv,
+                    vec2(27.0, 10.0),
+                    vec2(23.0, 19.0),
+                    0.12,
+                    0.13,
+                    0.50
+                );
+                float circles = clamp(
+                    largeCircles * 0.85 +
+                        mediumCircles * 0.90 +
+                        smallCircles * 0.55,
+                    0.0,
+                    1.0
+                );
+                return 0.05 + circles * 0.95;
+            }
+
+            float satinHighlightCircles(vec2 lipUv) {
+                return clamp(
+                    (glossHighlightBreakup(lipUv) - 0.05) / 0.95,
+                    0.0,
+                    1.0
+                );
+            }
+
+            vec4 renderIosParityFinish(float coverage) {
+                vec3 base = cameraSrgbAt(vDisplayUv);
+                vec2 detailRadius = uIlluminationSampleStep / 7.0;
+                vec3 blurred = base * 4.0;
+                blurred += cameraSrgbAt(vDisplayUv + vec2(detailRadius.x, 0.0));
+                blurred += cameraSrgbAt(vDisplayUv - vec2(detailRadius.x, 0.0));
+                blurred += cameraSrgbAt(vDisplayUv + vec2(0.0, detailRadius.y));
+                blurred += cameraSrgbAt(vDisplayUv - vec2(0.0, detailRadius.y));
+                blurred += cameraSrgbAt(vDisplayUv + detailRadius);
+                blurred += cameraSrgbAt(vDisplayUv - detailRadius);
+                blurred += cameraSrgbAt(
+                    vDisplayUv + vec2(detailRadius.x, -detailRadius.y)
+                );
+                blurred += cameraSrgbAt(
+                    vDisplayUv + vec2(-detailRadius.x, detailRadius.y)
+                );
+                blurred /= 12.0;
+
+                vec2 highlightRadius =
+                    uIlluminationSampleStep * vec2(12.0 / 14.0, 8.0 / 14.0);
+                vec3 highlightRight =
+                    cameraSrgbAt(vDisplayUv + vec2(highlightRadius.x, 0.0));
+                vec3 highlightLeft =
+                    cameraSrgbAt(vDisplayUv - vec2(highlightRadius.x, 0.0));
+                vec3 highlightTop =
+                    cameraSrgbAt(vDisplayUv + vec2(0.0, highlightRadius.y));
+                vec3 highlightBottom =
+                    cameraSrgbAt(vDisplayUv - vec2(0.0, highlightRadius.y));
+                vec3 highlightSurround = highlightRight + highlightLeft;
+                highlightSurround += highlightTop + highlightBottom;
+                highlightSurround *= 0.25;
+
+                float baseLuminance = parityLuminance(base);
+                float blurredLuminance = max(parityLuminance(blurred), 0.055);
+                float pigmentLuminance = parityLuminance(uPigment);
+                float localLighting = smoothstep(0.10, 0.55, blurredLuminance);
+                float sceneLighting = smoothstep(0.08, 0.72, blurredLuminance);
+                float combinedLighting = clamp(
+                    mix(sceneLighting, localLighting, 0.25),
+                    0.45,
+                    1.0
+                );
+                float exposureScale = pow(combinedLighting, 0.55);
+                float scenePigmentLuminance = pigmentLuminance * exposureScale;
+                bool isSatin = uFinishMode > 1.5;
+                float toneStrength = isSatin ? 1.0 : 0.92;
+                float pigmentStrength = isSatin ? 0.42 : 0.90;
+                float detailStrength = isSatin ? 0.68 : 0.92;
+                float targetLuminance = mix(
+                    baseLuminance,
+                    scenePigmentLuminance,
+                    toneStrength
+                );
+                vec3 tonedPigment = parityColorWithLuminance(
+                    uPigment,
+                    targetLuminance
+                );
+                float tonedLuminance = parityLuminance(tonedPigment);
+                vec3 saturatedPigment = clamp(
+                    mix(vec3(tonedLuminance), tonedPigment, 1.0),
+                    vec3(0.0),
+                    vec3(1.0)
+                );
+                float logDetail = log2(max(baseLuminance, 0.04)) -
+                    log2(max(blurredLuminance, 0.04));
+                float brightScene = smoothstep(0.78, 1.0, combinedLighting);
+                float detailExponent;
+                if (isSatin) {
+                    float adaptiveDetailStrength = detailStrength *
+                        mix(1.0, 0.45, brightScene);
+                    detailExponent = clamp(logDetail, -0.12, 0.12) *
+                        adaptiveDetailStrength;
+                } else {
+                    float shadowDetail = min(logDetail, 0.0);
+                    float highlightDetail = max(logDetail, 0.0);
+                    float matteShadowStrength = mix(1.15, 0.72, brightScene);
+                    float matteHighlightStrength = mix(0.65, 0.35, brightScene);
+                    detailExponent =
+                        clamp(shadowDetail, -0.14, 0.0) *
+                            detailStrength * matteShadowStrength +
+                        clamp(highlightDetail, 0.0, 0.09) *
+                            detailStrength * matteHighlightStrength;
+                }
+                float detail = exp2(detailExponent);
+                float shadow = 1.0 -
+                    (1.0 - smoothstep(0.08, 0.26, blurredLuminance)) * 0.025;
+                vec3 pigment = mix(base, saturatedPigment, pigmentStrength);
+                pigment = clamp(pigment * detail * shadow, 0.0, 1.0);
+
+                if (isSatin) {
+                    float surroundLuminance = max(
+                        parityLuminance(highlightSurround),
+                        0.04
+                    );
+                    float highlightLogContrast = log2(
+                        max(baseLuminance, 0.04) / surroundLuminance
+                    );
+                    float relativeHighlight = smoothstep(
+                        0.025,
+                        0.16,
+                        highlightLogContrast
+                    );
+                    float highlightBrightness = smoothstep(
+                        0.18,
+                        0.68,
+                        baseLuminance
+                    );
+                    float highlightDifference = max(
+                        baseLuminance - surroundLuminance,
+                        0.0
+                    );
+                    float naturalHighlight =
+                        relativeHighlight * highlightBrightness;
+                    float highlightAmount = 0.0;
+                    float cameraHighlightAmount = min(
+                        naturalHighlight *
+                            (0.10 + highlightDifference * 1.05) * 1.10,
+                        0.18
+                    );
+                    float horizontalLightGradient =
+                        parityLuminance(highlightRight) -
+                            parityLuminance(highlightLeft);
+                    float satinArcCenter = clamp(
+                        0.5 + horizontalLightGradient * 0.32,
+                        0.22,
+                        0.78
+                    );
+                    float satinArcHalfWidth = mix(
+                        0.34,
+                        0.24,
+                        smoothstep(0.04, 0.30, abs(horizontalLightGradient))
+                    );
+                    float satinArcDistance = abs(vLipUv.y - satinArcCenter);
+                    float satinArc = 1.0 - smoothstep(
+                        satinArcHalfWidth * 0.52,
+                        satinArcHalfWidth,
+                        satinArcDistance
+                    );
+                    float satinCircles = satinHighlightCircles(vLipUv);
+                    float patternedHighlight = combinedLighting * (
+                        satinArc * 0.040 + satinCircles * 0.024
+                    );
+                    float cameraPattern = mix(
+                        0.45,
+                        1.0,
+                        clamp(
+                            satinArc * 0.62 + satinCircles * 0.38,
+                            0.0,
+                            1.0
+                        )
+                    );
+                    highlightAmount = min(
+                        cameraHighlightAmount * cameraPattern +
+                            patternedHighlight,
+                        0.22
+                    );
+                    pigment = mix(pigment, vec3(1.0), highlightAmount);
+                }
+
+                float cornerPosition = clamp(
+                    abs(vLipUv.y - 0.5) * 2.0,
+                    0.0,
+                    1.0
+                );
+                float cornerFade =
+                    1.0 - smoothstep(0.72, 1.0, cornerPosition) * 0.30;
+                return vec4(mix(base, pigment, coverage * cornerFade), 1.0);
+            }
+
+
             void main() {
                 const vec3 luminanceWeights = vec3(0.2126, 0.7152, 0.0722);
                 vec3 cameraLinear = cameraLinearAt(vDisplayUv);
                 float coverage = clamp(vCoverage * uCoverageMultiplier, 0.0, 1.0);
                 float cameraLuminance = max(dot(cameraLinear, luminanceWeights), 0.0001);
+
+                // Match the accepted iOS Metal matte/satin response in Android.
+                // Gloss remains on the richer Android camera-conditioned path.
+                bool usesIosParityFinish =
+                    (uFinishMode > -0.5 && uFinishMode < 0.5) ||
+                    uFinishMode > 1.5;
+                if (usesIosParityFinish) {
+                    gl_FragColor = renderIosParityFinish(coverage);
+                    return;
+                }
 
                 vec3 cameraLeft = cameraLinearAt(
                     vDisplayUv - vec2(uIlluminationSampleStep.x, 0.0)
@@ -886,11 +1252,15 @@ internal class ArCoreFaceAnchorRenderer(
                     highlightArcHalfWidth,
                     highlightArcDistance
                 );
+                float glossBreakup = glossHighlightBreakup(vLipUv);
                 float adaptiveFilmGain = 1.0 +
                     uWetInnerEdgeStrength * sceneLightLevel * 0.35;
                 float adaptiveSpecular = uSpecularStrength * coverage *
-                    adaptiveFilmGain * 0.065 * normalLobe * lightingEvidence *
+                    adaptiveFilmGain * 0.105 * normalLobe * lightingEvidence *
                     localizedArcHighlight;
+                adaptiveSpecular += uSpecularStrength * coverage * 0.080 *
+                    lightingEvidence * glossBreakup *
+                    (0.40 + 0.60 * normalLobe);
                 vec3 illuminationTint = clamp(
                     neighborhoodLinear / neighborhoodLuminance,
                     vec3(0.72),
@@ -916,6 +1286,7 @@ internal class ArCoreFaceAnchorRenderer(
                     max(cameraLinear - neighborhoodLinear, vec3(0.0)),
                     vec3(0.22)
                 ) * uHighlightRetention * uSpecularStrength * coverage * 0.72;
+                nativeSpecularColor *= mix(0.42, 1.0, glossBreakup);
                 vec3 legacySpecularColor = vec3(1.0, 0.94, 0.92) * legacySpecular;
                 vec3 adaptiveSpecularColor =
                     illuminationTint * adaptiveSpecular + nativeSpecularColor;

@@ -61,22 +61,31 @@ internal enum class LipstickFinish {
 }
 
 /**
- * Shared source-sRGB pigment used by every product finish.
+ * Reference source-sRGB pigments used by product finishes.
  *
- * The numeric reference is intentionally independent from finish optics: matte, satin and gloss
- * must start from the same pigment and differ only through their material response. The 999 label
- * is an internal cross-platform calibration reference, not a claim that this is an official brand
- * colour specification.
+ * Pigment identity remains independent from finish optics. Matte and gloss keep the classic 999
+ * calibration reference, while satin uses the separately requested B8202D calibration colour.
+ * These labels are internal visual references, not claims that the values are official brand
+ * colour specifications.
  */
 internal object ReferenceLipstickPigments {
-    const val PRODUCT_CLASSIC_RED_999_SRGB_HEX = 0xA93033
-    const val PRODUCT_CLASSIC_RED_999_RED_8BIT = 0xA9
-    const val PRODUCT_CLASSIC_RED_999_GREEN_8BIT = 0x30
-    const val PRODUCT_CLASSIC_RED_999_BLUE_8BIT = 0x33
+    const val PRODUCT_CLASSIC_RED_999_SRGB_HEX = 0x9E2620
+    const val PRODUCT_CLASSIC_RED_999_RED_8BIT = 0x9E
+    const val PRODUCT_CLASSIC_RED_999_GREEN_8BIT = 0x26
+    const val PRODUCT_CLASSIC_RED_999_BLUE_8BIT = 0x20
 
     const val PRODUCT_CLASSIC_RED_999_RED_SRGB = PRODUCT_CLASSIC_RED_999_RED_8BIT / 255f
     const val PRODUCT_CLASSIC_RED_999_GREEN_SRGB = PRODUCT_CLASSIC_RED_999_GREEN_8BIT / 255f
     const val PRODUCT_CLASSIC_RED_999_BLUE_SRGB = PRODUCT_CLASSIC_RED_999_BLUE_8BIT / 255f
+
+    const val SATIN_RED_B8202D_SRGB_HEX = 0xB8202D
+    const val SATIN_RED_B8202D_RED_8BIT = 0xB8
+    const val SATIN_RED_B8202D_GREEN_8BIT = 0x20
+    const val SATIN_RED_B8202D_BLUE_8BIT = 0x2D
+
+    const val SATIN_RED_B8202D_RED_SRGB = SATIN_RED_B8202D_RED_8BIT / 255f
+    const val SATIN_RED_B8202D_GREEN_SRGB = SATIN_RED_B8202D_GREEN_8BIT / 255f
+    const val SATIN_RED_B8202D_BLUE_SRGB = SATIN_RED_B8202D_BLUE_8BIT / 255f
 }
 
 /**
@@ -143,6 +152,7 @@ internal object ReferenceLipstickOptics {
 
 internal enum class LipstickPigmentPalette {
     PRODUCT_CLASSIC_RED_999,
+    SATIN_RED_B8202D,
     TRACKING_MAGENTA,
 }
 
@@ -181,7 +191,8 @@ internal object ReferenceLipstickRenderProfiles {
     )
     val satin = productProfile(
         optics = ReferenceLipstickOptics.satin,
-        coverageMultiplier = 1.55f,
+        pigmentPalette = LipstickPigmentPalette.SATIN_RED_B8202D,
+        coverageMultiplier = 2f,
         luminancePreservation = 0.68f,
     )
     val gloss = productProfile(
@@ -218,11 +229,12 @@ internal object ReferenceLipstickRenderProfiles {
 
     private fun productProfile(
         optics: LipstickOpticalProfile,
+        pigmentPalette: LipstickPigmentPalette = LipstickPigmentPalette.PRODUCT_CLASSIC_RED_999,
         coverageMultiplier: Float = 1f,
         luminancePreservation: Float = 1f,
     ) = LipstickRenderProfile(
         optics = optics,
-        pigmentPalette = LipstickPigmentPalette.PRODUCT_CLASSIC_RED_999,
+        pigmentPalette = pigmentPalette,
         coverageMultiplier = coverageMultiplier,
         luminancePreservation = luminancePreservation,
         minimumLuminanceGain = 0.55f,

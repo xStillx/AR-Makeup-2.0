@@ -8,23 +8,46 @@ class LipstickMaterialProfileTest {
 
     @Test
     fun productPigmentUsesSharedClassicRed999SourceSrgbReference() {
-        assertEquals(0xA93033, ReferenceLipstickPigments.PRODUCT_CLASSIC_RED_999_SRGB_HEX)
-        assertEquals(169, ReferenceLipstickPigments.PRODUCT_CLASSIC_RED_999_RED_8BIT)
-        assertEquals(48, ReferenceLipstickPigments.PRODUCT_CLASSIC_RED_999_GREEN_8BIT)
-        assertEquals(51, ReferenceLipstickPigments.PRODUCT_CLASSIC_RED_999_BLUE_8BIT)
+        assertEquals(0x9E2620, ReferenceLipstickPigments.PRODUCT_CLASSIC_RED_999_SRGB_HEX)
+        assertEquals(158, ReferenceLipstickPigments.PRODUCT_CLASSIC_RED_999_RED_8BIT)
+        assertEquals(38, ReferenceLipstickPigments.PRODUCT_CLASSIC_RED_999_GREEN_8BIT)
+        assertEquals(32, ReferenceLipstickPigments.PRODUCT_CLASSIC_RED_999_BLUE_8BIT)
         assertEquals(
-            169f / 255f,
+            158f / 255f,
             ReferenceLipstickPigments.PRODUCT_CLASSIC_RED_999_RED_SRGB,
             0.000001f,
         )
         assertEquals(
-            48f / 255f,
+            38f / 255f,
             ReferenceLipstickPigments.PRODUCT_CLASSIC_RED_999_GREEN_SRGB,
             0.000001f,
         )
         assertEquals(
-            51f / 255f,
+            32f / 255f,
             ReferenceLipstickPigments.PRODUCT_CLASSIC_RED_999_BLUE_SRGB,
+            0.000001f,
+        )
+    }
+
+    @Test
+    fun satinPigmentUsesRequestedB8202dSourceSrgbReference() {
+        assertEquals(0xB8202D, ReferenceLipstickPigments.SATIN_RED_B8202D_SRGB_HEX)
+        assertEquals(184, ReferenceLipstickPigments.SATIN_RED_B8202D_RED_8BIT)
+        assertEquals(32, ReferenceLipstickPigments.SATIN_RED_B8202D_GREEN_8BIT)
+        assertEquals(45, ReferenceLipstickPigments.SATIN_RED_B8202D_BLUE_8BIT)
+        assertEquals(
+            184f / 255f,
+            ReferenceLipstickPigments.SATIN_RED_B8202D_RED_SRGB,
+            0.000001f,
+        )
+        assertEquals(
+            32f / 255f,
+            ReferenceLipstickPigments.SATIN_RED_B8202D_GREEN_SRGB,
+            0.000001f,
+        )
+        assertEquals(
+            45f / 255f,
+            ReferenceLipstickPigments.SATIN_RED_B8202D_BLUE_SRGB,
             0.000001f,
         )
     }
@@ -149,11 +172,9 @@ class LipstickMaterialProfileTest {
             ReferenceMatteLipstickProfile.lower.effectiveCoreCoverage *
                 satin.coverageMultiplier
 
-        assertEquals(LipstickPigmentPalette.PRODUCT_CLASSIC_RED_999, satin.pigmentPalette)
-        assertTrue(satin.coverageMultiplier < matte.coverageMultiplier)
-        assertTrue(satin.coverageMultiplier > 1f)
-        assertTrue(lowerCoreCoverage > 0.75f)
-        assertTrue(lowerCoreCoverage < 1f)
+        assertEquals(LipstickPigmentPalette.SATIN_RED_B8202D, satin.pigmentPalette)
+        assertEquals(matte.coverageMultiplier, satin.coverageMultiplier, 0f)
+        assertTrue(lowerCoreCoverage >= 1f)
         assertEquals(0.68f, satin.luminancePreservation, 0f)
         assertTrue(satin.luminancePreservation < matte.luminancePreservation)
         assertTrue(satin.luminancePreservation < 1f)
