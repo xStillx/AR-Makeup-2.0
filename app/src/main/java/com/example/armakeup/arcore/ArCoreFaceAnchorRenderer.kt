@@ -69,6 +69,11 @@ internal class ArCoreFaceAnchorRenderer(
     private val lipVisibilityGate = HeadDownLipVisibilityGate()
     private val lipContourRefiner = LipContourTemporalRefiner()
     private val lipTessellator = LipMeshTessellator()
+    private val lipFrameDiagnostics = LipFrameDiagnostics()
+    private val mediaPipeOnlyOuterContourPoints =
+        FloatArray(LipLandmarkTopology.outerContour.size * 2)
+    private val mediaPipeOnlyInnerContourPoints =
+        FloatArray(LipLandmarkTopology.innerContour.size * 2)
     private val measuredOuterContourPoints = FloatArray(LipLandmarkTopology.outerContour.size * 2)
     private val measuredInnerContourPoints = FloatArray(LipLandmarkTopology.innerContour.size * 2)
     private val outerContourPoints = FloatArray(LipLandmarkTopology.outerContour.size * 2)
@@ -106,6 +111,7 @@ internal class ArCoreFaceAnchorRenderer(
         anchorTransport.reset()
         lipVisibilityGate.reset()
         lipContourRefiner.reset()
+        lipFrameDiagnostics.reset()
         lastLipMetricsTimestampNs = 0L
         hasStableLipAnchor = false
         missingFaceFrameCount = 0
@@ -160,6 +166,7 @@ internal class ArCoreFaceAnchorRenderer(
                 if (missingFaceFrameCount == FACE_LOSS_RESET_FRAME_COUNT) {
                     lipVisibilityGate.reset()
                     lipContourRefiner.reset()
+                    lipFrameDiagnostics.reset()
                     lastLipMetricsTimestampNs = 0L
                 }
             }
@@ -232,6 +239,7 @@ internal class ArCoreFaceAnchorRenderer(
             hasStableLipAnchor = true
             anchorTransport.reset()
             lipContourRefiner.reset()
+            lipFrameDiagnostics.reset()
             lastLipMetricsTimestampNs = 0L
             Log.i(
                 TAG,
@@ -307,6 +315,7 @@ internal class ArCoreFaceAnchorRenderer(
         fun writeLandmark(
             normalizedContour: FloatArray,
             pointIndex: Int,
+            mediaPipeOnlyPoints: FloatArray,
             points: FloatArray,
             vertices: FloatBuffer,
         ) {
@@ -315,11 +324,13 @@ internal class ArCoreFaceAnchorRenderer(
             val rawY = normalizedContour[coordinateIndex + 1]
             val displayX = imageTransform.mapX(rawX, rawY)
             val displayY = imageTransform.mapY(rawX, rawY)
-            val screenX = fillTransform.mapX(displayX, inputWidth) /
-                viewportWidth + translationX
-            val screenY = fillTransform.mapY(displayY, inputHeight) /
-                viewportHeight + translationY
+            val mediaPipeOnlyX = fillTransform.mapX(displayX, inputWidth) / viewportWidth
+            val mediaPipeOnlyY = fillTransform.mapY(displayY, inputHeight) / viewportHeight
+            val screenX = mediaPipeOnlyX + translationX
+            val screenY = mediaPipeOnlyY + translationY
             val outputIndex = pointIndex * 2
+            mediaPipeOnlyPoints[outputIndex] = mediaPipeOnlyX
+            mediaPipeOnlyPoints[outputIndex + 1] = mediaPipeOnlyY
             points[outputIndex] = screenX
             points[outputIndex + 1] = screenY
             vertices
@@ -333,6 +344,7 @@ internal class ArCoreFaceAnchorRenderer(
             writeLandmark(
                 lips.outer.points,
                 pointIndex,
+                mediaPipeOnlyOuterContourPoints,
                 measuredOuterContourPoints,
                 mappedMediaPipeOuterLipVertices,
             )
@@ -344,6 +356,7 @@ internal class ArCoreFaceAnchorRenderer(
             writeLandmark(
                 lips.inner.points,
                 pointIndex,
+                mediaPipeOnlyInnerContourPoints,
                 measuredInnerContourPoints,
                 mappedMediaPipeInnerLipVertices,
             )
@@ -397,6 +410,25 @@ internal class ArCoreFaceAnchorRenderer(
             upperProfile = ReferenceMatteLipstickProfile.upper,
             lowerProfile = ReferenceMatteLipstickProfile.lower,
         )
+        if (Log.isLoggable(LIP_FRAME_TRACE_TAG, Log.DEBUG)) {
+            val frameTrace = lipFrameDiagnostics.capture(
+                sensorTimestampNs = faceObservation.sensorTimestampNs,
+                renderTimestampNs = cameraTimestampNs,
+                viewportWidth = viewportWidth,
+                viewportHeight = viewportHeight,
+                mouthOpenness = lips.mouthOpenness,
+                anchorCorrection = anchorCorrection,
+                mediaPipeOuter = mediaPipeOnlyOuterContourPoints,
+                mediaPipeInner = mediaPipeOnlyInnerContourPoints,
+                correctedOuter = measuredOuterContourPoints,
+                correctedInner = measuredInnerContourPoints,
+                refinedOuter = outerContourPoints,
+                refinedInner = innerContourPoints,
+                tessellated = tessellated,
+                tessellator = lipTessellator,
+            )
+            Log.d(LIP_FRAME_TRACE_TAG, lipFrameDiagnostics.toLogLine(frameTrace))
+        }
         tessellatedLipVertices.clear()
         var sourceIndex = 0
         repeat(lipTessellator.vertexCount) {
@@ -801,6 +833,7 @@ internal class ArCoreFaceAnchorRenderer(
     private companion object {
         const val TAG = "ARMakeupArCore"
         const val LIP_METRICS_TAG = "LipJumpMetrics"
+        const val LIP_FRAME_TRACE_TAG = "LipFrameTrace"
         const val UPPER_INNER_LIP_INDEX = 13
         const val LOWER_INNER_LIP_INDEX = 14
         const val FACE_LOSS_RESET_FRAME_COUNT = 8

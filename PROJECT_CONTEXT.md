@@ -1,708 +1,141 @@
-# AR Makeup — контекст и технические решения
+# AR Makeup — актуальный контекст проекта
 
-Последнее обновление: 2026-08-31.
+Актуально на 2026-09-02. Этот файл хранит только текущее состояние и долгоживущие решения. История экспериментов и старые метрики доступны в Git.
 
-Этот файл — источник долгоживущего контекста проекта. Его нужно обновлять, когда меняются продуктовые требования, выбранный стек, архитектура или измеренные ограничения устройств.
+Связанные документы:
 
-## Цель продукта
+- `AGENTS.md` — обязательные правила работы в репозитории;
+- `FULL_FACE_ROADMAP.md` — только будущий план;
+- `CHAT_HANDOFF.md` — короткая оперативная передача контекста;
+- `LICENSE_COMPLIANCE.md` — единый реестр лицензий и release gates;
+- `app/src/main/assets/MODEL_LICENSES.md` — происхождение и hash bundled ML-модели.
 
-Android-приложение для виртуальной примерки макияжа в реальном времени через фронтальную камеру.
+## Цель и обязательные требования
 
-Поддерживаемые эффекты:
+Нативное Android-приложение виртуальной примерки макияжа через фронтальную камеру. Целевые эффекты: помада и контур губ, румяна, тени и подводка.
 
-- помада;
-- карандаш и контур для губ;
-- румяна;
-- тени для век;
-- подводка.
+Главный приоритет — реалистичность в реальном времени: точная привязка к лицу, отсутствие заметных lag/jitter, корректные окклюзии, сохранение фактуры кожи и физически правдоподобные материалы. Скорость разработки и простота кода вторичны.
 
-Главный приоритет — максимально правдоподобный результат. Скорость разработки, простота кода и количество эффектов вторичны по отношению к качеству трекинга, правильному наложению, сохранению фактуры кожи и низкой задержке.
+Обязательные ограничения:
 
-Трекинг больше нельзя проектировать как отдельное решение только для губ. Помада остаётся первым вертикальным срезом, но production-архитектура должна выдавать один согласованный timestamped full-face state для губ, щёк и обоих глаз: быстрый глобальный anchor/pose, локальные 2D-контуры мимики, visibility/confidence, окклюзии и семантические области. Помада, румяна, тени и подводка обязаны потреблять этот общий state, а не иметь независимые трекеры и фильтры с разной задержкой. Видимый canonical 3D face/lip renderer больше не является целевым направлением.
+- не заменять GPU/ML-пайплайн простым 2D alpha overlay;
+- один camera owner и одна согласованная sensor/render timeline;
+- один model-independent timestamped full-face state для всех эффектов;
+- ARCore/MediaPipe-типы не должны попадать в material API;
+- inference и камера работают on-device, realtime-очереди — latest-only;
+- новые модели, датасеты, weights, SDK и assets добавляются только после license gate.
 
-## Лицензии ML-компонентов и заменяемая граница модели — решение 2026-08-17
+## Репозиторий и текущий checkpoint
 
-Актуальный единый реестр лицензий, будущих model/data/asset gates и обязательного release-пакета находится в `LICENSE_COMPLIANCE.md`. Его нужно обновлять до добавления каждой новой зависимости, модели, датасета, разметки, внешнего asset или SDK. Этот раздел хранит архитектурное решение; оперативный статус компонентов не следует дублировать здесь.
+- Проект: `C:\Users\User\AndroidStudioProjects\ARMakeup`.
+- Ветка: `codex/lipstick-material-v2`.
+- Последний committed checkpoint: `512aac5` (`[Tracking] Checkpoint lip transition diagnostics`).
+- Текущее устройство: Samsung SM-G990B.
+- Launcher: `ArCoreFaceAnchorActivity`; `MainActivity` сохраняет legacy CameraX/Filament/Vulkan rollback и не экспортируется.
+- Незакоммиченный candidate содержит покадровую lip-диагностику, запрет повторного inference одного ARCore image и исправление shared center нижней губы. Коммит разрешён только отдельной командой пользователя.
 
-Формулировка «ML нельзя использовать в коммерческом продукте» сама по себе неверна: коммерческая пригодность определяется отдельно для runtime/library, конкретных весов модели, исходных pretrained weights, обучающих данных и разметки. ML Kit и MediaPipe — разные продукты с разными условиями; текущий проект использует `com.google.mediapipe:tasks-vision:1.0.0` и официальный MediaPipe `face_landmarker.task`, а не ML Kit Face Detection.
+## Активная архитектура
 
-Текущий технический лицензионный аудит не выявил запрета на коммерческое использование существующего face-landmark backend:
+1. ARCore `1.54.0` владеет фронтальной камерой, camera timeline и текущей глобальной позой лица.
+2. MediaPipe Tasks Vision `1.0.0` асинхронно получает latest-only `YUV_420_888` image той же ARCore session и выдаёт внешний/внутренний 2D-контур губ.
+3. `MediaPipeFaceObservationAdapter` формирует model-independent `FaceObservation`: sensor timestamp, source transform, нормализованные контуры, geometry confidence, mouth openness и analytic `LipSemanticState`.
+4. `TimestampedLipAnchorTransport` переносит MediaPipe-контур translation-only между фиксированным face-local mouth carrier на measurement timestamp и текущим ARCore render frame.
+5. `LipContourTemporalRefiner` обрабатывает только lip-local deformation относительно текущих mouth center/width. Global translation остаётся ответственностью ARCore transport.
+6. `LipMeshTessellator` строит динамическую mesh; OpenGL ES compositor семплирует ARCore camera texture внутри неё и применяет coverage, reconstructed normals, camera luminance/gradient и lip-local UV.
+7. `HeadDownLipVisibilityGate` скрывает помаду при устойчивом сильном наклоне головы вниз.
 
-- исходный код MediaPipe опубликован под Apache License 2.0;
-- официальные model cards трёх компонентов подключённого bundle — BlazeFace Short Range, Face Mesh V2 и Blendshape V2 — указывают Apache License 2.0;
-- точный bundle и его SHA-256 уже зафиксированы в `app/src/main/assets/MODEL_LICENSES.md`;
-- Apache 2.0 не содержит ограничения «только non-commercial», но при распространении нужно выполнить требования лицензии и сохранить применимые copyright/attribution/NOTICE;
-- это инженерная проверка первичных источников, а не юридическое заключение: перед релизом обязателен повторный dependency/model audit и оформление third-party notices.
+Rotation, front-camera mirror и `FILL_CENTER` обязаны быть общими для camera image, landmarks и mesh. Вторую CameraX session создавать нельзя.
 
-Поэтому MediaPipe Face Landmarker сохраняется как текущий коммерчески допустимый кандидат локальных 2D-контуров. Он не должен быть жёстко зашит в renderer. Будущий модель-независимый `FaceObservation` должен содержать camera sensor timestamp, локальные контуры губ/глаз/щёк, глобальный anchor/pose от доступного backend, confidence/visibility, состояние глаз/рта и версию topology. MediaPipe- и ARCore-specific типы не должны распространяться в material/render API.
+## Коротко: что уже сделано
 
-Production temporal alignment также должно быть общим для всего лица: camera timeline, быстрый ARCore anchor и периодические MediaPipe-контуры обновляют один согласованный 2D render state. ARCore может внутренне использовать 3D-позу лица, но наружу остаётся вспомогательным глобальным якорем; продуктовая геометрия и границы строятся по 2D-контурам/семантическим маскам. Это исключает разные lag/jitter у помады, теней и подводки без возвращения к видимому 3D mesh.
+- Рабочий ARCore + MediaPipe launcher с переключением `Матовая / Сатин / Глянец / Трек`.
+- Model-independent lip observation и изоляция MediaPipe topology в adapter-слое.
+- Timestamped ARCore translation transport и фиксированный face-local carrier вместо expression-sensitive mouth vertices.
+- Динамическая outer/inner lip mesh с защитой рта/зубов и мягкими границами.
+- Material foundation для matte, satin и gloss; рабочая база принята, но финальная optical/HDR/lighting калибровка не завершена.
+- Текущие pigments: matte/gloss `#9E2620`, satin `#B8202D`.
+- Верхняя губа визуально принята при открытии/закрытии рта.
+- Debug `LipFrameTrace` разделяет MediaPipe-only, ARCore-corrected, local-refined и tessellated координаты.
+- `MonotonicSensorTimestampGate` устраняет повторный inference одного camera image: same-sensor изменения снижены с `140` до `0`.
+- Evidence-based lower-band candidate пропускает общий синхронный center outer/inner к текущему measurement во время подтверждённого mouth transition, сохраняя сглаживание толщины и мелкой формы.
 
-Для реалистичных границ всё равно понадобится отдельный semantic face parsing backend с вероятностями как минимум `skin / lips / mouth-teeth / left-right eyelid / eye / brow / hair-background`. MediaPipe Image Segmenter можно использовать как inference API, но он сам по себе не предоставляет подходящую beauty parsing model. Базовый план — своя компактная LiteRT-модель, обученная только на данных с документированным правом коммерческого использования. «Обучили сами» не является достаточной лицензией: отдельно проверяются датасет, разметка, исходные weights/teacher models, synthetic generator/assets и право распространять получившиеся weights.
+## Текущий визуальный статус
 
-Собственная landmark/mesh model рассматривается как возможная замена MediaPipe, но не как автоматическое следствие коммерческого релиза. Переход оправдан только если контролируемый benchmark покажет, что MediaPipe не достигает требований по lag, jitter, окклюзиям глаз/губ или нужной topology, и одновременно подготовлен полностью прослеживаемый коммерчески пригодный training pipeline. Интерфейс backend должен позволить такую замену без переписывания Vulkan compositor, temporal fusion и makeup materials.
+На SM-G990B открытие/закрытие рта после lower-band candidate улучшилось значительно. На сильных переходах измеренный отрыв `ref` от `corr` снизился примерно с `12–16 px` до `0.2–1.8 px`. Пользователь считает результат пригодным как checkpoint, но небольшое остаточное отставание нижней губы ещё заметно.
 
-## Принятый план дальнейшей разработки — 2D hybrid, решение 2026-08-31
+Покадровый trace нельзя держать включённым во время visual acceptance: форматирование большой строки на каждом render frame снижало MediaPipe примерно до `15 FPS`. После `adb shell setprop log.tag.LipFrameTrace S` наблюдались ARCore `58–59 FPS`, MediaPipe `24–27 FPS`, YUV `2–3 ms`, ML `22–32 ms`, age около `41 ms`.
 
-Полноценный видимый 3D face/lip renderer отклонён после device-итераций: он ухудшал точность контуров при мимике и сильных поворотах и добавлял деформации/дрожание. `FULL_FACE_ROADMAP.md` сохранён как исторический исследовательский план и помечен superseded; его этапы FF3–FF5 не являются текущими задачами.
+Материалы остаются рабочей базой, а не финальным продуктовым качеством. Нужны проверки при разном освещении, защита от shimmer/auto-exposure, BRDF/HDR/edge refinement и multi-device acceptance.
 
-Активный порядок: (1) довести и визуально принять matte/satin/gloss; (2) улучшать принятый MediaPipe 2D contour + timestamped ARCore anchor без predictor/gyro; (3) уточнить губы, рот/зубы и будущие области глаз/щёк семантическими 2D-масками, начиная с решения без собственного обучения; (4) сформировать общий model-independent 2D full-face state; (5) добавить контур губ, румяна, тени и подводку; (6) выполнить GPU/Vulkan-оптимизацию, multi-device/thermal/fallback gates и лицензионную подготовку релиза.
+## Открытые tracking-дефекты
 
-Совместный shadow vertical slice `FF1/FF2` остаётся полезной историей latency/actual-present, но варианты на базе дополнительной экранной экстраполяции, gyro correction, predictor, residual smoothing, visible canonical 3D mesh и face-wide affine/projective correction не дали одновременно требуемой точности контура, отсутствия jitter и устойчивости к движениям головы/телефона. Они не являются направлением основного трекера.
+### 1. Global jitter при движении головы и глаз
 
-### Принятый ARCore + MediaPipe tracking baseline — 2026-08-26
+Мелкое дрожание остаётся при движении головы вправо/влево. Оно также воспроизводится при неподвижных голове и закрытом рте, если переводить только взгляд вверх/вниз.
 
-ARCore владеет фронтальной камерой, её timeline и текущей глобальной позой лица. MediaPipe асинхронно получает latest-only CPU image ARCore и выдаёт внешний/внутренний 2D-контур губ. Контур преобразуется теми же rotation, front-camera mirror и `FILL_CENTER`, что и основной CameraX-экран. `TimestampedLipAnchorTransport` берёт положение ARCore mouth anchor на timestamp измерения MediaPipe и переносит всю локальную форму только translation-коррекцией к anchor текущего render frame. Это сохраняет актуальную мимику MediaPipe и использует ARCore как быстрый глобальный якорь, не деформируя ширину/высоту контура face-wide affine fit.
+Диагностика локализовала дефект в global anchor/fusion path:
 
-На Samsung SM-G990B пользователь принял этот вариант как лучшее текущее решение и основу дальнейшей разработки: резкие движения головы и устройства не вызывают прежних слётов, открытие/закрытие рта успевает за движением, диагностические точки отключены. `Choreographer` запрашивает рендер с целевыми 60 FPS; наблюдалось примерно 56–60 render updates/s при MediaPipe примерно 26–30 results/s. При сильном опускании головы `HeadDownLipVisibilityGate` скрывает маску после трёх последовательных кадров с pitch не ниже `24°` и возвращает после трёх кадров не выше `18°`; device-лог подтвердил устойчивое скрытие/возврат без порогового мигания.
+- статический p95 шага MediaPipe mouth center: `0.75 px`;
+- статический p95 изменения ARCore correction: `3.53 px`;
+- статический p95 corrected center: `3.46 px`;
+- при движении только глаз local lower-lip shape почти неизменна: p95 `0.0004` lip width;
+- при том же сценарии MediaPipe center давал выброс до `5.3 px`, ARCore correction — до `8.3 px`, corrected center — до `9.2 px`;
+- `anchorResidualPx` практически равен нулю, поэтому translation применяется арифметически правильно;
+- `tessResidualPx=0`, тесселяция скачок не создаёт.
 
-`ArCoreFaceAnchorActivity` является обычным `MAIN/LAUNCHER`, поэтому принятый гибрид открывается без debug intent-extra. Прежний CameraX/Filament/Vulkan экспериментальный экран сохранён в `MainActivity` как внутренний rollback. Основной XML/View экран восстановил прежнюю продуктовую логику и позволяет переключать `Матовая / Сатин / Глянец / Трек` без перезапуска camera session или изменения tracking geometry.
+Фиксированная 3D-точка carrier уже не зависит от деформации губ. Наиболее вероятный источник — шум `face.centerPose` и cross-tracker rebase в выражении `MediaPipe center(M) + anchor(R) - anchor(M)` при поступлении нового sensor timestamp.
 
-Текущий OpenGL ES compositor семплирует тот же ARCore external camera texture внутри tessellated lip mesh, использует мягкое coverage, reconstructed normals, lip-local UV, camera luminance/gradient и общие `ReferenceLipstickRenderProfiles`. Коммит `af33129` разделил optically opaque matte, более лёгкий satin и плотный lacquer gloss и добавил отдельное сглаживание surface detail. Коммит `5e046da` превратил фиксированную полноразмерную белую полосу gloss в локальный camera-conditioned блик: яркость, цвет и направление берутся из соседних camera samples, горизонтальный центр смещается по градиенту света, а ширина сокращается при направленном освещении; реальные локальные блики камеры сохраняются. Пользователь принял это как рабочую material-базу, но не как конечный вариант. Ещё нужны controlled A/B при разном освещении, защита от temporal shimmer/auto-exposure, дальнейшая BRDF/HDR/edge калибровка и multi-device acceptance.
+Следующее исследование должно раздельно записать абсолютные ARCore anchor samples на `M` и `R`, residual `MediaPipe center(M)-anchor(M)` и момент смены measurement. Затем нужен controlled A/B текущего transport против continuity-preserving global owner/bypass. Нельзя начинать с общего low-pass или случайного коэффициента: решение обязано сохранить преимущество ARCore при быстром движении.
 
-Единый исходный цвет продуктовой помады для всех трёх финишей зафиксирован как source-sRGB `#A93033` (RGB 169/48/51), внутренний cross-platform reference «999». OpenGL ES, Filament и старый Canvas fallback обязаны начинать с одного и того же пигмента; различия верхней/нижней губы и matte/satin/gloss формируются только coverage, фактурой, освещением и оптическим профилем материала. `#A93033` не считается подтверждённой официальной цифровой спецификацией Dior; без отдельного разрешения коммерческий UI использует нейтральное название вроде «Классический красный».
-Уточнение цвета 2026-09-01: правило одного пигмента для всех финишей отменено по явному продуктовому решению. Satin использует отдельный source-sRGB `#B8202D` (RGB 184/32/45); matte и gloss сохраняют текущий `#9E2620`. Выбор оформлен через `LipstickPigmentPalette` и одинаково применяется активным ARCore/OpenGL renderer и сохранённым Filament fallback; оптические параметры и tracking этим изменением не затронуты.
+### 2. Малый residual lag нижней губы
 
+Основное отставание устранено переносом shared lower-band center. Остаток нужно искать в MediaPipe delivery cadence и sensor-to-visible-camera age, не меняя уже принятую верхнюю губу и не смешивая этот эксперимент с ARCore jitter.
 
-Предыдущий satin-999 candidate с linear-RGB материалом зафиксирован checkpoint-коммитом `463adae`; он остаётся точкой отката, а не финально принятым визуалом. После аудита готовой iOS-реализации пользователь уточнил, что iOS-проект изменять и отдельный общий SDK/JSON material contract создавать не требуется: задача — воспроизвести её фактическое поведение только в Android.
+## Действующие архитектурные решения
 
-Semantic parsing начинается с бесплатного 2D baseline без собственного обучения: текущие MediaPipe-контуры, product masks, GPU edge refinement/flow и опциональный официальный Apache 2.0 Selfie Multiclass Segmenter только для broad `face-skin/hair/background`. Собственная компактная модель для lips/mouth-teeth/eyelids рассматривается только если этот baseline не проходит visual acceptance; права на dataset/labels/weights остаются обязательным gate.
-Tracking/semantic slice начат 2026-09-01 до окончательной фиксации материалов по явному решению пользователя и сохранён как незавершённая диагностическая контрольная точка. MediaPipe backend теперь формирует model-independent `FaceObservation` с нормализованными outer/inner lip contours, sensor timestamp, topology version, geometry confidence, mouth openness и analytic `LipSemanticState`. Renderer больше не извлекает губы из полного MediaPipe landmark array: backend-specific topology ограничена adapter-слоем.
-
-`LipContourTemporalRefiner` фильтрует только lip-local deformation относительно текущего центра/ширины; global translation по-прежнему выполняет `TimestampedLipAnchorTransport` на ARCore camera timeline. Predictor, gyro и видимый 3D mesh не возвращены. Для нижней дуги текущий эксперимент дополнительно продолжает движение к последнему MediaPipe target на повторных ARCore render frames с тем же sensor timestamp (`0.50` response), но device-проверка не подтвердила устранение визуального скачка.
-
-Mouth-transition candidate 2026-09-01 устранил на SM-G990B отдельный старый скачок верхней губы при быстром открытии/закрытии рта и визуально принят пользователем для верхней дуги. Общий adaptive response раньше определялся максимальной дельтой любой lip-точки и при резком изменении внутренней границы поднимался почти до полного пропускания измерения. Теперь `mouthOpenness` ограничивает вертикальный response точек верхней дуги обоих контуров `11..19` до `0.56` во время быстрого перехода. Это принято только для верхней губы и не доказывает корректность фильтра нижней.
-
-Device-диагностика на SM-G990B показала, что этот mouth-response candidate не устраняет первопричину скачка. При `mouthOpennessSpeed` около `8–12/s` текущий ARCore `anchorY` даёт синхронные импульсы примерно `+17…+26 px` при открытии и `−9…−16 px` при закрытии, потому что `drawLipAnchor()` каждый кадр пересчитывает carrier как midpoint деформируемых inner-lip mesh vertices `13/14`. При этом filtered upper-thickness delta обычно остаётся в пределах `0.05–0.5%` ширины губ, а filtered upper-center delta — около `1–3%`; значит shader/tessellation не являются основным источником большого экранного скачка. Следующий candidate должен сначала заменить expression-sensitive anchor на фиксированную face-local точку около рта, захваченную один раз на tracking epoch и переносимую только `face.centerPose`; усиливать smoothing верхней губы до этого A/B не следует. Для повторной проверки добавлены экранные raw/filtered метрики и отдельный logcat tag `LipJumpMetrics`.
-
-Fixed face-local carrier candidate 2026-09-01 реализует этот A/B: midpoint ARCore vertices `13/14` читается только один раз при появлении лица и сохраняется как локальная 3D-точка; на последующих кадрах она проектируется исключительно текущими `face.centerPose`, camera view и projection, не читая деформируемый mouth mesh повторно. Краткая потеря ARCore face tracking немедленно очищает только timestamped transport; carrier сохраняется, а visibility/local refiner сбрасываются после восьми последовательных кадров без лица. Полный reset carrier выполняется при смене ARCore session. Это устранило повторный захват expression-dependent anchor при кратких dropout и вместе с upper transition filter визуально исправило верхнюю губу.
-
-Нижняя губа на той же device-проверке продолжает заметно прыгать при открытии/закрытии рта. Симметричный лимит `0.56` для всей нижней дуги сделал эффект таким же или сильнее; раздельный response центра `0.82` и толщины `0.56` также не прошёл visual acceptance. Последний checkpoint возвращает первичный response нижней дуги к `0.56`, но продолжает приближение к target между MediaPipe results на каждом новом ARCore render timestamp; пользователь подтвердил, что скачок всё равно остаётся. Метрики показывают дискретное физическое смещение lower-center примерно `6–9%` ширины губ на один MediaPipe result при быстром переходе, тогда как верхняя дуга движется существенно меньше. Следующую итерацию нельзя начинать с ещё одного слепого коэффициента: нужна короткая покадровая запись с абсолютными screen-space координатами outer/inner lower center, mouth corners, MediaPipe sensor timestamp, ARCore render timestamp и готовыми tessellated vertices, чтобы отдельно проверить (1) landmark step/semantic swap, (2) center/width normalization, (3) spline/tessellation и (4) global anchor correction. Текущий lower-lip вариант сохранён только как диагностический checkpoint, не production acceptance.
-
-Semantic baseline пока не добавляет внешнюю ML-модель или датасет. Геометрическая валидность outer/inner contour создаёт вероятности `lips` и объединённого `mouth/teeth exclusion`; активный GPU shader использует их для консервативного camera-edge coverage refinement и усиленной защиты внутренней границы при открытом рте. Будущий лицензированный parsing backend должен заменять semantic probabilities, не меняя renderer contract. С 2026-09-01 после каждого законченного изменения разрешён и обязателен локальный debug/compile gate; установка на устройство и визуальная приёмка остаются отдельным этапом по команде пользователя. Текущий slice проходит `:app:compileDebugKotlin` и `:app:assembleDebug` и сохраняется отдельным commit как диагностическая точка продолжения; visual acceptance есть только для верхней губы, нижняя остаётся открытым дефектом.
-
-
-## Cross-platform parity с iOS — аудит и решение 2026-08-31
-
-Для сравнения статически проверен публичный iOS-репозиторий `https://github.com/Dzhanaeva/virtual-makeup`, ветка `main`, точный commit `8baf9066aeafca744d7336c6f5f9847355ff8efb`. Xcode/iOS runtime нельзя собрать и профилировать на текущем Windows-host, поэтому execution paths подтверждены исходниками, dependency lock, конфигурацией и SHA-256 assets; итоговая visual/performance parity требует согласованных записей с реальных iPhone и Android-устройств.
-
-Главное архитектурное совпадение: iOS также использует гибрид, а не «ARKit вместо MediaPipe». `ARFaceTrackingConfiguration` даёт быстрые pose/depth/blendshape updates, MediaPipe Face Landmarker — реальный контур губ, а Metal/SceneKit формируют материал и финальную геометрию. Android использует эквивалентное разделение ролей через ARCore Augmented Faces + MediaPipe, но текущий Android baseline переносит MediaPipe-контур в основном translation одного mouth anchor; iOS дополнительно привязывает точки к face-local AR surface carrier и ограниченно компенсирует локальную мимику. Для Android полезен сам принцип per-landmark carrier/warp, но не обязательное копирование SceneKit implementation.
-
-Максимально одинаковый cross-platform стек является новым приоритетом только там, где это не ухудшает качество и коммерчески допустимо:
-
-- общий MediaPipe Face Landmarker сохраняется первым кандидатом landmark backend на обеих платформах; iOS и Android содержат побайтово одинаковый официальный `face_landmarker.task`, SHA-256 `64184E229B263107BC2B804C6625DB1341FF2BB731874B0BCC2FE6544E0BC9FF`, с уже проверенными Apache 2.0 model cards;
-- Android должен семантически повторять MediaPipe lip topology, timestamp/age/confidence contract, visibility/occlusion, pigment, density/coverage и material response готового iOS-эталона; отдельная общая библиотека, JSON schema или изменение iOS-проекта сейчас не требуются;
-- ARKit/ARCore остаются платформенными pose/carrier backends, а Metal и Android OpenGL/Vulkan/Filament — платформенными GPU implementations одного material contract; заменять их менее качественным общим API только ради одинакового названия нельзя;
-- material/color-space contract, coverage/density, edge feather, detail/luminance budgets и acceptance scenes должны совпадать семантически, даже если shader language и camera texture API различаются;
-- перенос Swift-кода разрешён только после подтверждения прав на iOS-репозиторий: в проверенном commit нет корневого `LICENSE`; если оба проекта принадлежат одной команде, права всё равно нужно документально зафиксировать для release audit.
-
-Уточнение 2026-09-01: iOS считается готовым эталоном и не входит в область изменений Android-репозитория. Общность достигается повторением проверенного поведения в Android и сравнением результата на устройствах, а не созданием новых файлов или API, которые должен потреблять iOS.
-
-Обязательные расхождения и blockers до сближения:
-
-- bundled `Virtual Makeup/faceParsing.mlmodel` размером `52,658,220` байт имеет SHA-256 `E2695F389C73EE9BFA9513337E11CC860D740A1E2A4644671CFD9E44AAAC09B1`, полностью совпадающий с публичной FaceParsing CoreML-моделью `tucan9389/SemanticSegmentation-CoreML`; её BiSeNet checkpoint обучен на CelebAMask-HQ, условия которого запрещают коммерческое использование и derived data;
-- этот CoreML asset фактически не участвует в iOS renderer: production texture request передаёт `semanticMask: nil`; его нужно удалить из коммерческого shipping target, а не переносить в Android;
-- iOS preset «999» использует RGB `158/38/32` (`#9E2620`); Android-only parity candidate 2026-09-01 переключён на тот же source-sRGB reference, а прежний `#A93033` остаётся в checkpoint `463adae`;
-- iOS Metal satin использует camera-derived highlight и считает luminance/detail в gamma-like `Unorm` RGB с Rec.601 weights; Android-only parity branch повторяет эту математику только для matte/satin, тогда как gloss пока сохраняет прежний linear-RGB Android path;
-- iOS gloss math существует только в legacy CPU fallback, а основной Metal path имеет отдельную ветку лишь для satin; в UI также нет gloss preset;
-- iOS Metal compositor ждёт `waitUntilCompleted`, читает GPU texture на CPU, создаёт `UIImage` и возвращает её SceneKit. Этот GPU→CPU→GPU roundtrip не переносится; общий целевой принцип — GPU-resident compositing без readback;
-- Xcode deployment target равен iOS 18.0 при `platform :ios, '15.0'` в Podfile; матрицу iPhone/TrueDepth support нужно согласовать отдельно от Android `minSdk` и ARCore supported-device gate;
-- iOS runtime находится в одном `FaceTrackingView.swift` примерно на 11.7 тысячи строк и не имеет XCTest/CI; перед синхронизацией нужны отдельные tracking/geometry/material/color modules и regression fixtures.
-
-Принятый порядок Android-воспроизведения iOS-реализации:
-
-1. Считать проверенный iOS commit неизменяемым visual/behavior reference; юридическая очистка его shipping target остаётся отдельной обязанностью iOS/release-команды, а Android не импортирует `faceParsing.mlmodel`.
-2. Повторить в активном Android GPU compositor фактические iOS matte/satin tone, pigment, camera-detail и natural-highlight formulas и фактический preset «999», сохраняя Android tracking baseline.
-3. Сравнить Android и iOS на одинаковых лицах, освещении, экспозиции и движениях; калибровать только подтверждённые расхождения цвета, плотности, деталей, feather и блика.
-4. Не заменять GPU-resident Android pipeline iOS GPU→CPU→UIImage→SceneKit readback и не копировать незавершённый iOS gloss path; gloss остаётся Android-кандидатом до появления принятого iOS-эталона.
-5. После material acceptance отдельно A/B-переносить принцип iOS per-landmark AR surface carrier в ARCore; принимать его только при улучшении attachment без возврата jitter/deformation.
-
-Первый Android-only material candidate реализован 2026-09-01 в активном `ArCoreFaceAnchorRenderer`: matte/satin используют эквивалент iOS Metal 9-point camera detail, gamma-like Rec.601 tone mapping, pigment strengths `0.90/0.42` и satin natural highlight из локального camera contrast. Фактический iOS preset «999» синхронизирован как `#9E2620`, а satin core coverage поднят до полного покрытия перед camera/pigment mixing. По новому visual-требованию непрерывные satin-полосы разбиваются стабильной lip-local процедурной маской на короткие фрагменты, точки и мелкие specks; маска не зависит от номера кадра и потому не должна мерцать или плавать относительно губ. После первого device-feedback порог satin camera contrast снижен, пик блика поднят до `0.32`. Gloss последовательно получил microfacet-response и более плотную мягкую маску, а в текущем candidate линейные/fragmented-strip формы полностью удалены из gloss pattern: остались три независимых слоя мягких кругов разного размера. Непрерывный native camera highlight вне кругов снижен с `0.42` до `0.05`, поэтому освещение определяет яркость кругов, но не возвращает заметную полосу. Tracking и satin в последней итерации не изменены. Gradle unit/lint/assemble gate проходит; APK установлен на SM-G990B и запущен для ручной visual-проверки, поэтому candidate не коммитится как принятый до отзыва пользователя.
-
-Уточнение последней gloss-итерации 2026-09-01: circle-only candidate визуально оказался слишком матовым. В gloss восстановлен отдельный мягкий горизонтальный `localizedArcHighlight`, а поверх него оставлены три независимых слоя именно круглых точек с увеличенными радиусами `0.22/0.18/0.12`. Вклад полосы и кругов усилен до `0.105/0.080`, минимальный вклад непрерывного native camera highlight возвращён с `0.05` до `0.42`. Tracking и satin не изменены; candidate остаётся незакоммиченным до визуального отзыва пользователя.
-
-Решение 2026-09-01: текущий gloss с мягкой горизонтальной полосой и тремя слоями крупных круглых точек принят как рабочая визуальная контрольная точка, но не как полностью готовый материал. Его вид является основой дальнейшей калибровки; до финального acceptance обязательны проверки на разных устройствах, камерах и при разном направлении, цветовой температуре и интенсивности освещения.
-
-Новый satin candidate использует те же стабильные lip-local круглые маски бликов, что и рабочий gloss, но отдельную более широкую и мягкую горизонтальную полосу. Максимальный camera-derived highlight ограничен `0.18`, суммарный — `0.22`, а добавочные вклады полосы/кругов составляют `0.040/0.024` и масштабируются реальной освещённостью кадра. Это целевой промежуточный отклик между matte и gloss; tracking, matte и принятый gloss не изменены. Candidate собран и проходит unit/lint/assemble gate, но до device-feedback не считается визуально принятым и не коммитится.
-
-Политика веток с 2026-09-01: `codex/lipstick-material-v2` является единственной активной интеграционной веткой для tracking, материалов, UI и следующих продуктовых этапов. Принятый `codex/arcore-point-2d-baseline` уже входит в её историю и остаётся только исторической контрольной точкой; отдельная разработка в нём не продолжается. `master` содержит отвергнутую FF5/видимую 3D-линию и не сливается в активную ветку без отдельного осознанного решения. Все дальнейшие изменения выполняются и проверяются в текущей ветке без переключения, если пользователь явно не изменит это решение.
-
-До выполнения этих gates текущая Android tracking/material база остаётся основной. Аудит задаёт направление Android-воспроизведения, но не является автоматическим разрешением сторонних лицензий.
-
-## Текущее состояние репозитория
-
-- Чистый Android-проект на Kotlin.
-- Один модуль `:app`.
-- UI: XML/View system и `AppCompatActivity`.
-- `minSdk = 24`, `targetSdk = 37`, `compileSdk = 37`.
-- Android Gradle Plugin 9.3.1.
-- Основной launcher использует ARCore 1.54.0 + MediaPipe hybrid и OpenGL ES camera-conditioned lipstick compositor с переключаемыми matte/satin/gloss/tracking profiles. ARCore даёт camera-synchronized global mouth anchor, MediaPipe — 40-точечный внешний/внутренний 2D-контур, а timestamped translation transport совмещает measurement и render frames. Predictor, gyro, visible 3D mesh и face-wide affine/projective correction в основном пути выключены. Semantic parsing и финальная BRDF/HDR-калибровка не добавлены.
-- Активный roadmap теперь 2D-first и зафиксирован выше; `FULL_FACE_ROADMAP.md` — историческая superseded-документация. Model-independent 2D full-face contract, semantic masks, GPU/Vulkan optimization и fallback для устройств без ARCore ещё не реализованы.
-- Git checkpoints до текущей material-базы: V6.0 — `8d48b46`; стабильный V6.2 — `cc82370` / `tracking-v6.2-stable-2026-08-17`; V6.3 gyro experimental — `dd095f7`; FF1/FF2 shadow telemetry — `0554924`; canonical transform contract — `19a2280`; native residual candidate — `1406c24`; ARCore + MediaPipe hybrid proof — `782778c`; timestamped launcher — `ad51128`; основной product UI/material foundation — `66189d5`; finish candidates — `af33129`; локализованный camera-lighting gloss baseline — `5e046da`.
-
-Пока нет причин менять `minSdk = 24`: он совместим с выбранным ML-стеком и позволяет использовать современный GPU-пайплайн на Android 7+.
-
-`compileSdk` поднят с 36.1 до 37, потому что уже выбранный в исходном шаблоне `androidx.core:core-ktx:1.19.0` требует API 37. Для нового приложения также выбран `targetSdk = 37`; поведение Android 17 должно проверяться на устройстве/эмуляторе API 37 до релиза.
-
-## Реализовано на 2026-08-11
-
-- CameraX 1.6.1: фронтальный `Preview` и отдельный `ImageAnalysis` в одной `SessionConfig` с общим `ViewPort` и согласованным диапазоном FPS.
-- Analysis работает в `RGBA_8888`, `STRATEGY_KEEP_ONLY_LATEST` и с целевым размером 640×480; камера не блокируется очередью устаревших кадров.
-- MediaPipe Tasks Vision 1.0.0 и официальный `face_landmarker.task` подключены в `LIVE_STREAM`.
-- GPU delegate используется первым, при ошибке инициализации автоматически включается CPU fallback.
-- В realtime-профиле включены все 478 landmarks. Необязательные 52 blendshapes и facial transformation matrix временно отключены, поскольку текущие эффекты их не потребляют; это исключает лишнюю модель из каждого кадра. Включать их нужно по требованию конкретного эффекта/quality profile.
-- Добавлены runtime camera permission, проверка фронтальной камеры, FPS/latency telemetry и обработка ошибок.
-- Добавлены unit-тесты преобразований координат `FILL_CENTER`, camera rotation и front-camera mirror.
-- Команда `:app:testDebugUnitTest :app:assembleDebug :app:lintDebug` успешно выполнена после добавления первого Vulkan-среза: 50 unit-тестов пройдено, Android lint сообщает `No issues found`.
-- Debug APK формируется в `app/build/outputs/apk/debug/app-debug.apk` и проверяется на подключённом Samsung SM-G990B.
-- Добавлен Google Filament `1.74.0`: CameraX `Preview.SurfaceProvider` передаёт camera frames непосредственно в Filament `Stream`, поэтому активный preview и помада теперь сводятся в одной GPU scene вместо двух Android View-слоёв. На API 29+ используется синхронизируемый `ACQUIRED` stream через `ImageReader`/`HardwareBuffer` и release-callback Filament; на API 24–28 остаётся copy-free `NATIVE` stream через `SurfaceTexture` без гарантии camera/render synchronization.
-- CameraX `TransformationInfo` преобразуется в единую Filament UV→camera texture matrix с учётом crop rect, rotation и front-camera mirror; обратимость transform покрыта unit-тестами. CameraX/MediaPipe используют top-left image origin, а Filament UV и external texture — bottom-left origin, поэтому origin меняется на обеих границах матрицы. На API 29+ OpenGL `ACQUIRED` path дополнительно компенсирует наблюдавшуюся на SM-G990B инверсию обеих display-осей импортированного `HardwareBuffer`; API 24–28 `NATIVE SurfaceTexture` path эту компенсацию не применяет. Camera quad и динамическая lip mesh используют одинаковые Filament UV, поэтому поправка не изменяет координаты трекера и сохраняет совпадение выборки camera color внутри lipstick material с фоном.
-- Landmark-контуры губ преобразуются в динамическую GPU mesh: отдельные upper/lower triangle strips, cubic subdivision и восемь поперечных coverage rings. Покрытие равно нулю у кожи и у внутренней границы рта, поэтому полость рта и зубы не входят в геометрию материала.
-- Первый Filament lipstick material работает в linear RGB: camera preview переводится через `inverseTonemapSRGB`, оттенок пигмента смешивается с сохранением luminance исходных губ, а matte compression применяется только к ярким участкам. Это foundation для дальнейших normals, lighting и BRDF, а не завершённая физическая модель.
-- Первая визуальная проверка Filament-композитора на SM-G990B выявила перевёрнутый camera preview при правильно ориентированной lip mesh. Нормализация top-left/bottom-left origin сама по себе не изменила наблюдаемую вертикальную инверсию, потому что смена UV mesh погасила экранную коррекцию. Отдельная вертикальная acquired-stream компенсация выровняла ориентацию, после чего визуально проявилось оставшееся горизонтальное отражение camera stream относительно landmarks: при движении головы вправо маска смещалась влево относительно изображения. Текущая компенсация отражает обе display-оси только для `ACQUIRED HardwareBuffer` и покрыта regression-тестом. Последующие V2.1/V3 device runs и контрольный screenshot подтвердили вертикальную ориентацию camera preview, правильный mirror и совпадение lip mesh с губами.
-
-## Vulkan-native миграция — начата 2026-08-11
-
-Принято направление: целевой production hot path будет единым Vulkan 1.1 camera/compute/render graph для API 29+. Это не только замена OpenGL backend: camera `AHardwareBuffer`, temporal refinement, semantic masks, normals/lighting и многослойный lipstick material должны находиться в одном GPU-пайплайне с явными timestamps и synchronization fences. MediaPipe Face Landmarker на первом этапе остаётся anchor detector; текущий Filament/OpenGL путь сохраняется как визуальный baseline и fallback до прохождения Vulkan acceptance.
-
-Миграция выполняется вертикальными этапами, и каждый этап обязан оставлять запускаемую сборку:
-
-1. **V0 — baseline зафиксирован:** текущий CameraX + MediaPipe + Filament/OpenGL compositor, unit-тесты transforms/tracking/material geometry и device telemetry. До его удаления Vulkan должен воспроизвести ориентацию, mirror, crop, цвет и lip alignment.
-2. **V1 — Vulkan backend proof:** capability policy Vulkan 1.1/API 29+, явный backend selection, material packages для OpenGL и Vulkan, запуск существующего camera/lip vertical slice на SM-G990B. Этот этап проверяет драйвер, swapchain, external `HardwareBuffer` и shader variants, но ещё не считается native frame graph.
-3. **V2 — native bootstrap:** подключение NDK/CMake, C++ Vulkan device/swapchain/resource lifecycle, offline SPIR-V compilation, JNI boundary и диагностический camera pass. Kotlin сохраняет Android lifecycle/permissions; native слой владеет GPU resources.
-4. **V3 — единый camera frame:** прямой импорт `AHardwareBuffer`, acquire/release fences, единый `FrameState` с sensor timestamp, crop/rotation/mirror и latest-only ownership; удаление лишних camera copies из render path.
-5. **V4 — temporal GPU tracking:** Face Landmarker используется как 25–30 FPS anchor, между результатами Vulkan compute выполняет pyramidal optical flow по ROI лица/губ, robust pose/deformation fit, confidence gating и репроекцию на каждый render frame. Текущий predictor остаётся baseline до измеренного превосходства нового пути.
-6. **V5 — semantic/material quality:** лицензированная lip parsing model после отдельной проверки, temporal warp маски, per-pixel normals, lighting estimation и физические matte/satin/gloss materials с diffuse/specular разделением, micro-roughness, влажной внутренней кромкой и корректным linear/HDR color pipeline.
-7. **V6 — predictor и production temporal tracking:** MediaPipe Face Landmarker остаётся anchor-источником raw landmarks, но текущий `LandmarkMotionPredictor` не сохраняется как production-решение. Сначала добавляются записываемая/replayable покадровая телеметрия и метрики stationary RMS/peak jitter, motion lag, stop overshoot и reacquisition jump. Затем глобальные translation/scale/rotation головы отделяются от локальной деформации губ; для покоя, движения, резкой остановки, dropout и изменения ML FPS вводятся явные состояния, hysteresis и bounded prediction. Vulkan flow остаётся shadow-сигналом и может войти в видимый путь только после измеренного улучшения. V6 считается завершённым лишь после записанного A/B и device acceptance без заметного jitter на неподвижном лице, отставания при движении и скачка после остановки.
-
-Критерии Vulkan acceptance: отсутствие black frame/crash; полное совпадение camera и landmarks при движениях и поворотах; корректные 0/90/180/270°, mirror и crop; неокрашенные рот/зубы/кожа; отсутствие дополнительной frame queue; GPU compositor budget не более 6–8 ms при 60 FPS; отсутствие заметного jitter/lag; 10–15 минут без неприемлемого thermal throttling. До выполнения критериев старый path не удаляется.
-
-Первичная проверка целевого SM-G990B: Android API 36, `arm64-v8a`, Adreno 660, Vulkan device API 1.1, присутствуют `VK_ANDROID_external_memory_android_hardware_buffer`, `VK_KHR_sampler_ycbcr_conversion`, timeline semaphore и timestamp support.
-
-Статус V1: реализована чистая capability policy — целевой Vulkan запрашивается только для API 29+, 64-битного процесса, объявленного Vulkan hardware level и Vulkan API не ниже 1.1; во всех остальных случаях запрашивается OpenGL. Material factory умеет собирать packages под оба target API, и Vulkan engine/material proof на SM-G990B был успешен до подключения camera stream. После выявленной несовместимости camera stream Filament factory намеренно разрешает production compositor только на OpenGL и сообщает requested/active backend с причиной fallback. Активный `Vulkan`/`OpenGL fallback` виден в экранной telemetry. Unit-тесты, lint и debug-сборка проходят; до появления native renderer OpenGL path остаётся эталонным compositor.
-
-Первый V1 device run на SM-G990B подтвердил `requested=VULKAN active=VULKAN`, Filament выбрал Adreno Vulkan driver и оба Vulkan material packages успешно загрузились. Однако при поступлении первых кадров через Filament `ACQUIRED HardwareBuffer` процесс получил native `SIGSEGV` в `FEngine::loop`; перед падением camera session успела перейти в active state. Попытка временно использовать `NATIVE SurfaceTexture` также отвергнута самим Filament сообщением `createStreamNative not supported in Vulkan`, после чего invalid stream handle приводил к `SIGABRT`.
-
-Принято безопасное решение: Filament compositor теперь всегда является явным OpenGL bridge, на API 29+ продолжает использовать проверенный синхронизированный `ACQUIRED HardwareBuffer`, а запрос Vulkan отображается как `OpenGL fallback` с диагностической причиной. Native Vulkan capability/device probe остаётся активным. Это не отказ от Vulkan-архитектуры: production Vulkan включается только вместе с собственным camera importer/frame graph, где приложение владеет AHardwareBuffer и fences, а не через несовместимый Filament `Stream`. В `FilamentMakeupRenderer` добавлен fail-fast guard, запрещающий случайно вернуть crash-prone Vulkan camera path.
-
-Повторный device run после этого решения стабилен: `requested=VULKAN active=OPENGL`, `cameraInput=AcquiredCameraInput 1440x1080`, native probe `status=ok`; процесс остаётся жив без `AndroidRuntime`/native fatal errors. Статический screenshot подтверждает правильную вертикальную ориентацию камеры, совпадение помады с губами и отсутствие цвета на зубах/полости рта. Динамический mirror/alignment при движении головы всё ещё требует визуального подтверждения. В наблюдавшемся интервале MediaPipe GPU показывал в основном 29–30 FPS с отдельными окнами около 22 FPS, latency 71–131 ms. `gfxinfo` после 1945 UI frames: 6 janky frames (0.31%), p50 8 ms, p90 9 ms, p95 10 ms, p99 13 ms; это показатель Android UI/overlay, а не замена отдельному замеру Filament/Vulkan GPU compositor.
-
-Состояние native toolchain для V2: установлены Android SDK Command-line Tools `15859902`, CMake `3.31.6` и NDK r29 `29.0.14206865`; версии закреплены в Gradle/CMake. Начат подэтап V2.0: добавлен отдельный C++20/JNI-модуль `armakeup_vulkan`, который через `dlopen` безопасно проверяет системный Vulkan loader даже на старом OpenGL-fallback устройстве, создаёт диагностический `VkInstance`, находит physical device и сообщает device API, Android surface, graphics queue, swapchain, AHardwareBuffer external memory, sampler YCbCr, timeline semaphore и timestamp support в лог `ARMakeupVulkan`. Прямой link к `libvulkan.so` намеренно не используется, поэтому отсутствие Vulkan не мешает загрузке приложения. Native library с `-Werror` успешно собирается и входит в debug APK для `arm64-v8a`, `armeabi-v7a`, `x86` и `x86_64`.
-
-V2.0 device proof пройден на SM-G990B: `libarmakeup_vulkan.so` загрузилась, loader сообщил Vulkan `1.4.0`, Adreno 660 — device API `1.1.128`, а Android surface, graphics queue, swapchain, AHardwareBuffer, YCbCr, timeline semaphore и timestamps доступны. V2.0 ещё не является native renderer: bootstrap создаёт и освобождает только диагностический instance; Filament/OpenGL пока владеет swapchain, camera stream и makeup scene. Следующий V2-подэтап — persistent native device/swapchain lifecycle и диагностический pass, после чего можно начинать перенос `AHardwareBuffer` ownership и fences.
-
-Подэтап V2.1 реализован локально 2026-08-12. Добавлен независимый `NativeVulkanDiagnosticRuntime`, который создаёт и удерживает собственные `VkInstance`, `VkSurfaceKHR`, `VkDevice`, graphics/present queue, Android swapchain, image views, render pass, framebuffers, command pool/buffers и два frames-in-flight с отдельными binary semaphores/fences. Native dispatch загружается через `dlopen`/`vkGet*ProcAddr`; ELF по-прежнему не имеет жёсткой зависимости от `libvulkan.so` и зависит только от `libandroid`, `libdl`, `liblog`, `libm`, `libc`.
-
-Для V2.1 выбран изолированный offscreen proof вместо второго видимого renderer: маленький `ImageReader` 64×64 `RGBA_8888` с CPU-read usage предоставляет настоящий Android `Surface` для Vulkan swapchain. Native render thread с частотой 10 FPS выполняет полный `acquire → clear render pass → queue submit → present`, а отдельный Kotlin `HandlerThread` работает latest-only, закрывает представленные `Image` и проверяет центральный RGBA pixel на ненулевой диагностический clear color. Этот surface не получает camera frames и не участвует в compositing, поэтому не может изменить ориентацию, crop, цвет или latency рабочего Filament/OpenGL пути.
-
-V2.1 связан с Android lifecycle: resources создаются один раз вместе с renderer, render thread запускается в `resume`, останавливается с ожиданием fences/device idle в `pause`, а при `destroy` native resources освобождаются до закрытия `ImageReader`/`ANativeWindow`. Ошибка создания или отсутствие Vulkan не являются fatal для камеры — diagnostic runtime отключается, а OpenGL baseline продолжает работу. Screen telemetry показывает `OpenGL fallback · VK runtime`, только если persistent native runtime действительно готов.
-
-Локальная приёмка V2.1: C++20 с `-Werror` успешно собран для `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`; все JNI entry points экспортированы; 50 unit-тестов пройдено, debug APK собран, Android lint сообщает `No issues found`.
-
-Device acceptance V2.1 пройдена на SM-G990B. Runtime создал `RGBA8_UNORM` swapchain 64×64 из семи images на Adreno 660 и начал present без native/Android Runtime ошибок. Первый полученный `ImageReader`-кадр имел центральный pixel `RGBA 209,31,87,255`, совпадающий с диагностическим clear color, `clearVisible=true`. За первый непрерывный интервал native runtime представил 335 кадров и Kotlin consumer закрыл ровно 335; после pause/resume тот же persistent device продолжил счётчик с 335 и затем с 360, без пересоздания или накопления очереди. Корректное завершение Activity через системный Back дало `stopped frames=35 consumed=35`, затем `destroyed consumed=35`, подтверждая stop/device-idle/resource teardown.
-
-Параллельный V2.1 runtime не нарушил рабочий pipeline: camera осталась вертикально ориентирована, статическая lip mesh совпала с губами, telemetry показала `OpenGL fallback · VK runtime`. После прогрева MediaPipe GPU сохранил примерно 29–30 FPS; стартовые окна во время инициализации обоих GPU runtime кратковременно были 23–28 FPS. `gfxinfo` при одновременной работе: 3026 UI frames, 3 janky frames (0.10%), p50 7 ms, p90 9 ms, p95 10 ms, p99 11 ms. Diagnostic pass намеренно ограничен 10 FPS и 64×64, поэтому эти цифры доказывают lifecycle/interop stability, но не производительность будущего full-resolution Vulkan compositor.
-
-V2.1 считается завершённым. Следующий этап V3 должен заменить diagnostic surface входом камеры: импортировать `AHardwareBuffer` в `VkDeviceMemory`/`VkImage`, учитывать external format и `VkSamplerYcbcrConversion`, принимать acquire fence, выдавать release fence и связывать camera image, transform и landmarks единым immutable `FrameState` по sensor timestamp. До успешного V3 acceptance Filament/OpenGL compositor не удаляется.
-
-V3 реализован и прошёл функциональную device acceptance 2026-08-12. Native runtime теперь создаёт `AImageReader` формата `PRIVATE` с `AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE` и отдаёт его `Surface` непосредственно CameraX. `AImageReader_acquireLatestImageAsync` сохраняет latest-only семантику; полученный camera `AHardwareBuffer` без CPU-копии импортируется в `VkDeviceMemory`/`VkImage` через `VK_ANDROID_external_memory_android_hardware_buffer`. Драйвер SM-G990B сообщает `VkFormat=UNDEFINED` и `externalFormat=506`, поэтому persistent immutable sampler создаётся с `VkSamplerYcbcrConversion` и предложенными драйвером YCbCr model/range/chroma offsets. Нативные media/Android entry points загружаются динамически, чтобы библиотека по-прежнему безопасно загружалась при `minSdk 24`, а V3 camera bridge активировался только на API 29+ с подходящим Vulkan device.
-
-Добавлен offline SPIR-V camera pass: fullscreen triangle семплирует импортированный camera image с той же immutable 4×4 UV transform, которая содержит crop, rotation и front-camera mirror. CameraX `TransformationInfo`, raw sensor timestamp кадра и raw sensor timestamp последнего результата Face Landmarker объединяются в `VulkanCameraFrameState`; матрица копируется defensively, а `landmarkAgeNs` считается в едином camera clock без смешивания с uptime. Landmark timestamp теперь проходит весь путь `ImageProxy → FaceLandmarkerTracker → renderer`. Это подготавливает строгую temporal association для V4 compute tracking.
-
-Синхронизация V3 явная. Если `AImageReader` возвращает acquire sync fd, он импортируется как temporary semaphore; на текущем Adreno acquire fd равен `-1`, то есть кадр уже готов. После camera sampling Vulkan экспортирует release semaphore в sync fd, неблокирующе проверяет его готовность и только затем передаёт тот же `HardwareBuffer` временному Filament/OpenGL compositor. Callback Filament возвращает native token, после чего удаляется соответствующий `AImage` и закрывается Java-reference буфера. Одновременно удерживаются два доставленных буфера, нужные Filament для замены текущего кадра; очередь приложения не растёт, maxImages ограничен четырьмя, устаревшие необработанные camera frames отбрасываются `acquireLatest`.
-
-Device acceptance V3 на SM-G990B: camera input `1440×1080`, AHB format `34`, usage `131328`, Vulkan device Adreno 660 API `1.1.128`. Контрольный Vulkan output pixel отличался от clear color (`RGBA 170,171,165,255`), поэтому external-format sampling реально читает изображение камеры. В непрерывном прогоне счётчики прошли более 8000 imported/rendered/delivered frames при `cameraDropped=0`; release fence экспортирован для каждого кадра, released отстаёт ровно на два текущих Filament-буфера. Pause закрыл camera session, resume продолжил поток около 30 FPS без black frame, crash или накопления ресурсов. Отдельный финальный lifecycle run завершил Activity через Back после 1837 camera frames и дошёл до `destroyed` без recycled-bitmap warnings или native/runtime ошибок. Визуально камера вертикальна, mirror совпадает с landmarks, помада находится на губах. После прогрева Face Landmarker держал в основном 29–30 FPS, landmark age обычно 0–33 ms и изредка 66 ms. Отдельное 10-секундное окно `gfxinfo`: 554 UI frames, 1 janky frame (0.18%), CPU p50/p90/p95/p99 = 7/9/9/11 ms, GPU = 4/5/5/6 ms.
-
-Локальная приёмка V3: native C++20 с `-Werror` собран для `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`; offline camera shaders компилируются NDK `glslc`; 53 unit-теста пройдены без failures/errors, Android lint сообщает `No Issues Found`, debug APK успешно собран и установлен.
-
-V3 считается завершённым как camera-import/synchronization vertical slice. Видимый lipstick compositor пока остаётся Filament/OpenGL fallback: Vulkan уже владеет импортом, fences и контрольным camera pass, но ещё не выводит финальную lip scene в экранный swapchain. Это сохраняет проверенный visual baseline и позволяет перейти к V4 temporal compute без преждевременного удаления fallback. Перед production cutover всё ещё обязательны 10–15-минутный thermal soak, повороты display 0/90/180/270° и acceptance на нескольких GPU.
-
-V4 temporal GPU tracking реализован 2026-08-13 как следующий Vulkan vertical slice. Тот же импортированный camera `AHardwareBuffer` в одном command buffer преобразуется из external YCbCr в persistent `R32_SFLOAT` luma pyramid `192×192` с тремя mip-уровнями. Две пирамиды работают ping-pong без покадровых allocation. По расширенному ROI губ compute shader считает pyramidal iterative Lucas–Kanade flow для сетки `8×6` (48 точек, три итерации и окно `5×5`), затем второй GPU pass выполняет двухпроходный robust weighted similarity fit. Offline `glslc` теперь компилирует четыре V4 compute shader вместе с camera pass; compute/image/buffer/host переходы имеют явные Vulkan barriers, а camera ownership по-прежнему завершается тем же release sync-fd.
-
-Результат V4 содержит scale+rotation+translation, confidence, RMS residual, число inliers и пару raw sensor timestamps. Native и Kotlin повторно проверяют один строгий контракт: interval не больше 80 ms, минимум 12 из 48 согласованных точек, coverage-weighted confidence не ниже `0.36`, RMS не выше `0.014` display UV, scale `0.975…1.025`, модуль rotation не больше `0.05 rad`, translation не больше `0.045`. Порог confidence учитывает уже встроенный множитель `sqrt(inliers / 48)`: первоначальные `0.52` и 16 inliers почти полностью отключали качественные sparse-texture fits, поэтому после device telemetry они откалиброваны до `0.36` и 12 при сохранении геометрических ограничений.
-
-`TemporalLandmarkRefiner` хранит только непрерывную timestamped цепочку принятых transforms, интерполирует первый неполный interval и ограничивает render reprojection 42 ms. Первоначально предполагалось, что очистка цепочки при rejected fit и возврат к `LandmarkMotionPredictor` безопасны. Последующая проверка опровергла это предположение: само чередование двух источников давало скачки даже без накопления drift. Поэтому описанный live application path сохранён только для алгоритмических тестов, а production-конфигурация возвращает `null` correction и держит flow в shadow-режиме.
-
-Device acceptance V4 на SM-G990B/Adreno 660: camera `1440×1080`, AHB format `34`, external format `506`. В длинном foreground-интервале до pause вычислено 1626 temporal fits, принято 776 (`47.7%`); после стабилизации лица встречались серии 36–40 принятых из 60 кадров. За те же 1655 camera imports получено `cameraDropped=0`, release fence создан для каждого кадра, а released закономерно отставал на два in-flight Filament buffer. Home/resume остановил camera session и продолжил тот же runtime без black frame, crash или накопления очереди. Контрольное прогретое 12-секундное окно `gfxinfo`: 300 UI frames, 5.67% janky, CPU p50/p90/p95/p99 = 11/15/17/24 ms, GPU = 4/6/7/8 ms. GPU укладывается в верхнюю границу бюджета, но CPU p95 и jank хуже V3 baseline; необходимы thermal soak и профиль потока перед production acceptance.
-
-Локальная приёмка V4: native C++20 с `-Werror` и все compute shaders собраны для `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`; 61 unit-тест пройден без failures/errors, Android lint завершён без ошибок, debug APK собран, установлен и запущен на устройстве. Статический кадр не выявил регрессий orientation/mirror/lip alignment, но оказался недостаточным для temporal acceptance. V4 завершён только как вычислительный shadow vertical slice; его влияние на видимую mesh отклонено, а весь tracker остаётся незавершённым.
-
-Повторная пользовательская и device-проверка 2026-08-13 обнаружила сильный jitter видимой lip mesh даже при неподвижных лице и устройстве. Причина резкого дополнительного jitter локализована в интеграции V4 flow: renderer применял каждый принятый similarity fit вместо predictor, а после следующего отклонённого fit мгновенно возвращался к predictor. На SM-G990B GPU flow часто чередовал accepted/rejected кадры и при этом мог считать допустимыми шумовые преобразования с примерно 12–16 inliers, поворотом до нескольких градусов и смещением до нескольких процентов кадра. Такое покадровое переключение двух координатных источников создавало сильное дрожание, но его устранение не означает, что сам `LandmarkMotionPredictor` достиг production-стабильности.
-
-Исправление возвращает V4 optical flow в shadow/telemetry-режим: luma pyramid, LK fit, confidence gate и счётчики продолжают работать на GPU, но `TemporalLandmarkRefiner` по умолчанию не изменяет видимую геометрию. Lip mesh снова всегда получает текущий baseline `LandmarkMotionPredictor`; его коэффициенты, sensor timestamps и render-only continuity correction в этом исправлении не изменены, чтобы отдельно оценить вклад flow. Отдельный unit-тест запрещает экспериментальному flow двигать видимую mesh в конфигурации по умолчанию; алгоритмические тесты flow явно включают live-режим только внутри теста. После установки исправления на SM-G990B длительная сессия сохранила `cameraDropped=0`; flow продолжил показывать нестабильность (719 accepted из 4052 computed к последнему срезу), но больше не переключает источник видимых координат. Контрольное окно `gfxinfo`: 588 кадров, 2,55% janky, CPU p50/p90/p95/p99 = 11/14/15/17 ms, GPU = 5/6/6/8 ms. Predictor и flow оба остаются не принятыми для production; финальная визуальная приёмка статических и динамических сценариев обязательна.
-
-После исправления полный debug suite содержит 66 unit-тестов без failures/errors; lint и debug APK для всех четырёх ABI собираются успешно. В `ARMakeupRender` явно логируется `temporalFlowVisible=false`, чтобы device-сессия однозначно подтверждала shadow-конфигурацию.
-
-Финальный контрольный запуск действительно сообщил `temporalFlowVisible=false`, сохранил правильный camera frame и `cameraDropped=0`. Однако после серии сборок, установок и screen-record тестов устройство находилось под thermal throttling: status 2, AP 62,9 °C, skin 41,8 °C и заряд 7%; Face Landmarker в этом окне восстановился только до 19–21 FPS вместо обычных 29–30. Поэтому этот горячий прогон подтверждает правильную конфигурацию и отсутствие runtime-регрессии, но не используется как финальная оценка плавности. Пользовательская проверка должна выполняться после охлаждения и зарядки устройства; оставшаяся низкочастотная ступенчатость в перегретом состоянии не должна смешиваться с исправленным покадровым jitter от flow.
-
-V5.0 material foundation реализован 2026-08-13 без добавления новой ML-модели. Lip mesh теперь строит устойчивую выпуклую поверхность из фактических внешней/внутренней кривых каждого текущего кадра. Для каждого vertex центральными разностями вычисляется camera-facing normal; после GPU-интерполяции шейдер получает per-pixel normal, pigment coverage, координату outer→inner и положение вдоль дуги губ. Геометрия границ и нулевое coverage у кожи/рта не изменены, поэтому новый материал не расширяет область окрашивания и не затрагивает зафиксированный tracking pipeline.
-
-V5.0 lipstick shader остаётся в linear working space и разделяет три сигнала: luminance-preserving chromatic pigment, исходную микротекстуру камеры и specular response. Четыре широких camera sample вокруг текущего fragment дают low-frequency luminance и направление градиента освещения; реконструированная normal формирует roughness-dependent lobe, а положительная высокочастотная разница исходной камеры привязывает блик к реально снятому свету. Статичная highlight texture не используется. Влажная внутренняя кромка ограничена lip-local coordinate и затухает в уголках. Это camera-conditioned оптическая аппроксимация для AR-композитинга, а не заявление о завершённой спектральной BRDF.
-
-Добавлены параметрические профили `MATTE`, `SATIN`, `GLOSS`: roughness, specular strength, сохранение исходного highlight, микротекстуры и wet inner edge меняются независимо от пигментной геометрии. По умолчанию выбран естественный `SATIN`; нижняя панель позволяет переключать три режима в runtime для прямого визуального A/B. Цвет и проверенное core coverage верхней/нижней губы сохранены. Параметры валидируются unit-тестами, а normals проверяются на конечность, единичную длину и направление к камере.
-
-Приёмка V5.0: 65 unit-тестов пройдено без failures/errors, Android lint и debug assemble завершены, все четыре native ABI продолжают собираться. На API 37 x86_64 emulator runtime `filamat` успешно скомпилировал новый материал, Filament создал OpenGL compositor, native Vulkan V4 создал device/camera path и пропустил более 180 camera frames при `cameraDropped=0`, без `AndroidRuntime`, `SIGSEGV` или `SIGABRT`.
-
-Физическая проверка V5.0 на Samsung SM-G990B / Adreno 660 выполнена 2026-08-13. Camera preview имеет правильные orientation/mirror, lip mesh совпадает с губами при фронтальном и наклонном положении, полость рта остаётся неокрашенной. За длинную сессию доставлено 6720 camera frames при `cameraDropped=0`; отставание release-callback на два кадра соответствует двум разрешённым in-flight buffers. Face Landmarker после прогрева держал 29–30 FPS при наблюдавшейся latency примерно 88–119 ms. В чистом прогретом 15-секундном окне `gfxinfo`: 477 кадров, 1 janky frame (0,21%), CPU p50/p90/p95/p99 = 9/10/11/12 ms, GPU = 4/5/6/7 ms. Следовательно, device/runtime acceptance и GPU budget 6–8 ms пройдены на этом устройстве; crash, black frame и camera frame drops не обнаружены.
-
-Визуальная material acceptance V5.0 при этом не пройдена. Runtime-переключение `MATTE`/`SATIN`/`GLOSS` стабильно, но различия профилей на реальной камере слишком слабы, у `GLOSS` нет убедительно читаемого связанного с освещением блика, пигмент местами выглядит плоским, а внешний контур — слишком жёстким и слегка угловатым, особенно в уголках и на дуге Купидона. V5.0 считается технически стабильным material slice, но не production-realistic материалом. Перед semantic refinement нужны улучшение оптического отклика и границы, контролируемое A/B при фиксированных позе/экспозиции и тёплом/холодном/боковом свете; multi-device и 10–15-минутный thermal soak также остаются обязательными.
-
-Для V6 tracking-проверок 2026-08-17 добавлен временный четвёртый профиль `TRACKING_TEST`. Он доступен кнопкой `Трек` только в debuggable-сборке и намеренно не является продуктовым материалом: используется насыщенный hot-magenta `#FF00D4`, shader coverage умножается на `4` с clamp до `1`, а подстройка яркости пигмента под luminance камеры отключена. Поэтому центральная область губ получается максимально плотной и контрастной, чтобы малые смещения контура и jitter были легко заметны. Профиль использует ту же динамическую Filament lip mesh, те же нулевые coverage-границы у кожи и полости рта и не меняет predictor, landmarks, tessellation или camera transforms. `MATTE`/`SATIN`/`GLOSS` сохраняют прежний цвет, coverage и luminance-preserving mixing. Профиль и его UI нужно удалить после завершения визуальной приёмки V6 tracker.
-
-Semantic refinement намеренно не включён в V5.0: конкретная коммерчески пригодная lip-parsing модель и её обучающий датасет всё ещё не выбраны и не прошли лицензионную проверку. Этот подэтап отложен до улучшения трекера; затем нужно оформить model/license decision и добавить вероятностную lip mask с temporal warp поверх текущей mesh-геометрии.
-
-V6.0 measurement foundation реализован 2026-08-14. Это ещё не новый production predictor: видимая mesh по-прежнему использует сравнительный `LandmarkMotionPredictor`, а Vulkan flow остаётся shadow-сигналом. Цель V6.0 — перестать настраивать temporal tracking по краткому субъективному наблюдению и получить один воспроизводимый поток данных для последующего A/B.
-
-Debug-сборка теперь по явному intent-extra записывает versioned binary `.arv6` session в app-specific external files. По умолчанию перед записью есть 5-секундный warm-up, затем 30 секунд данных; duration, warm-up и имя сценария задаются отдельно. Запись никогда не включается в release/без явного флага, не содержит camera pixels и использует bounded non-blocking queue на отдельный writer thread. При переполнении событие отбрасывается и учитывается в `droppedEventCount`, поэтому диагностическая запись не может создать новую realtime frame queue.
-
-Каждый ML-result сохраняет все raw 478×xyz landmarks, base positions и velocities текущего predictor до render correction, capture sensor/uptime timestamp, delivery timestamp, capture→delivery latency, rolling ML FPS, face-present/dropout и predicted-only. Публичный `FaceLandmarkerResult` используемой версии не отдаёт один калиброванный face-confidence, поэтому это поле записывается как `NaN`, а не заполняется выдуманной оценкой. Дополнительно сохраняется разложение global pose/local deformation: translation берётся по жёстким eye/nose/cheek anchors, scale/rotation — по межглазному вектору, а 40 точек внешнего+внутреннего lip contour переводятся в head-local координаты. В V6.0 это было только telemetry; V6.1 predictor теперь использует то же определение stable-anchor pose для видимой mesh.
-
-Каждый render-vsync сохраняет именно последний реально принятый `DynamicVertexUploader` контур, а не только рассчитанный кандидат: outer/inner lip points после rotation/mirror/FILL_CENTER и temporal correction, viewport, render timestamp, anchor sensor timestamp и prediction horizon. Если все upload slots заняты, запись повторяет фактически оставшуюся на GPU геометрию; отсутствие лица/скрытая mesh записываются отдельным событием. Поэтому replay различает шум raw модели, состояние predictor и то, что действительно видел пользователь.
-
-`TrackingTelemetryCodec` немедленно перечитывает завершённый файл, после чего `TrackingTelemetryAnalyzer` считает latency percentiles, stationary RMS/peak, motion lag, stop overshoot и reacquisition jump. Stationary-метрика не берёт всю сессию: выбирается примерно двухсекундное окно с минимальным robust global pose + local lip motion; raw/filtered считаются в image-normalized domain, displayed — также в реальных viewport pixels. Lag/overshoot намеренно не публикуются для сценария с `stationary` в имени. Synthetic replay-тесты фиксируют binary round-trip, инвариантность head-local lip geometry к similarity motion, выбор спокойного окна вместо намеренного движения, известный lag 66 ms и раздельные stop-overshoot/reacquisition события.
-
-Первый 30-секундный device-файл на SM-G990B доказал целостность формата: 730 measurement и 1586 render events, 13,68 MB, `dropped=0`, автоматический decode успешен. Его первоначальная whole-session jitter-оценка отклонена как методологически неверная, поскольку смешивала startup и реальное движение; именно этот результат привёл к stationary-window анализу. Повторный функциональный run с 5 s warm-up и 15 s recording дал 437 measurement и 900 render events, 8,17 MB, `dropped=0`, median ML FPS `29,78`, median/p95 capture→delivery `111/125 ms`. В выбранном спокойном окне старый predictor показал raw/filtered/displayed RMS `0,005868 / 0,006324 / 0,006348` normalized, displayed `11,86 px RMS` и `41,76 px peak`: в этой записи baseline не уменьшил разброс raw lip points. Однако устройство уже имело thermal status 2 / skin около 40–43 °C, поэтому прогон принимается только как functional proof и сигнал для A/B, не как финальный quality threshold. Перед изменением видимого predictor нужны холодные записи всех V6-сценариев; после последней metric-коррекции stationary window обязан иметь не менее 1,9 s.
-
-Локальный gate V6.0 после добавления recorder/replay содержит 72 unit-теста без failures/errors; debug APK и native C++/shaders собираются для `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`, Android lint проходит. На устройстве recording не вызвал crash/black frame, camera importer продолжил сообщать `cameraDropped=0`. Следующий V6-подэтап — записать холодную матрицу `stationary / slow move / fast turn / abrupt stop / talking-smile / phone motion / dropout / ML 15-20-30 / thermal`, затем на одних `.arv6` replay сравнить baseline с predictor, который использует это stable-anchor global pose, отдельно фильтрует local deformation и имеет явные `stationary/moving/stopping/dropout` состояния с hysteresis и bounded prediction. Только численно лучший вариант допускается к device visual A/B; Vulkan flow остаётся shadow до такого же сравнения.
-
-После добавления временного `TRACKING_TEST` полный gate 2026-08-17 содержит 74 unit-теста без failures/errors; `lintDebug` и `assembleDebug` успешны, все четыре native ABI продолжают собираться. Debug APK установлен и запущен на SM-G990B: Filament material с новыми uniform-параметрами скомпилировался, режим `Трек` отображается и даёт ожидаемое плотное magenta-покрытие без регрессии orientation/mirror. Это функциональная проверка диагностического материала, а не acceptance стабильности tracker.
-
-V6.1 stateful predictor candidate реализован 2026-08-17 после пользовательского воспроизведения двух связанных дефектов: при резком движении маска слегка опережала лицо и возвращалась, а при неподвижной голове и рывке самого телефона начинала дрожать. Корневая причина была составной. Baseline включал почти полную global velocity уже по первому moving result, оценивал translation как centroid всех 478 точек и вычитал только его; поэтому camera rotation/scale попадали в независимые local velocities. Дополнительно capture-time prediction до 45 ms суммировался с render-only extrapolation до 42 ms, позволяя старой скорости действовать до 87 ms. Короткий dropout также мог продолжить старую trajectory, потому что observed reacquisition jump `0.180` оставался ниже прежнего reset threshold `0.25`.
-
-Новый видимый predictor оценивает единый similarity motion по стабильным eye/nose/cheek anchors, вычитает его из local landmark deformation и предсказывает local velocity консервативно. Введены состояния `STATIONARY / CANDIDATE / MOVING`: первый резкий импульс получает только `0.2` prediction gain, состояние движения подтверждается после трёх согласованных по направлению ML-results, а stop/true-reversal обнуляет или перезапускает predictive velocity. После описанной ниже correction сам gain набирается плавно и больше не переключается ступенью на границе подтверждения. Render-only окно сокращено с `42` до `20 ms`. Любой face-missing result теперь помечает discontinuity и заставляет первый reacquired measurement инициализировать tracker без старой скорости; continuous centroid jump threshold снижен до `0.12`. Camera/landmark transforms и Vulkan flow gate не менялись.
-
-Две последовательные 20-секундные записи на SM-G990B прошли с `dropped=0`. Первая stateful-сборка до специального reacquisition reset дала `stopOvershoot=0.116007` и `reacquisitionJump=0.180085`, что выявило недостающий reset. После исправления повторная запись дала `stopOvershoot=0.008268` и `reacquisitionJump=n/a`, то есть измеренный overshoot уменьшился примерно в 14 раз. Это сильный functional signal, но не контролируемое A/B: физические движения в двух сессиях не идентичны, а автоматически выбранное stationary-window второй записи попало в движение и не годится для jitter threshold. Candidate остаётся не production-accepted до пользовательской visual проверки и холодной одинаковой scenario matrix. Полный gate после V6.1 содержит 79 unit-тестов без failures/errors; lint/debug assemble и четыре ABI успешны, APK установлен и запущен на SM-G990B.
-
-Следующая пользовательская проверка подтвердила, что «улёты вперёд» исчезли, но обнаружила новый jitter именно во время резких движений. Дефект воспроизведён отдельными regression-тестами до исправления: на третьем согласованном result prediction gain ступенью переключался с `0.2` на `1.0`, а единичный шумный поворот направления мог так же резко обрушить `MOVING` обратно в `CANDIDATE`. Это меняло predictive velocity до пяти раз между соседними ML-results и создавало видимую смену скорости маски, хотя stop overshoot уже был устранён.
-
-V6.1 correction заменяет дискретный gain на непрерывный time-based ramp: attack `8.0/s`, мягкий release `4.0/s`; position-response gain использует ту же непрерывную confidence. Обычный direction outlier больше не сбрасывает `MOVING` и filtered velocity, а только плавно уменьшает confidence; немедленный reset сохранён для остановки и настоящего разворота с cosine не выше `-0.25`, а также для dropout/reacquisition. Synthetic tests покрывают отсутствие скачка gain при translation, устойчивость к одному direction outlier и тот же smooth ramp для rigid rotation всей 478-точечной face geometry. Полный gate после коррекции содержит 82 unit-теста без failures/errors; `lintDebug`, `assembleDebug` и native build четырёх ABI успешны.
-
-Исправленная сборка установлена на SM-G990B и прошла 20-секундный functional run `sharp_motion_v61_smooth_gain`: 497 measurement / 1106 render events, `dropped=0`, median ML FPS `28.31`, median/p95 capture→delivery `116/140 ms`, lag `33 ms`, `stopOvershoot=0.005836`, `reacquisitionJump=n/a`. Эти цифры подтверждают отсутствие возврата прежнего overshoot и runtime-регрессии, но автоматически выбранное stationary-window динамической сессии не используется для jitter acceptance. Новая visual acceptance резких рывков пользователем и холодное одинаковое A/B всё ещё обязательны.
-
-V6.2 начат 2026-08-17 после пользовательского наблюдения, что оставшееся подёргивание усиливается при резких движениях и, предположительно, зависит от освещения и температуры. До изменения predictor дефект удалось изолировать синтетически: выброс только одного eye-anchor между соседними измерениями создавал ложное вертикальное смещение lip prediction примерно `0.0091` normalized, хотя остальные жёсткие точки не двигались. V6.1 similarity pose опирался всего на восемь равновесных eye/nose/cheek anchors и не умел отличать выброс одной точки от движения всей головы.
-
-В первом V6.2 vertical slice глобальное frame-to-frame движение оценивается по 22 жёстким forehead/nose/eye/cheek/temple anchors через weighted Procrustes similarity и три Huber IRLS-прохода. Из fit публикуются normalized RMS residual, доля inliers и агрегированная quality. Низкая quality непрерывно ограничивает global velocity, adaptive position cutoff и local/global prediction; координатный источник не переключается покадрово. Regression с повреждённым eye-anchor теперь проходит с ошибкой lip mapping не более `0.003`, как и точный translation/rotation/scale fit и invalid-geometry path.
-
-Формат `.arv6` поднят до version 2 с обратным чтением version 1. Только во время явно запрошенной debug-записи каждый measurement дополнительно хранит реальный интервал принятых кадров, sparse 32×24 mean luma/luma standard deviation/mean gradient, сопоставленные по `SENSOR_TIMESTAMP` Camera2 exposure time/ISO/frame duration/rolling-shutter skew/AE state, pose-fit quality, Android thermal status и battery temperature. Analyzer выводит median/p95 этих величин вместе с прежними jitter/lag/overshoot метриками. Это позволит проверять корреляцию jitter с длинной выдержкой/motion blur, низким контрастом, frame pacing и throttling вместо подбора коэффициентов по ощущению.
-
-V4 optical flow по-прежнему не влияет на видимую mesh. Дополнительно устранена его скрытая GPU-нагрузка: когда нет активной telemetry-записи и visible application выключен, Kotlin передаёт invalid ROI, а native runtime не строит luma pyramid и не запускает flow/fit и не обновляет temporal history. Sparse image analysis и Camera2 capture callback также подключаются только для диагностической записи, поэтому V6.2 telemetry не добавляет постоянную production-нагрузку. Gyroscope/camera-motion fusion намеренно оставлен следующим V6.2 подэтапом: сначала новый device replay должен показать, какая доля дефекта связана с camera motion, а какая — с качеством landmarks/экспозицией.
-
-Локальный gate первого V6.2 slice: `90` unit-тестов, `0` failures/errors; `lintDebug`, `assembleDebug` и C++ native build для `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64` успешны. APK затем установлен на SM-G990B и прошёл 20-секундный functional run `phone_motion_v62_robust`: `556` measurement / `1215` render events, `dropped=0`, median ML FPS `28.96`, latency median/p95 `106/131 ms`, capture interval median/p95 `33/66 ms`, lag `33 ms`, stop overshoot `0.013325`, reacquisition `n/a`. Новые поля реально заполнены: luma `0.495`, luma std `0.246`, gradient `0.088`, exposure median/p95 `8.31/8.31 ms`, ISO `359`, frame duration `33.33 ms`, rolling shutter `32.44 ms`, pose quality/residual/inliers `0.766/0.0217/0.909`, thermal status max `0`, battery temperature median `35.7 °C`. Запись размером `10,461,080` bytes автоматически декодирована. Это device proof формата и runtime, но не контролируемое A/B и не visual acceptance: автоматически выбранное окно динамического сценария показало displayed jitter `28.33 px RMS`, поэтому следующая работа должна разделить спокойную и резкую фазы отдельными одинаковыми записями.
-
-Пользовательская visual-проверка первого V6.2 slice приняла текущую стабильность: маска больше не дёргается заметно в проверенном сценарии. Единственный отмеченный остаточный дефект — отставание tracker при резких движениях. Перед любым изменением fast-motion response это состояние фиксируется Git commit/tag как rollback baseline. Следующая коррекция должна ускорять только согласованное движение с высокой pose-fit quality; stationary smoothing, stop/reversal reset, dropout reset и robust outlier suppression нельзя ослаблять. Acceptance требует одновременно уменьшить визуальный lag и не вернуть прежние forward overshoot/jitter.
-
-Стабильный вариант зафиксирован commit `cc82370` и тегом `tracking-v6.2-stable-2026-08-17` до следующей правки. Sharp-motion lag затем воспроизведён синтетически до исправления: при согласованном global motion `0.8 normalized/s`, capture→delivery `100 ms` и хорошем fit отображаемая позиция отставала от текущей примерно на `0.0526 normalized`. Причина — общий alignment prediction был жёстко ограничен `45 ms`, хотя device latency в V6.2 run имела median/p95 `106/131 ms`; response/velocity уже были корректными, но большая часть известного возраста измерения намеренно не компенсировалась.
-
-Fast-motion candidate не повышает общий gain и не ослабляет stop safeguards. Он плавно расширяет только alignment horizon от `45` до максимум `85 ms` как произведение трёх факторов: согласованного prediction confidence, global speed (`0.25→0.65 normalized/s`) и robust pose quality (`0.55→0.75`). Первый импульс остаётся на безопасных `45 ms`; при подтверждении horizon растёт не более чем примерно на `13–15 ms` за ML-result. При `STATIONARY`, stop, reversal, invalid/poor fit или неизвестной quality horizon немедленно равен `45 ms`. Новый regression требует для указанного synthetic motion residual lag не более `0.030`, отдельно проверяет плавность horizon и запрещает его расширение при повреждённых pose anchors. Все прежние alternating-jerk, stop, reversal, dropout, gain-ramp и anchor-outlier tests проходят.
-
-Полный локальный gate candidate содержит `92` unit-теста без failures/errors; `lintDebug`, `assembleDebug` и native build четырёх ABI успешны. APK установлен на холодный SM-G990B (`thermal status 0`). Functional run `sharp_motion_v62_latency85`: `570` measurement / `1210` render events, `dropped=0`, ML FPS median `29.62`, latency median/p95 `103/128 ms`, capture interval `33/66 ms`, pose quality/residual/inliers `0.912/0.00999/1.0`, thermal max `0`, battery `34.0 °C`, автоматический lag `0 ms`, stop overshoot `0.006537`, reacquisition `n/a`; displayed stationary-window jitter `7.85 px RMS`. Предыдущий неидентичный `phone_motion_v62_robust` run давал lag `33 ms` и stop overshoot `0.013325`, поэтому новые числа — сильный functional signal, но не controlled A/B. Пользователь подтвердил, что вариант стал лучше и не вернул прежние улёты; он принят как новый rollback-checkpoint. Остаточный sharp-motion lag сохраняется, а в `MATTE`/`SATIN`/`GLOSS` воспринимается сильнее, чем в плоском `TRACKING_TEST`.
-
-Проверка render path показала два разных эффекта. Все четыре finish используют одну lip mesh, один predictor и один скомпилированный Filament material; переключение меняет только uniforms, поэтому finish не меняет координаты tracker напрямую. Однако продуктовые профили сохраняют camera luminance, микротекстуру и specular response, семплируя актуальную camera texture внутри mesh, построенной по более старому ML timestamp. При быстром движении это создаёт temporal material mismatch: camera-derived детали и блик визуально «плывут» внутри запаздывающей геометрии и усиливают ощущение lag. `TRACKING_TEST` скрывает эффект фиксированным непрозрачным цветом. Следующий material-temporal slice должен сначала записывать активный finish и GPU/render timing, затем плавно ограничивать высокочастотные camera-conditioned детали при быстром движении либо репроецировать их в систему координат того же predicted frame; стабильную predictor geometry при этом не менять.
-
-Принятый fast-motion predictor сохранён отдельным commit `d4636ac` (`[V6.2] Accept fast-motion latency compensation`) и annotated tag `tracking-v6.2-fast-motion-2026-08-17`. Следующий material-temporal slice намеренно не меняет `LandmarkMotionPredictor`, lip topology, tessellation, coverage или camera/landmark transforms.
-
-Первый motion-aware material coherence candidate вычисляет RMS-скорость уже загруженного outer+inner lip contour в долях короткой стороны viewport и сопоставляет временную позицию mesh с реально поданным camera buffer. Основной timestamp signal — абсолютная разница между sensor timestamp camera frame и `landmarkSensorTimestamp + predictionSeconds`; для старого camera path без timestamp используется bounded uptime fallback. Произведение отфильтрованной скорости и временного расхождения оценивает пространственную ошибку camera-derived деталей. В диапазоне `0.003→0.018` короткой стороны коэффициент `cameraDetailCoherence` плавно уменьшается от `1.0` до `0.18`; motion attack/release равны `18/6 s⁻¹`, detail attack/release — `16/3.5 s⁻¹`. После разрыва более `250 ms`, скрытия губ или reacquisition material-state полностью сбрасывается, чтобы не переносить старую скорость.
-
-Новый uniform не ослабляет пигмент или геометрию. При рассогласовании shader заменяет per-pixel luminance более широким neighborhood luminance, уменьшает только camera high-frequency texture, native highlight и быстро меняющуюся часть lighting gradient; normal-based lobe, цвет, coverage и нулевые границы губ остаются. `TRACKING_TEST` всегда принудительно использует coherence `1.0`, поэтому остаётся независимым геометрическим эталоном. Это минимальный temporal-coherence слой, а не замена будущей timestamped reprojection/optical flow материала.
-
-Формат `.arv6` поднят до version 3 с обратным чтением v1/v2. Каждый render event дополнительно хранит finish, фактически применённый camera-detail coherence, motion speed, material timestamp mismatch, CPU-время camera acquisition + geometry + Filament frame submission и результат `Renderer.beginFrame`. Analyzer публикует общие и per-finish CPU median/p95 и долю принятых Filament frames. Эта метрика помогает обнаружить GPU backpressure, но не называется GPU time: точный видимый Filament GPU duration по текущему Java API недоступен и должен проверяться `gfxinfo`/AGI либо Vulkan timestamp queries после native compositor cutover. Локальный gate candidate прошёл: `99` unit-тестов без failures/errors, `lintDebug`, `assembleDebug` и native C++ build для `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64` успешны.
-
-Device/runtime gate material candidate выполнен на SM-G990B после подключения устройства. Стартовые условия: thermal status `0`, battery temperature около `32 °C`; новый Filament material с uniform `cameraDetailCoherence` скомпилировался, процесс остался жив, camera `1440×1080` продолжила Vulkan AHB import/GL handoff без black frame/crash и с `cameraDropped=0`. Первый 20-секундный `SATIN` run `material_satin_v3_sharp_motion`: `599` measurement / `1198` render events, `dropped=0`, ML FPS median `30.31`, latency median/p95 `102/116 ms`, frame-submission CPU median/p95 `2.75/5.55 ms`, `filamentRenderedFraction=1.0`. При повторяющихся резких движениях controller реально активировался: coherence median/p05 `0.183/0.180`, motion median `0.702` короткой стороны/с, timestamp mismatch p95 `65 ms`. Автоматические tracking-метрики этой физически невоспроизводимой сессии (`lag 33 ms`, stop overshoot `0.0159`) являются только functional signal, не controlled predictor A/B.
-
-Отдельный 24-секундный runtime A/B `material_finish_ab_v3` автоматически переключал `SATIN → MATTE → GLOSS → TRACKING_TEST` при одинаковом типе резких движений. Получено `697` measurement / `1441` render events, `dropped=0`, ML FPS median `29.86`, latency median/p95 `113/130 ms`, thermal max `0`; каждый finish имел `filamentRenderedFraction=1.0`. Frame-submission CPU median/p95 практически одинаковы: `GLOSS 3.05/6.30 ms`, `MATTE 3.11/6.56 ms`, `SATIN 3.12/6.62 ms`, `TRACKING_TEST 2.99/6.81 ms`. Следовательно, наблюдавшийся более сильный lag product finish не объясняется отдельной стоимостью профиля shader и согласуется с temporal camera-detail mismatch. Итоговый `gfxinfo`: около `0.22–0.25%` janky frames, CPU p50/p90/p95/p99 `9/11/12/13 ms`, GPU `4/5/6/7 ms`; thermal status остался `0`, battery temperature после двух прогонов около `36 °C`. Записи сохранены локально в `app/build/tracking-telemetry/tracking-v6-20260817-145300-956-material_satin_v3_sharp_motion.arv6` и `tracking-v6-20260817-145534-301-material_finish_ab_v3.arv6`. Runtime/performance gate пройден; обязательна пользовательская visual acceptance, что product finish теперь не создаёт прежний дополнительный шлейф и не получил заметное размытие/пульсацию фактуры.
-
-Перед V6.3 material-temporal candidate зафиксирован commit `ab8796a` (`[V6.2] Add motion-aware material coherence`) и annotated tag `material-temporal-v1-candidate-2026-08-17`. Tag намеренно помечен candidate: он является чистой точкой отката с пройденным runtime/performance gate, но не утверждает пользовательскую visual acceptance материала.
-
-V6.3 gyroscope camera-motion candidate реализован как отдельный render-time канал поверх `ab8796a`. `TYPE_GYROSCOPE_UNCALIBRATED` предпочтителен; оценённый hardware bias вычитается, samples запрашиваются без batching каждые `5 ms`. Короткая timestamped history интегрирует angular velocity трапецеидально и отвечает только если оба endpoint покрыты непрерывными samples, interval не превышает `160 ms`, а gap между samples не превышает `50 ms`. Camera2 `LENS_INFO_AVAILABLE_FOCAL_LENGTHS` и `SENSOR_INFO_PHYSICAL_SIZE` задают реальные normalized focal lengths. Между эффективным camera-motion timestamp mesh и timestamp реально acquired camera buffer yaw/pitch переводятся в bounded global shift, roll — в rotation вокруг optical center. Поправка применяется после существующего `NormalizedImageTransform` и одинаково ко всему outer/inner contour; local deformation, predictor geometry/velocities/states, lip topology, camera UV, mirror, material coverage и V4 flow не меняются. При отсутствии gyro, calibration, camera timestamp, полной sensor history либо при активном optical-flow correction применяется точный fallback `NONE` без смены координатного источника. Debug intent `com.example.armakeup.extra.DISABLE_GYROSCOPE_CORRECTION=true` даёт A/B на одном APK.
-
-`.arv6` поднят до version `4` с обратным чтением v1–v3. Render event сохраняет флаг применения gyro, interval, device-axis rotation, display translation и roll; analyzer публикует applied fraction и p95 interval/rotation/translation. Локальный gate содержит `107` unit-тестов без failures/errors; `lintDebug`, `assembleDebug` и native build четырёх ABI успешны. Regression покрывает timestamp interpolation, sensor gaps, bounds/fallback, 0/90° display-axis remap, front-camera mirror sign, global rigid distance preservation, physical focal calibration, codec v3 compatibility и analyzer metrics.
-
-Device vertical slice выполнен на SM-G990B при thermal status `0`. Обнаружен `LSM6DSO Gyroscope-Uncalibrated`, `minDelay=5000 us`; front-camera calibration прочитана как raw normalized `fx=0.74798`, `fy=0.99731`. Первый холодный recorder window закончился до camera/ML startup и дал пустой 43-byte файл, поэтому отклонён. Прогретый enabled run `gyro_v63_phone_motion`: `441` measurement / `901` render, `dropped=0`, ML FPS `29.99`, latency `105/124 ms`, frame CPU `3.13/7.04 ms`, rendered fraction `1.0`, thermal max `0`; gyro применялся к `94.1%` видимых render frames, interval p95 `98 ms`, rotation p95 `6.95°`, translation p95 `0.0924`. Disabled control на том же APK: `444/901`, dropped `0`, ML FPS `30.21`, latency `102/118 ms`, frame CPU `2.81/6.08 ms`, rendered fraction `1.0`, gyro fraction `0`. Enabled/disabled displayed stationary-window RMS были `4.80 px` и `11.83 px`, но движения выполнялись вручную и не идентичны, поэтому разницу нельзя считать controlled численным доказательством качества. Файлы `tracking-v6-20260817-152445-584-gyro_v63_phone_motion.arv6` и `tracking-v6-20260817-152552-540-gyro_v63_disabled_control.arv6` сохранены локально. Crash, black frame, camera drop и GPU backpressure не обнаружены; обязательна пользовательская visual sign/scale acceptance при одинаковых рывках телефона. После двух прогонов приложение оставлено с gyro включённым и `TRACKING_TEST`; thermal status `0`, но AP около `54.5 °C`, поэтому окончательную плавность нужно оценивать после охлаждения.
-
-Пользовательская screen-recording `video_2026-08-17_15-34-58.mp4` локально разобрана покадрово без загрузки наружу: `18.93 s`, `884×1920`, около `46.1 FPS`. В первые `0–2 s` неподвижный контур стабилен; в `2–10 s` при движениях головы остаётся обычный ML/predictor lag; после `10 s`, когда голова неподвижна и резко движется только телефон, виден краткий промах маски на `1–3` кадра с возвратом. Это подтвердило ошибку temporal contract V6.3: `predictionSeconds` всегда описывал полный геометрический horizon `45→85 ms`, хотя stationary/candidate/quality gates реально применяли только часть глобальной velocity. Gyro начинал интеграцию с `landmarkSensorTimestamp + predictionSeconds` и поэтому на первом рывке ошибочно пропускал до одного–двух camera frames реального движения.
-
-Исправление не меняет видимую predictor geometry и не вводит эмпирический gyro gain. `LandmarkMotionPredictor` теперь публикует `globalPredictionCoverage`: проекцию filtered global velocity на текущую measured global velocity, умноженную на фактические prediction gain и quality response. В stationary coverage точно `0`; на первом candidate impulse она ограничена реально применённой долей; при подтверждённом coherent motion плавно приближается к `1`. Gyro endpoint теперь равен `landmarkSensorTimestamp + predictionSeconds × globalPredictionCoverage`, поэтому компенсирует только ещё не предсказанную camera-motion часть. Тот же effective timestamp используется material temporal mismatch. `.arv6` поднят до version `5`, обратно читает v1–v4 и добавляет `cameraMotionPredictionSeconds` и `globalPredictionCoverage`; analyzer публикует их median. Regression проверяет stationary zero coverage, bounded candidate coverage, рост coherent coverage и v4 compatibility. Обновлённый локальный gate: `111` unit-тестов, `0` failures/errors, `lintDebug`, `assembleDebug` и native build четырёх ABI успешны. Device/visual acceptance этого уточнения ещё не выполнена.
-
-Coverage-aware APK установлен на SM-G990B. Startup gate успешен: `LSM6DSO Gyroscope-Uncalibrated` зарегистрирован на `5 ms`, camera calibration `0.7479799/0.99730647`, Vulkan camera input `1440×1080`, `temporalFlowVisible=false`, crash/black frame отсутствуют. Первый v5 functional run `gyro_v63_coverage_same_scenario` сохранил `585` measurement / `1200` render events за `20.03 s`, `dropped=0`, ML FPS median `29.93`, latency median/p95 `107/127 ms`, capture interval `33/34 ms`, pose quality `0.948`, frame CPU median/p95 `3.12/6.35 ms`, rendered fraction `1.0`, thermal max `0`, battery median `34.4 °C`. Codec v5 автоматически декодирован; median camera-motion prediction/coverage равны `0/0`, gyro applied fraction `0.342`, rotation p95 всего `0.15°`, translation p95 `0.00199`. Следовательно, run подтверждает runtime/format, но не содержит достаточно сильных phone-only рывков для visual/lag acceptance. Файл сохранён как `app/build/tracking-telemetry/tracking-v6-20260817-161212-389-gyro_v63_coverage_same_scenario.arv6`. После run батарея около `35.9 °C`, thermal throttling не зафиксирован; приложение оставлено в `TRACKING_TEST` с gyro enabled.
-
-FF0 выполнен перед full-face работой: coverage-aware V6.3 сохранён отдельным commit `dd095f7` и тегом `tracking-v6.3-gyro-experimental-2026-08-17`. Перед checkpoint повторно прошли `:app:testDebugUnitTest`, `:app:lintDebug`, `:app:assembleDebug`; статус остаётся experimental, потому что сильный phone-motion visual acceptance не завершён.
-
-Первый FF1/FF2 shadow slice реализован поверх этого checkpoint без изменения predictor, lip mesh и Vulkan renderer. MediaPipe `outputFacialTransformationMatrixes` включается только когда создан debug `TrackingTelemetryRecorder`; production path без записи сохраняет прежний output contract. `.arv6` codec v6 обратно читает v1–v5 и добавляет 4×4 canonical-face transform вместе с исходным capture/sensor timestamp. Tracker-side latency разделена на camera→analysis, analysis→submit (включая ожидание latest pending frame), submit→native MediaPipe callback и callback→camera-executor handler start; отдельно записываются RGBA copy, sparse quality analysis и result/predictor processing CPU durations. Analyzer публикует p50/p95 и `transform3dCoverage`. Старые v1 и v5 записи покрыты regression tests. Локальный gate: `113` tests, `0` failures/errors, lint, debug APK и native build четырёх ABI успешны. Новых моделей, assets или зависимостей не добавлено; matrix пока используется только офлайн. Следующий gate: device `.arv6` v6 runs и проверка matrix axes/layout/overhead до любого подключения к renderer.
-
-Device FF1/FF2 benchmark выполнен на SM-G990B, начиная с cold state `thermal=0`, battery `32.1 °C`, skin `33.3 °C`, AP `35.3 °C`. Валидные v6 runs имеют `dropped=0` и `transform3dCoverage=1.0`: stationary `444 ML / 902 render`, latency `126/135 ms`, camera→analysis `88/94 ms`, analysis→submit `3/13 ms`, inference `32/37 ms`, result CPU `0.78/1.95 ms`, frame CPU `2.82/5.11 ms`; head-motion `430/903`, latency `136/157 ms`, `88/94 + 12/28 + 33/42 ms`, result CPU `1.05/4.63 ms`, frame CPU `3.21/6.54 ms`; phone-motion `438/902`, latency `129/148 ms`, `87/95 + 5/24 + 32/39 ms`, result CPU `0.96/3.04 ms`, frame CPU `2.90/5.87 ms`. Stationary `gfxinfo`: CPU p50/p95 `8/12 ms`, GPU p95 около `6 ms`, janky `0.71%`; thermal status оставался `0`. Следовательно, 3D shadow output не создаёт GPU backpressure, callback/result processing не является причиной общего lag, а доминирующий участок — camera timestamp→ImageAnalysis (`~78–88 ms`) плюс MediaPipe (`~31–33 ms`). При phone-only motion displayed error всё ещё `27.83 px RMS`, peak `73.21 px`, то есть оставшаяся ошибка относится к display-time alignment/fusion, а не стоимости shader profile.
-
-Контракт canonical transform зафиксирован отдельным `CanonicalFaceTransform`: официальный Java API MediaPipe отдаёт flat column-major 4×4 mapping из canonical face в праворукое metric camera space (camera в origin, взгляд вдоль `-Z`, canonical unit — centimetre). Translation читается из indices `12..14`; raw metric matrix никогда не зеркалится. Rotation front-camera mirror и fill-center crop остаются отдельным display transform. Unit regression покрывает column-major basis/translation, point transform, determinant/reflection, affine bottom row, orthogonality, uniform scale, yaw/pitch/roll, 0/90/180/270 rotation, mirror и crop. Analyzer сравнивает matrix с текущим landmark pose и публикует handedness/similarity, baseline-centered Euler deviations и correlations. На stationary/head/phone runs `rightHanded=1.0`, `similarity=1.0`, scale строго `1.0`, orthogonality/anisotropy/affine-row p95 равны `0`; matrix translation X коррелирует с pose X `0.879–0.994`, metric Y с image Y имеет ожидаемый обратный знак `-0.974…-0.993`. Валидный roll-run `438/902`, dropped `0`, latency `116/139 ms`, frame CPU `2.68/6.59 ms`, thermal `0`, дал `roll↔22-anchor correlation=0.999461` и baseline-centered p95 motion `yaw 9.30° / pitch 4.58° / roll 41.56°`. Абсолютные Euler angles не используются: canonical/front-camera basis содержит постоянный offset, поэтому анализируется движение относительно медианной ориентации сессии.
-
-Сырые валидные записи сохранены локально: `app/build/tracking-telemetry/tracking-v6-20260817-175223-333-ff12_shadow_stationary_v6.arv6`, `...175402-718-ff12_shadow_head_motion_v6.arv6`, `...175523-400-ff12_shadow_phone_motion_v6.arv6`, `...180622-522-ff2_shadow_roll_axis_v6.arv6`. Два следующих combined yaw/pitch/roll окна отклонены: первый cold-start container завершился до активации Camera2 (`0` measurements), второй записал `592` ML frames, но лицо не присутствовало (`transform3dCoverage=0`, `renders=0`). Они не являются tracking/3D dropout и не входят в acceptance. Отдельный face-visible yaw/pitch run всё ещё нужен. Matrix остаётся shadow-only и не подключена к renderer.
-
-FF1 CPU-observable render timeline добавлен 2026-08-18 без изменения изображения, predictor или shader. `.arv6` поднят до version `7` и обратно читает v1–v6. Каждый render event хранит Choreographer vsync, нормализованный в `elapsedRealtimeNanos`, начало render callback, sensor timestamp и момент принятия выбранного camera buffer, момент успешного принятия команды geometry upload, окончание CPU render submission и отдельное поле presentation. Термины намеренно строгие: camera marker означает успешный `Stream.setAcquiredImage`, geometry marker — возврат `VertexBuffer.setBufferAt`; это не GPU completion и не доказательство показа на экране. Filament Java API не выдаёт actual presentation feedback, поэтому `presentationTimestampNs=-1`, coverage `0`; настоящий presentation нужно измерить Perfetto/FrameTimeline либо будущим native swapchain path.
-
-Device functional run `ff1_render_timeline_v7` на SM-G990B сохранил `293` measurements / `721` visible renders за `12.05 s`, `dropped=0`; coverage vsync/camera-selection/geometry-upload/render-submit равно `1.0`, presentation `0`. Median/p95: vsync callback `0.88/6.25 ms`, camera sensor→vsync `112.75/128.71 ms`, последнее принятие camera buffer→submit `13.25/25.69 ms`, geometry upload acceptance→submit `0.62/2.99 ms`, render callback→submit `3.49/9.39 ms`. Camera→analysis `73/82 ms`, inference `35/63 ms`, общая landmark latency `126/164 ms`; `cameraDropped=0`. Это mixed functional/runtime proof при thermal max `1`, а не controlled stationary/head/phone A/B. Запись: `app/build/tracking-telemetry/tracking-v6-20260818-124123-446-ff1_render_timeline_v7.arv6`. Локальный gate: `126` tests, `0` failures/errors, lint, debug APK и native build всех четырёх ABI.
-
-После уточнения camera marker — timestamp ставится только после успешного возврата `setAcquiredImage` — точный финальный APK повторно установлен. Run `ff1_render_timeline_v7_final` дал `172/484`, `dropped=0`, те же coverage `1.0/0`, vsync callback `0.98/5.63 ms`, camera sensor→vsync `104.71/121.11 ms`, camera selection→submit `12.98/26.03 ms`, geometry upload→submit `0.77/2.69 ms`, render start→submit `4.45/10.36 ms`. Устройство уже нагрелось до thermal max `2`, battery median `38.3 °C`, поэтому этот повтор подтверждает финальный codec/runtime, но не заменяет холодный performance run. Файл: `app/build/tracking-telemetry/tracking-v6-20260818-124750-819-ff1_render_timeline_v7_final.arv6`.
-
-FF1 FrameTimeline correlation реализован checkpoint `7bd498f` без изменения изображения, predictor, mesh или shader. `.arv6` поднят до version `8`, продолжает читать v1–v7 и добавляет `frameTimelineVsyncId`, expected presentation и render deadline из immutable copy preferred `Choreographer.FrameTimeline` на API 33+. Все timestamps нормализованы в elapsed-realtime clock; expected presentation намеренно не записывается в `presentationTimestampNs`. Во время debug telemetry renderer дополнительно создаёт `ARMK_FRAME:<vsyncId>` trace section, а при выключенной telemetry второй Choreographer callback не работает. Analyzer публикует coverage, vsync→expected и signed submit→deadline margin. В репозиторий добавлены Perfetto config/SQL и `tools/perfetto/capture-surfaceview-latency.ps1`; новых runtime dependencies, моделей или assets нет.
-
-Device run `ff1_frame_timeline_v8b` на SM-G990B / Android 16: `858` ML / `1801` render, `dropped=0`, coverage `vsyncId/expected/deadline=1.0`; camera sensor→vsync `105.65/120.93 ms`, render start→submit `3.22/6.09 ms`, vsync→expected стабильно `33.33 ms`, submit→deadline margin p05/median `8.33/11.84 ms`. Perfetto записал `712` app trace markers. Официальный FrameTimeline в этом build дал только root activity transaction layer (`688` frames: `686` on-time, `2` prediction-error), а Filament BLAST `SurfaceView` layer в `actual_frame_timeline_slice` отсутствует; root/HWUI timing не используется как подмена makeup-buffer presentation. Это соответствует документированному ограничению FrameTimeline для `SurfaceView`.
-
-Actual presentation самого Filament layer подтверждён shell-only SurfaceFlinger `--latency`, где AOSP `FrameTracker` выводит `desired / actual / ready` и actual означает момент видимости пользователю. Совместный run `ff1_actual_present_v8b`: `.arv6` `575/1201`, `dropped=0`, thermal max `1`, battery median `36.2 °C`; camera sensor→vsync `108.56/123.25 ms`, render CPU `3.17/6.35 ms`, vsync→expected `33.33 ms`, submit deadline margin p05/median `9.01/12.35 ms`. Sidecar собрал `1464` уникальных SurfaceView frames: desired→actual `44.18/45.51 ms`, frame-ready→actual `40.23/41.75 ms`, actual frame interval `16.688/16.799 ms` median/p95; только `2/1463` интервалов были длиннее `25 ms`. Следовательно, output плавный, CPU submit укладывается в deadline, но buffer/display path добавляет примерно `44 ms` после desired time; грубая сумма median sensor→actual порядка `108.56 + 33.33 + 44.18 ≈ 186 ms`. Это функциональное измерение, а не финальный controlled A/B.
-
-Локальный gate v8: `129` unit tests, `0` failures/errors, `lintDebug`, `assembleDebug` и native C++ build для `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64` успешны; exact APK установлен на SM-G990B. Артефакты лежат в `app/build/tracking-telemetry`: `armakeup-frame-timeline-v8b-20260818.perfetto-trace`, `tracking-v6-20260818-131330-104-ff1_frame_timeline_v8b.arv6`, `tracking-v6-20260818-131848-509-ff1_actual_present_v8b.arv6`, `ff1-actual-present-v8b-surfaceview.csv`. Следующий FF1 шаг — отдельные холодные stationary/head-motion/phone-motion A/B с этим sidecar и low-latency scheduling/presentation candidate; `cameraFrameSelected`, `renderSubmit` и root-window FrameTimeline нельзя называть actual presentation. Параллельно для FF2 всё ещё нужны face-visible yaw/pitch, stop/dropout/weak-light/thermal runs и сравнение matrix continuity с 22-anchor/gyro по sensor/actual-display timestamps.
-
-FF1 display-queue protection A/B выполнен без настройки predictor, геометрии, camera transforms или материалов. Filament 1.74 feature `engine.skip_frame_when_cpu_ahead_of_display` является constant после создания Engine; device подтвердил, что runtime setter отклоняется, а default уже `active=true`. Поэтому debug override перенесён в `Engine.Builder`, и `.arv6` v9 честно записал fraction `0.0/1.0`. На холодном SM-G990B оба 20-секундных stationary runs имели `dropped=0`, `thermalMax=0` и `filamentRenderedFraction=1.0`: guard ни разу не пропустил submit. Sidecar off/on: desired→actual median `44.05/44.22 ms`, ready→actual `39.80/40.00 ms`, actual interval p95 `16.793/16.802 ms`, intervals `>25 ms` `6/5`; tracker latency `129/149` против `130/147 ms` median/p95. Измеримого выигрыша нет, candidate отклонён; обычный default `active=true` не меняется.
-
-Последняя контролируемая Filament scheduling-проверка отключала только передачу Android 13+ expected-presentation/deadline hints из `ChoreographerHelper`, оставляя queue guard, tracker, camera, mesh и shader одинаковыми. `.arv6` v10 обратно читает v1–v9 и пишет `filamentPresentationHintsEnabled`; debug-extra `com.example.armakeup.extra.DISABLE_FILAMENT_PRESENTATION_HINTS=true` игнорируется release-сборкой. Сопоставимые 15-секундные runs имели `dropped=0`, `thermalMax=1` и hints fraction `1.0/0.0`. Hints on/off sidecar: desired→actual `43.88/59.27 ms`, ready→actual `39.77/49.64 ms`, actual interval p95 `16.796/16.825 ms`, intervals `>25 ms` `5/7`. Отключение ухудшило очередь на `~10–15 ms`, поэтому штатные hints обязательны и candidate отклонён.
-
-Актуальный локальный gate после v10: `131` unit test, `0` failures/errors, `lintDebug`, `assembleDebug` и native build всех четырёх ABI успешны; exact APK установлен на SM-G990B и возвращён к штатному hints-on запуску. Артефакты `ff1-stationary-queue-*-v9`, `ff1-stationary-hints-*-v10` `.arv6` и SurfaceFlinger CSV сохранены в `app/build/tracking-telemetry`. Новых зависимостей, моделей и assets нет. Оба Filament-кандидата численно закрыты; следующий FF1 proof — собственный native Vulkan visible swapchain/present path с presentation feedback и A/B против неизменённого Filament baseline.
-
-Первый FF1 native-visible proof реализован 2026-08-18 по ADR `docs/adr/001-native-vulkan-visible-proof.md`. Debug-extra `com.example.armakeup.extra.ENABLE_NATIVE_VULKAN_VISIBLE=true` выбирает владельца единственного `FilamentMakeupView`/`SurfaceView` до CameraX binding: Filament Engine при этом вообще не создаётся. Обычный запуск остаётся неизменённым Filament baseline. Native renderer переиспользует существующие `AImageReader PRIVATE`, latest-only acquisition, AHB external-format YCbCr import, acquire/release fences и `CameraTextureTransform`; `Choreographer` вызывает runtime без диагностического 10-FPS clear-loop. В том же camera command buffer после fullscreen pass рисуется та же Kotlin `LipMeshTessellator` geometry с временным плотным `TRACKING_TEST #FF00D4` shader. Predictor, MediaPipe, lip topology, coverage profiles, camera/landmark transforms, product materials, зависимости и модели не менялись.
-
-Native runtime опционально включает `VK_GOOGLE_display_timing`, связывает `presentID` с camera sensor timestamp и нормализует Android `CLOCK_MONOTONIC` actual-present в elapsed-realtime clock. SM-G990B/Adreno 660 сообщил `displayTiming=true`, visible swapchain `1080×2340`, пять images и refresh `16.688 ms`. Screenshot подтвердил правильные orientation/mirror/crop и совпадение tracking-test mesh с губами. В exact final run больше `1020` camera frames прошли с `cameraDropped=0`; после startup rolling direct sensor→actual достиг p50/p95 примерно `127.1/135.2 ms`. Home/resume и Back teardown завершились без native/Android crash; runtime освободился после возврата CameraX surface.
-
-Финальный локальный gate proof: `133` unit tests, `0` failures/errors, `lintDebug`, `assembleDebug` и native build всех четырёх ABI успешны. Exact APK установлен на SM-G990B; после A/B устройство возвращено к безопасному обычному запуску Filament с queue protection и presentation hints включёнными.
-
-Первый same-APK SurfaceFlinger A/B намеренно не принимается как production cutover. Native 20-секундный run: `583` frames, desired→actual `30.78/31.37 ms`, ready→actual `29.73/30.56 ms`, actual interval `33.38/33.60 ms` median/p95 и `578/582` intervals `>25 ms`. Неизменённый Filament без recorder на том же APK: `1186` frames, desired→actual `29.10/46.04 ms`, ready→actual `25.13/42.07 ms`, interval `16.689/16.788 ms` и только `1/1185 >25 ms`. Native queue имеет более ровный p95 и настоящий in-process actual feedback, но present привязан к 30 FPS camera arrival и поэтому вдвое реже Filament. HWUI overlay window во время native run показал `1332` frames, `0.15%` janky, CPU p50/p95 `5/7 ms`, GPU `1/3 ms`; это не native compositor GPU timing. Thermal status остался `0` (AP около `57 °C`, skin около `36.4 °C`, battery около `33.3 °C`). CSV: `app/build/tracking-telemetry/ff1-native-visible-final.csv` и `ff1-filament-baseline-same-apk.csv`.
-
-После 30-Гц proof был установлен обязательный FF1 gate: отделить camera acquisition от display cadence и представлять background + новую predicted lip geometry на каждом display vsync. Acceptance требует `~16.7 ms` actual interval без роста camera queue, direct sensor→actual не хуже текущего proof, 60-Hz geometry response, правильный teardown и controlled telemetry-on A/B. До его device-приёмки debug-extra не включается по умолчанию и текущий Filament queue protection/presentation hints остаются включены.
-
-Retained-camera candidate реализован локально 2026-08-21 в commit `2fb7cd7`. Чтобы не удерживать camera-owned AHB между двумя display frames и не усложнять foreign queue ownership, свежий latest AHB семплируется ровно один раз в постоянную device-local RGBA texture размером visible extent. Copy и YCbCr transform остаются полностью на Vulkan GPU; submission ждёт camera acquire sync-fd, сигналит exportable release semaphore и после его fence возвращает исходный `AImage` CameraX. Независимый swapchain pass затем семплирует эту texture и загружает новую tracking-test geometry на каждом `Choreographer` vsync. Это добавляет один fullscreen GPU copy только при новом camera frame, но исключает CPU pixel copy, camera queue и повторное владение AHB.
-
-Native diagnostic теперь отдельно сообщает `cameraCopied`, `retainedPresents` и `retainedReused`; in-process presentation log считает actual interval p50/p95 и долю presents с повторно использованным camera timestamp. Локальный gate candidate: `134` unit tests, `0` failures/errors, `lintDebug`, `assembleDebug`, C++ с `-Werror` и offline SPIR-V для `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64` успешны.
-
-Device cadence/lifecycle gate `2fb7cd7` пройден 2026-08-21 на SM-G990B / Adreno 660. Exact APK показал правильные first frame, orientation, mirror, crop и совпадение hot-magenta tracking-test mesh с губами. В длинном warm-run счётчики достигли `cameraCopied=4800`, `retainedPresents=9574`, `retainedReused=4775`, `cameraDropped=0`; отношение copy:present близко `1:2`, reuse fraction `0.499`. In-process actual interval стабилизировался около `16.695/16.754 ms` p50/p95, хотя `VK_GOOGLE_display_timing` сообщает физический refresh `8.348 ms`: текущий `Choreographer`/layer target остаётся принятым 60 Гц. Home остановил camera/present, resume продолжил счётчики без crash, Back записал корректный `destroyed` обоих native-компонентов.
-
-Парный 20-секундный SurfaceFlinger warm-run при thermal status `2` подтвердил cadence. Native retained: `1181` frames, desired→actual `30.13/30.89 ms`, ready→actual `29.27/30.23 ms`, interval `16.695/16.768 ms`. Filament control того же APK: `1174` frames, desired→actual `44.01/45.56 ms`, ready→actual `40.08/41.62 ms`, interval `16.692/16.770 ms`. Это доказывает независимый стабильный 60-Гц present и более короткую native display queue в данном warm-run, но не доказывает устранение видимого motion lag: predictor/MediaPipe и controlled head/phone motion здесь не оценивались. Native HWUI overlay window показал `3039` frames, `0.07%` janky и CPU p50/p95 `6/8 ms`; это timing Android overlay/root, а не native compositor GPU budget. Thermal во время замера: status `2`, AP около `56.3 °C`, skin около `42.3 °C`, battery около `39.1 °C`. CSV: `app/build/tracking-telemetry/ff1-native-retained-60hz-warm.csv` и `ff1-filament-control-warm.csv`.
-
-После cadence/lifecycle gate приложение было возвращено к безопасному обычному запуску: log подтвердил `requested=VULKAN active=OPENGL`, Filament queue protection и presentation hints включены. На этом checkpoint retained candidate был принят только как FF1-основа до холодного telemetry-on A/B; завершённые позднее numerical runs описаны ниже. Default всё ещё требует пользовательской visual acceptance и переноса production materials. При regression точка отката — `9bc3efb`; predictor, full-face state и material path в этом slice не менялись.
-
-Commit `082d88e` закрывает instrumentation gap перед cold A/B. `.arv6` v11 обратно читает v1–v10 и добавляет `renderBackend` и native `presentationId`. Native renderer сохраняет контуры губ и predictor/gyro state именно того submit, которому Vulkan назначил ID; C++ держит bounded FIFO всех завершённых `VK_GOOGLE_display_timing` samples, а Kotlin позднее сопоставляет actual-present с исходной geometry. При остановке записи последние feedback-pending frames сохраняются с честным unknown timestamp. FrameTimeline observer и drain активны только во время explicit debug telemetry; исходный vsync timestamp predictor не изменён. Локальный gate: `137` tests, `0` failures/errors, lint, debug APK и native build четырёх ABI успешны.
-
-Первый pre-checkpoint functional v11 run на SM-G990B доказал формат и correlation: `442` measurements, `907` native renders, `dropped=0`, `renderBackends=NATIVE_VULKAN`, actual-present coverage `0.99559`, frame CPU `2.51/4.24 ms` p50/p95 и stationary displayed jitter `1.87/3.82 px` RMS/peak; thermalMax `0`. Его SurfaceFlinger desired→actual `46.89/47.56 ms` противоречит предыдущему warm native `30.13/30.89 ms`, поэтому короткая native queue больше не считается подтверждённым свойством. Этот run выполнен до финального восстановления исходного predictor vsync timestamp в `082d88e` и используется только как functional proof; требовавшийся exact cold repeat выполнен ниже.
-
-Exact cold FIFO repeat финального `082d88e` локализовал очередь без предположений: 5-image `FIFO`, native submit→actual `63.48/64.45 ms`, render-vsync→actual `66.70/66.77 ms`, expected→actual `33.36/33.44 ms`; SurfaceFlinger desired→actual `63.60/64.49 ms`. Presentation coverage `0.99560`, interval оставался ровным `~16.69 ms`, `dropped=0`, thermalMax `0`. Следовательно, прежний warm результат `30 ms` не воспроизводится, а FIFO retained path не проходит latency gate.
-
-Checkpoint `be35764` добавляет low-latency native swapchain candidate и offline replay-инструмент, не меняя predictor, mesh или shaders. Runtime запрашивает surface minimum image count, логирует min/max/фактическое число images и предпочитает `VK_PRESENT_MODE_MAILBOX_KHR`, оставляя `FIFO` fallback. Adreno 660 сообщил `surfaceMinImages=4`, но всё равно выделил `5` images; `MAILBOX` при этом убрал ровно один refresh очереди за счёт замены ещё не показанного кадра. Analyzer теперь считает exact camera-sensor/vsync/submit/expected→actual и actual cadence; `:app:analyzeTrackingTelemetry -PtelemetryFile=...` повторно анализирует существующий `.arv6` без device-run. Локальный gate: `138` tests, `0` failures/errors, lint, APK и C++ всех четырёх ABI.
-
-Controlled cold stationary matrix на SM-G990B выполнена при thermal status `0`, `dropped=0`. Native `MAILBOX`: tracker latency `90/100 ms`, camera sensor→render-vsync `77.55/92.52 ms`, exact sensor→actual `127.56/142.57 ms`, submit→actual `46.80/47.73 ms`, vsync→actual `50.015/50.088 ms`, actual interval `16.688/16.763 ms`, presentation coverage `0.99451`, displayed jitter `1.70/3.28 px` RMS/peak. SurfaceFlinger desired→actual `46.89/47.79 ms`, `0` intervals `>25 ms`. Чистый Filament control: tracker latency `110/129 ms`, camera sensor→render-vsync `102.61/120.63 ms`, displayed jitter `3.78/7.39 px`; SurfaceFlinger desired→actual `44.20/45.66 ms`, interval `16.687/16.764 ms`, `0` intervals `>25 ms`. Filament actual нельзя честно связать с конкретным `.arv6` submit через Java API, поэтому его sensor→actual не выдумывается. Первый Filament stationary run с `63` интервалами `>25 ms`, inference p95 `80 ms` и render CPU p95 `22 ms` отклонён как фоновый outlier и заменён чистым повтором.
-
-Cold head-motion pair: native/Filament analyzer lag `33/33 ms`, stop overshoot `0.008375/0.008626`, displayed jitter `2.70/4.26 px` RMS и `6.58/9.96 px` peak; camera sensor→render-vsync `78.50/105.91 ms`. Оба sidecar сохранили ровные 60 Гц без intervals `>25 ms`; desired→actual `47.05/47.98 ms` native против `44.69/46.20 ms` Filament. Движения и pose quality не идентичны (`0.984` против `0.725`), поэтому численное преимущество jitter не считается окончательной визуальной победой.
-
-Cold phone-motion pair был достаточно сильным: native gyro applied `0.946`, rotation p95 `2.79°`, translation p95 `0.0398`; Filament `0.860`, `3.95°`, `0.0631`. Оба analyzer дали lag `0 ms`; native stop overshoot `0.000687` против Filament `0.003843`, displayed jitter `3.37/6.68 px` против `1.89/4.78 px` RMS/peak. Native/Filament camera sensor→render-vsync `78.79/107.42 ms`; sidecar desired→actual `46.70/47.45` против `44.17/45.57 ms`, без длинных intervals. Это улучшает старый phone-only displayed error `27.83/73.21 px`, но повторные движения различались по силе, а native пока использует плоский `TRACKING_TEST`, тогда как Filament — `SATIN`.
-
-Итог FF1 numerical gate: `MAILBOX` принят как сохранённая native основа и устраняет один кадр FIFO queue; native camera/render path стабильно получает более свежий camera frame примерно на `25–29 ms`, тогда как его SurfaceFlinger queue примерно на `2.5–2.8 ms` длиннее clean Filament. Это не разрешает сделать native default: обязательны пользовательская visual acceptance тех же резких движений и отдельный перенос production matte/satin/gloss с повторным material/thermal A/B. Артефакты `ff1-{native-mailbox,filament}-{stationary,head-motion,phone-motion}-v11-cold*` лежат локально в `app/build/tracking-telemetry`; новых dependencies, моделей или assets нет.
-
-Пользовательский visual verdict `be35764` отрицательный и уточняет временную форму дефекта: при резком движении головы маска отстаёт только во время движения, а после остановки практически мгновенно возвращается на губы; мелкая дрожь особенно заметна при небольших движениях камеры. Это исключает накопление presentation queue или медленную reacquisition как главную причину: 60-Гц actual-present стабилен, stop-path predictor уже быстрый, а residual phase error появляется внутри motion response. Дополнительный offline replay сохранённых cold-записей показал, что уменьшение `motionConfirmationFrames`, рост candidate gain и простой рост cutoff дают мало пользы, а безусловное расширение horizon ухудшает спокойный режим и phone-only motion.
-
-Checkpoint `1406c24` реализует обратимый native-only кандидат без изменения `LandmarkMotionPredictor`. `NativeVulkanRenderMotionCompensator` добавляет до `32 ms` residual lead поверх уже рассчитанного render prediction только при высокой rigid-anchor velocity и ненулевой global prediction coverage; smooth gyro gate гасит этот lead при движении устройства, поскольку phone motion уже выравнивает `GyroscopeLipCompensator`. Дополнительный lead хранится отдельно от base prediction, поэтому он не ускоряет 16-мс correction blend при доставке нового ML-result. Camera-motion timestamp получает только coverage-aware часть дополнительной экстраполяции, после чего gyro correction пересчитывается на согласованный interval.
-
-На head-motion replay gated candidate уменьшил moving alignment RMS `0.014438→0.012274` (примерно `15%`), median signed lag `0.009575→0.006733` (примерно `30%`) и p90 `0.023631→0.020834`; still RMS той же записи изменился `0.001008→0.001041`. На отдельной stationary записи still RMS `0.001466→0.001488` (примерно `+1.6%`), а phone-motion all-frame RMS `0.023901→0.023837`, то есть выбранные motion/gyro gates не повторяют явный phone-only overprediction безусловного lead.
-
-Тот же checkpoint добавляет `FaceAnchoredLipContourStabilizer`: similarity transform по жёстким eye/nose/cheek anchors сначала без задержки переносит ранее показанный lip contour в текущую global face pose, затем low-pass `8 Hz` применяется только к остаточной lip-local deformation. Это не отдельный продуктовый tracker и не окончательная full-face fusion: временный native lip slice проверяет принцип разделения общей позы и локальной формы перед FF3/FF4. Reset выполняется при tracking loss, lifecycle gap, invalid/implausible transform; topology, mask coverage, tessellation и shader не менялись. Локальный gate: `147` tests, `0` failures/errors, lint, debug APK и native C++ всех четырёх ABI. Exact APK SHA-256 `BCD585099E51364DA946AE2D11F531BB6B2376C0C2ACCACB12973A6A591CC14E` установлен на SM-G990B и запущен с native debug-extra. Functional log без recorder после старта достиг `presentID=240`: actual interval `16.692/16.748 ms` p50/p95, retained-camera reuse `0.496`, rolling sensor→actual `123.69/139.52 ms`; MediaPipe GPU работал около `29.9–30.2 FPS`, runtime/crash ошибок не зафиксировано. Это только install/cadence proof; пользовательская motion/jitter acceptance ещё не получена.
-
-Этот исторический gate был закрыт отрицательно: дополнительные predictor/gyro/local-contour комбинации не дали требуемого результата, после чего работа перешла к ARCore camera-synchronized face anchor. Актуальный принятый checkpoint описан ниже; `1406c24` сохраняется только как точка сравнения и отката.
-
-## Отложенная гипотеза ARKit / локального lip anchor — 2026-08-18
-
-iOS-разработчик сообщил, что устранил слёт и заметное отставание с помощью ARKit и добавленной «точки на губах». Это пока внешний qualitative result, а не доказательство, что одна 2D-точка решает проблему: `ARFaceAnchor` уже предоставляет согласованную позицию/ориентацию лица и деформируемую face geometry, поэтому прикреплённая к нему точка может неявно наследовать полную 3D-позу и синхронизацию ARKit. Перед воспроизведением нужно получить iOS-фрагмент создания/обновления точки и установить, является ли она дочерним узлом face anchor, вершиной face geometry или независимо фильтруемой screen-space координатой.
-
-Android-кандидат формулируется как локальная 3D-система губ, а не одиночная screen-space точка: устойчивый центр по нескольким центральным landmarks, горизонтальная ось по уголкам, вертикальная ось по верхней/нижней губе и нормаль/глубина из общей canonical face pose. Глобальное движение головы берётся из общей 3D-позы лица, локальное открытие и мимика — из lip landmarks, а late reprojection выполняется к actual display timestamp. Одна точка может исправлять только перенос и не определяет rotation, scale, opening или асимметричную деформацию.
-
-Запланированный Android A/B MediaPipe facial transformation matrix против ARCore Augmented Faces center pose/468-point mesh был выполнен в более прямом isolated proof: ARCore получил camera ownership, а MediaPipe — latest-only analysis image из той же session. Результат и ограничения зафиксированы в следующем разделе.
-
-## Принятый ARCore + MediaPipe hybrid checkpoint — 2026-08-21
-
-Отложенный ARKit/ARCore эксперимент выполнен и принят пользователем как текущая точка остановки. В отдельной `ArCoreFaceAnchorActivity` ARCore Augmented Faces полностью владеет front-camera session и рисует её в согласованной OpenGL ES сцене. Magenta point строится непосредственно из актуальной ARCore face pose и середины mesh vertices `13/14`. При резких движениях головы и при резких движениях телефона пользователь не увидел слёта точки; мелкую дрожь в этом варианте определить не удалось. Это первый визуальный proof, который прошёл оба главных motion-сценария.
-
-Одиночная ARCore-точка не повторяет локальную мимику: при сильном боковом смещении губ она остаётся в face-local позиции и может оказаться у уголка, а при открытии рта остаётся в центре. Это ожидаемо и фиксирует правильную архитектурную границу: ARCore отвечает за актуальную глобальную 6DoF pose/mesh, MediaPipe — за динамическую локальную форму губ, век и других областей. Одна точка не является будущим продуктовым tracker или маской.
-
-В той же изолированной сцене реализован hybrid shadow proof. Из ARCore `640×480 YUV_420_888` CPU image latest-only передаётся в MediaPipe Face Landmarker; одновременно допускается только один ML frame, занятые кадры пропускаются до acquire. MediaPipe Android API принимает здесь RGBA, поэтому добавлена JNI-конвертация YUV420→RGBA на отдельном потоке. Последний MediaPipe 40-point outer/inner lip contour преобразуется к текущей projected ARCore mesh через 2D affine least-squares fit по восьми общим стабильным eye/nose/cheek anchors. Magenta показывает чистый ARCore anchor, cyan — hybrid lip shape. Таким образом устаревшее глобальное движение MediaPipe не попадает в видимый contour, но локальная мимика сохраняется.
-
-Проверенный прогретый runtime на SM-G990B: ARCore обычно `58–60 FPS`, MediaPipe `27–30 FPS`, YUV→RGBA `2–3 ms` с редкими значениями до `7 ms`, MediaPipe inference около `22–27 ms`, возраст последнего ML observation в debug overlay около `67 ms`, текущая ошибка affine fit обычно `2–4 px`. Финальный локальный gate: `154` unit-теста без failures/errors, `lintDebug`, `assembleDebug` и native C++ для `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64` успешны. Exact принятый APK запущен на SM-G990B.
-
-Это не production cutover. Proof доступен только в debug через extra `com.example.armakeup.extra.ENABLE_ARCORE_FACE_ANCHOR_PROOF=true`, использует отдельный OpenGL ES renderer и diagnostic point/contour; Vulkan camera compositor, matte/satin/gloss, occlusion, full-face state и fallback для ARCore-incompatible устройств ещё не подключены. При возобновлении работы следующий slice должен сначала ввести model-independent `FaceObservation`/`FullFaceRenderState`, затем перенести ARCore-owned global pose и MediaPipe local deformation в единый production Vulkan timeline без возврата нескольких независимых camera owners.
-
-V6.0 вместе с актуальным на тот момент `PROJECT_CONTEXT.md` и `CHAT_HANDOFF.md` зафиксирован и отправлен в remote commit `8d48b46` (`[V6]`). Этот commit является воспроизводимой точкой старта для V6.1; дальнейшие tracking-изменения должны сравниваться с ним на одинаковых `.arv6` записях.
-
-Официальный model bundle сохранён в `app/src/main/assets/face_landmarker.task`. Его SHA-256: `64184E229B263107BC2B804C6625DB1341FF2BB731874B0BCC2FE6544E0BC9FF`. BlazeFace, Face Mesh V2 и Blendshape V2 проверены по официальным model cards; все три компонента имеют лицензию Apache 2.0. Детали находятся в `app/src/main/assets/MODEL_LICENSES.md`.
-
-Текущий `FaceMeshOverlay` на Canvas является только диагностическим инструментом для проверки координат и jitter. Он не используется и не будет использоваться для финального макияжа.
-
-Оптимизация responsiveness от 2026-08-10:
-
-- убран искусственный gate «ждать callback, затем ждать следующий camera frame»;
-- один кадр обрабатывается, а второй слот постоянно перезаписывается самым свежим кадром; после callback новый inference начинается сразу;
-- два direct RGBA `ByteBuffer` переиспользуются вместо создания и поворота новых объектов на каждом кадре; `BitmapImageBuilder` больше не используется, поскольку закрытие MediaPipe `MPImage` владеет и вызывает `recycle()` исходного `Bitmap`, что делало прежний pool некорректным и вызывало lifecycle warnings;
-- rotation выполняет `ImageProcessingOptions`; возвращённые landmarks явно преобразуются из ориентации analysis-buffer в ориентацию экрана для 0/90/180/270°, после чего применяется зеркалирование фронтальной камеры;
-- CameraX запрашивает лучший совместимый диапазон в пределах 30–60 FPS для связки Preview + ImageAnalysis;
-- telemetry отдельно показывает ML FPS и запрошенный диапазон камеры;
-- диагностический Canvas рисует только овал, губы, глаза, брови и радужки вместо полной тесселяции из тысяч линий.
-- alpha-beta predictor заменён адаптивным low-pass/One Euro-подобным фильтром для 478 landmarks: при малой скорости cutoff остаётся низким и подавляет ML/camera jitter, а при реальном движении лица или отдельных точек повышается для уменьшения задержки;
-- исторический baseline обрабатывал согласованное смещение centroid всех landmarks отдельным быстрым translation-каналом; в V6.1 этот путь заменён stable-anchor similarity pose, чтобы rotation/scale телефона не превращались в независимые local velocities;
-- реакция cutoff на начало общего движения выполняется без медленной фазы накопления, а скорость быстро затухает при остановке/смене направления, чтобы не возвращать overshoot;
-- базовый cutoff повышен с 2 до 3 Hz, верхний — с 12 до 20 Hz; cutoff производной — 6 Hz, общего translation velocity — 20 Hz, dead zone общей скорости — `0.01 normalized units/s`, локальной — `0.015 normalized units/s`;
-- render lead уменьшен с 8 до 4 ms, prediction horizon — с 65 до 45 ms, velocity ограничена 2 normalized units/s; скачок centroid сбрасывает состояние, а при единичном dropout последнее состояние удерживается не дольше 120 ms.
-- timestamp результата теперь строится из `ImageInfo.timestamp` и переводится из camera realtime clock в uptime; это включает возраст кадра до ImageAnalysis в prediction/telemetry. Для несовместимого camera timebase есть проверяемый fallback на текущий uptime, timestamps для MediaPipe принудительно остаются строго возрастающими.
-
-Эти изменения уменьшают задержку и паузы между inference. Они не могут гарантировать 30/60 ML FPS на любом SoC: если чистое время модели остаётся около 55–60 ms, следующий этап — сравнительный benchmark GPU/CPU delegate и adaptive resolution. Параметры predictor нужно дополнительно откалибровать на записях медленных, средних и резких движений, чтобы найти баланс между lag и overshoot.
-
-Runtime-проверка после оптимизации на Samsung SM-G990B: CameraX выбрал фиксированные 30 FPS, MediaPipe работал через GPU delegate; после прогрева поток результатов стабилизировался примерно на 29–30 ML FPS с наблюдаемой latency преимущественно 30–40 ms. В Logcat debug-сборки раз в секунду выводится срез `ARMakeupPerf` с ML FPS, latency, delegate и выбранным диапазоном камеры. Ошибок CameraX, MediaPipe и Android Runtime в проверочной сессии не зафиксировано.
-
-После первого перехода на адаптивное сглаживание повторная сессия на SM-G990B сохраняла примерно 29–30 ML FPS при измеренных 26–41 ms, но эта старая метрика начиналась только при получении кадра ImageAnalysis и не включала camera pipeline до analyzer.
-
-После включения sensor timestamp и быстрого translation-канала SM-G990B сохранил примерно 29–30 ML FPS. Полная capture→ML-result latency составила 85–128 ms, преимущественно 85–114 ms; эта величина не равна чистому времени MediaPipe и включает sensor/camera/analysis pipeline. `gfxinfo`: 633 кадра, 1 janky frame (0,16%), frame-time percentiles p50=5 ms, p95=6 ms, p99=7 ms; GPU p50=2 ms, p95=4 ms, p99=5 ms. CPU/GPU render bottleneck не появился. Визуальный баланс быстрого канала нужно проверить на устройстве при медленном движении, быстром повороте, резкой остановке и движении самого телефона.
-
-Визуальная проверка пользователем 2026-08-11 первоначально оценила эту конфигурацию как отличную для того этапа, поэтому она была сохранена Git-тегом `tracking-stable-2026-08-11`. Последующая длительная эксплуатация отозвала production-приёмку: `LandmarkMotionPredictor` всё ещё имеет заметную нестабильность и считается только сравнительным baseline, а не завершённым трекером. Ограничение «не менять коэффициенты» действовало при изоляции render/Vulkan-регрессий и больше не запрещает отдельную измеримую переработку predictor.
-
-Следующий обязательный tracking-подэтап выполняется до дальнейшей разработки материала. Сначала нужно добавить записываемую покадровую телеметрию raw landmarks, filtered landmarks, global translation/scale/rotation, local lip deformation, velocities, capture/delivery/render timestamps и фактически показанной lip mesh. Затем на одинаковых записях сравнивать варианты для неподвижного лица, медленного движения, быстрого поворота, резкой остановки, разговора/улыбки, движения телефона, dropout и разных ML FPS. Коэффициенты нельзя снова подбирать только по краткому live-наблюдению: acceptance требует численных метрик stationary RMS/peak jitter, stop overshoot, motion lag и reacquisition jump вместе с визуальным A/B на устройстве.
-
-Исправление render jitter после baseline не меняет состояние или коэффициенты трекера. Раньше `LandmarkRenderFrame.shouldAnimate()` сравнивал render time непосредственно с capture timestamp. При реальной capture→result latency 85–128 ms 45-мс prediction horizon уже был исчерпан к моменту доставки результата, поэтому `LipstickOverlay` обновлялся ступенями с частотой ML около 30 FPS, несмотря на вызов `postInvalidateOnAnimation()`.
-
-Capture-time alignment и render-time animation разделены: при доставке ML-результата `LandmarkRenderFrame` получает отдельный delivery timestamp и сохраняет bounded prediction до 45 ms. Первоначальное дополнительное render-only extrapolation window составляло 42 ms; V6.1 сократил его до 20 ms после измеренного stop overshoot, чтобы старая скорость мостила один vsync, а не почти весь следующий ML-интервал. Оверлей продолжает перестраивать контур на каждом `vsync`, а при задержке/потере нового результата экстраполяция останавливается. На SM-G990B при первоначальном разделении поток после прогрева сохранял около 29–30 ML FPS; `gfxinfo`: 800 кадров, 2 janky frames (0,25%), p50=5 ms, p95=7 ms, p99=9 ms; GPU p50=2 ms, p95=4 ms, p99=5 ms.
-
-После визуальной проверки обнаружена резкая фаза «догоняющей» коррекции в момент доставки следующего ML-результата. Она устранена render-only continuity correction: новый delivered frame вычисляет разницу с фактически показанной позицией предыдущего frame и плавно погашает её по smoothstep-кривой с нулевой скоростью на концах. Первоначальные 28 ms последовательно сокращены до 22 ms и затем до 16 ms по запросу пользователя. Текущие 16 ms соответствуют примерно одному кадру дисплея 60 Hz и минимизируют ощущение «резиновости». Tracking state, velocity и коэффициенты predictor не изменяются. Коррекция ограничена `0.12` normalized units на координату и полностью отключается при centroid jump больше `0.15`, чтобы не интерполировать между разными захватами лица. До изменения длительности на SM-G990B после прогрева сохранялось 29–30 ML FPS; `gfxinfo`: 799 кадров, 3 janky frames (0,38%), p50=5 ms, p95=6 ms, p99=8 ms; GPU p50=2 ms, p95=4 ms, p99=5 ms. Render bottleneck не появился; вариант 16 ms требует повторной визуальной проверки движениями.
-
-На SM-G990B portrait analysis-кадры приходят с `rotationDegrees = 270`. MediaPipe корректно использует этот угол для inference, но landmark-координаты требуют отдельного преобразования в display space. Для этого добавлен `NormalizedImageTransform`: сначала применяется clockwise camera rotation, затем horizontal mirror. Это исправляет диагностическую сетку, которая после первоначальной FPS-оптимизации отображалась повёрнутой на 90°.
-
-Референсный HWUI-срез матовой розово-кирпичной помады, использованный для калибровки до перехода на Filament:
-
-- `LipstickOverlay` получает predicted landmarks на каждый `vsync`;
-- внешний и внутренний контуры состоят из двух согласованных 20-точечных MediaPipe loops; из них строятся отдельные замкнутые области верхней и нижней губы, поэтому рот и зубы не окрашиваются;
-- контуры сглаживаются cubic spline, а три вложенные маски на каждой губе дают мягкое нарастание пигмента без blur и дополнительных bitmap;
-- после сравнения с пользовательским референсом неоновый `#C5163A` заменён тёплой розово-кирпичной парой `#B64B49`/`#C15C57`; верхняя губа намеренно темнее и плотнее нижней;
-- первая приглушённая калибровка `#A35653`/`#B56964` с покрытием 47,8%/40,6% оказалась практически невидимой на реальной камере и отклонена после пользовательской проверки;
-- после уточнения запроса более плотный вариант 71,1%/65,6% отклонён; прозрачность последовательно увеличена сначала до 63,1%/56,4%, затем до рабочего покрытия 56,9% на верхней и 50,7% на нижней губе; это остаётся выше практически невидимого уровня 47,8%/40,6%; внешний pass по-прежнему начинается с inset `0.015`, а matte compression остаётся на alpha 8/3, чтобы сохранить складки, тени и блик нижней губы;
-- на Android 10+ аппаратный `BlendMode.COLOR` переносит оттенок/насыщенность помады, сохраняя покадровую яркость исходных губ; слабый `MULTIPLY` pass подавляет только самые сильные блики для matte-профиля;
-- на API 24–28 используется texture-preserving multiply fallback;
-- `PreviewView` временно переведён в `compatible`/TextureView mode, чтобы HWUI мог смешивать материал с camera backdrop; диагностическая face mesh скрыта.
-
-Этот HWUI-прототип больше не является активным render path и временно сохранён в исходниках как точка визуального сравнения. Активный layout использует `FilamentMakeupView`: camera texture и динамическая lip mesh рендерятся в одной сцене. V5.0 material уже использует реконструированные normals, camera-conditioned lighting gradient и раздельные matte/satin/gloss profiles в линейном рабочем пространстве. Device/runtime acceptance на SM-G990B пройдена, но visual material acceptance не пройдена; следующими задачами остаются оптическая калибровка профилей и границы, semantic lip refinement, полноценный HDR pipeline, multi-device и thermal acceptance.
-
-Временный технический долг первого этапа:
-
-- публичный Face Landmarker Android API принимает RGBA/`Bitmap`, поэтому analysis-ветка пока делает одну копию 640×480 в переиспользуемый буфер. Preview уже идёт прямо в camera surface. До production-эффектов нужно заменить диагностическую ветку на GPU/native integration или измеренно доказать, что копия укладывается в latency/thermal budget;
-- material packages первого Filament-среза компилируются on-device через `filamat-android`. Это ускоряет разработку shader foundation, но увеличивает APK и startup cost. До релизного профиля материалы нужно компилировать host-side `matc` той же версии `1.74.0`, хранить как `.filamat` assets и убрать runtime `filamat-android` dependency;
-- material factory умеет собирать OpenGL и Vulkan variants, но после device crash Filament compositor намеренно компилирует только активный OpenGL variant. Vulkan material proof сохранён как результат V1, однако возвращать его в camera path запрещено до замены Filament `Stream` собственным importer;
-- `NATIVE` fallback на API 24–28 не гарантирует совпадение времени camera texture и render state. Это должно входить в device acceptance; если относительный temporal drift заметен, минимальный поддерживаемый класс production-качества придётся поднять до API 29 либо реализовать отдельную синхронизацию для старых устройств.
-
-Debug APK первого runtime-`filamat` среза имеет размер `105.18 MiB` и содержит универсальные native libraries. Это не релизный size baseline: после host-side компиляции материалов, удаления `filamat-android` и настройки ABI packaging размер нужно измерить заново.
-
-Debug APK после добавления V2.0 native bootstrap имеет размер `118.24 MiB`; рост включает debug symbols/упаковку четырёх ABI и всё ещё присутствующий runtime `filamat-android`, поэтому также не считается релизным size baseline.
-
-## Зафиксированный стек
-
-Версии ниже проверены на дату обновления файла. Перед фактическим добавлением зависимости нужно закрепить точную версию в version catalog и проверить Gradle sync.
-
-| Задача | Выбор | Причина |
-|---|---|---|
-| Язык и платформа | Native Android, Kotlin | Прямой доступ к CameraX, GPU, профилировщикам и минимальная лишняя задержка. |
-| Камера | CameraX 1.6.1, Camera2 backend | Стабильная версия, единое поведение на разных устройствах, lifecycle, точные настройки FPS и неблокирующий analysis-поток. |
-| Геометрия лица | MediaPipe Tasks Vision / Face Landmarker `1.0.0` | 478 3D landmarks, 52 blendshape-коэффициента, матрица трансформации, `LIVE_STREAM`, on-device GPU delegate. |
-| Рендер | Google Filament `1.74.0` как текущий default OpenGL ES bridge; native Vulkan camera/compute и debug visible proof | Filament сохраняет проверенный smooth 60-Hz camera/makeup baseline и V5.0 optics. Vulkan напрямую импортирует тот же camera AHB, выполняет YCbCr sampling, temporal compute и fence-controlled handoff; debug-only exclusive-surface mode уже показывает camera + tracking-test lips и получает `VK_GOOGLE_display_timing`, но пока presents только на 30-Hz camera arrival и не заменяет default до независимого 60-Hz retained-frame loop. |
-| Native GPU toolchain | NDK r29 `29.0.14206865`, CMake `3.31.6`, C++20, NDK `glslc` | JNI/Vulkan frame graph, offline SPIR-V и строгая компиляция четырёх ABI с `-Werror`; dynamic Vulkan/media dispatch, AHB external memory, YCbCr conversion и sync-fd semaphores подключены. |
-| Семантические маски | MediaPipe Image Segmenter API + собственная LiteRT-модель face parsing | Нужны точные вероятностные маски губ, кожи, век и глаз; стандартной selfie segmentation для этого недостаточно. |
-| Асинхронность | Kotlin Coroutines + Flow | Изоляция camera, inference и render потоков; latest-only state без очереди устаревших кадров. |
-| Профилирование | Perfetto, Android GPU Inspector, Jetpack Benchmark/Macrobenchmark | Измерение motion-to-photon latency, CPU/GPU времени, пропусков кадров, памяти и нагрева. |
-
-UI первого этапа остаётся на Views: камера и макияж уже используют единую `FilamentMakeupView` render surface, поверх которой находятся диагностический overlay и обычные Android-контролы. Compose можно подключить для каталога и экранов приложения позднее; он не должен находиться в горячем цикле обработки кадра.
-
-## Главные архитектурные решения
-
-### 1. MediaPipe — текущий заменяемый face tracker
-
-Настройки первого прототипа:
-
-- `RunningMode.LIVE_STREAM`;
-- `numFaces = 1`, поскольку это try-on одного пользователя и MediaPipe применяет встроенное сглаживание только при одном лице;
-- включать face blendshapes только для эффекта, который реально использует эти коэффициенты;
-- включать facial transformation matrix только для renderer/profile, который её потребляет;
-- сначала пробовать GPU delegate, иметь CPU fallback;
-- результаты всегда связывать с timestamp исходного кадра.
-
-Facial transformation matrix остаётся выключенной и может включаться только как диагностический/вспомогательный сигнал глобальной позы, если controlled A/B покажет пользу; она больше не является входом целевого canonical 3D renderer. Blendshapes включать только если они измеримо улучшают моргание, смыкание век, мимику губ или confidence gating.
-
-Роль ARCore Augmented Faces после device proof:
-
-- на ARCore-certified устройствах он принят для camera-synchronized global face pose и mouth/feature anchors; его 468-point mesh не используется как продуктовая геометрия;
-- он требует Google Play Services for AR и поэтому не может быть единственным backend без явно спроектированного compatibility/fallback поведения;
-- ARCore anchor хорошо удерживает глобальное движение, но локальная форма губ/глаз и product boundaries остаются 2D-контуром/семантической маской MediaPipe-compatible backend;
-- MediaPipe остаётся локальным expression/semantic-shape backend, а renderer не должен зависеть от классов конкретной библиотеки;
-- две библиотеки допустимы только в одном согласованном camera/timestamp pipeline: ARCore владеет камерой, MediaPipe получает latest-only analysis image, а не запускает вторую CameraX session.
-
-Окончательный production выбор делается после переноса этого гибрида в общий `FaceObservation`/`FullFaceRenderState`, device-support анализа, fallback A/B и release/legal gate из `LICENSE_COMPLIANCE.md`. Возвращаться к независимому 2D predictor как владельцу global pose не планируется, если гибрид сохраняет визуальное преимущество.
-
-### 2. Один GPU-композитор
-
-Предполагаемый поток кадра:
-
-```text
-Front Camera
-  ├─ GPU camera surface ──────────────┐
-  └─ low-resolution analysis frame ─┐ │
-                                    │ │
-                         Face Landmarker
-                                    │
-                  landmarks / pose / blendshapes
-                                    │
-                  face parsing (не на каждом кадре)
-                                    │
-                       temporal stabilization
-                                    │
-                                    v
-Camera texture ───────────────> Filament compositor ──> экран
-                                  ├─ face mesh
-                                  ├─ makeup masks
-                                  ├─ material shading
-                                  └─ color management
-```
-
-Кадр камеры нельзя гонять через `Bitmap` в production-пайплайне. Камера должна попадать на GPU через `Surface`/`SurfaceTexture`; inference получает отдельный уменьшенный `ImageAnalysis`-кадр. Для анализа применяется `STRATEGY_KEEP_ONLY_LATEST`, чтобы не накапливать визуально устаревшие кадры.
-
-Preview и ImageAnalysis должны использовать общий `ViewPort`/crop transform. Координаты face tracker нельзя вручную «подгонять» под экран без единой матрицы sensor → buffer → view.
-
-### 3. Гибридные маски вместо одной технологии
-
-Одних landmarks недостаточно для реалистичных биологических границ, а одна низкоразрешённая ML-маска будет дрожать и размывать тонкие линии.
-
-- Геометрия из face mesh задаёт стабильную форму, UV-привязку, поворот и окклюзию.
-- Высокоточные векторные маски из landmarks используются для подводки и карандаша для губ.
-- Face parsing уточняет фактические границы губ, кожи и век.
-- Сегментация запускается по crop лица примерно 15–30 раз/с, а маска репроецируется на каждый render-кадр с помощью текущей сетки.
-- Маски хранят confidence, имеют temporal filtering и edge-aware feathering.
-
-До выбора или обучения face-parsing модели необходимо проверить лицензию модели и датасета. Нельзя молча включать случайный BiSeNet/SegFormer checkpoint из GitHub в продукт.
-
-### 4. Материалы макияжа, а не плоские цветные оверлеи
-
-Каждый продукт описывается параметрами, а не только RGB-цветом:
-
-- цвет в линейном пространстве;
-- opacity/coverage;
-- roughness и specular/gloss;
-- сохранение исходной яркости и микротекстуры кожи/губ;
-- sparkle/pearlescence при необходимости;
-- feather radius и профиль плотности;
-- canonical UV mask или параметрическая форма;
-- правила окклюзии и ограничения по углу лица.
-
-Рендер выполняется в linear RGB с корректным преобразованием в цветовое пространство дисплея. Нельзя использовать обычный alpha blend в sRGB как финальный алгоритм: он даёт эффект наклейки и ломает светотень.
-
-### 5. Требования по каждому эффекту
-
-**Помада**
-
-- Точная внешняя и внутренняя граница губ, исключение рта и зубов.
-- Сохранение складок и естественных теней губ.
-- Отдельные режимы matte, satin и gloss через разные параметры BRDF.
-- Specular должен следовать освещению и нормалям, а не быть нарисованным статично.
-- Использует общий full-face pose/state; рот и зубы являются отдельной окклюзией, а не просто отверстием в 2D-маске.
-
-**Карандаш для губ**
-
-- Стабильный spline вдоль контура с шириной, нормализованной к размеру лица.
-- Edge-aware feathering и корректное перекрытие уголков рта.
-
-**Румяна**
-
-- Мягкая анатомическая 2D-маска щёк, ограниченная skin confidence mask.
-- Плавное падение плотности; исключение глаз, губ, волос и ноздрей.
-- Цвет должен смешиваться с исходным тоном кожи, сохраняя поры и светотень.
-- Обе щеки используют один timestamped global anchor/pose и согласованные 2D semantic masks, чтобы не плавать независимо при yaw/pitch и движении камеры.
-
-**Тени**
-
-- Отдельные маски верхнего века, crease и внешнего уголка.
-- Учет закрытия глаза, поворота головы и окклюзии ресницами/веком.
-- Поддержка градиентов и нескольких оттенков в одной палитре.
-- Маски обоих век используют общий timestamped face state, но отдельные visibility/blink confidence для левого и правого глаза.
-
-**Подводка**
-
-- Кривая по краю века с настраиваемой толщиной и wing.
-- Толщина задаётся относительно межзрачкового расстояния, а не в пикселях экрана.
-- При моргании линия должна деформироваться вместе с веком без скачков.
-- Нужны sub-pixel contour refinement и корректная окклюзия краем века/ресницами; одной грубой face segmentation недостаточно.
-
-## Порядок реализации
-
-1. **Camera + diagnostics — Vulkan V3 vertical slice реализован:** фронтальная камера, единые transforms/timestamps, FPS/latency overlay; CameraX пишет в native `AImageReader`, тот же `AHardwareBuffer` импортируется и семплируется Vulkan с acquire/release synchronization, затем передаётся видимому Filament fallback.
-2. **Face mesh — реализована диагностическая версия:** Face Landmarker в live-stream режиме, синхронизация timestamp и mesh overlay. Стабильность ещё нужно проверить на реальных устройствах.
-3. **Вертикальный срез «помада» — material foundation визуально принят на основном launcher:** ARCore camera texture и динамическая upper/lower lip mesh сведены в одной OpenGL ES сцене; есть linear-RGB luminance-preserving pigment, cubic subdivision, мягкое coverage, исключение рта/зубов, reconstructed per-pixel normals, camera-conditioned lighting и переключаемые matte/satin/gloss/tracking optics. Пользователь принял исправленный sRGB→linear цвет на SM-G990B. Остаются optical/edge tuning, semantic lip refinement, production Vulkan/BRDF/HDR и калибровка на разных губах/освещении/устройствах.
-4. **V6 / Temporal quality — экспериментальная ветка остановлена:** predictor/gyro/flow и native present варианты остаются в истории и regression tests, но не являются текущим направлением global attachment. Принятый device proof показывает более сильный результат от camera-synchronized ARCore face pose.
-5. **Full-face tracking contract — следующий этап от принятого launcher baseline:** отделить ARCore/MediaPipe API от renderer через `FaceTrackingBackend`/`FaceObservation`/`FullFaceRenderState`; ARCore-owned current pose использовать для global attachment, MediaPipe — для local deformation. Затем перенести принятый гибрид в единый Vulkan camera/render timeline, сохранив текущий OpenGL ES экран как rollback. Camera-flow/IMU добавлять только после controlled A/B, если у принятого гибрида останется измеримый residual.
-6. **Face parsing — после V6:** выбрать или обучить модель только после документальной проверки runtime, weights, датасета и разметки; затем LiteRT GPU/NPU/CPU benchmark, вероятностные masks для skin/lips/mouth-teeth/eyes/eyelids/brows/hair и temporal warp общей face surface.
-7. **Остальные эффекты:** lip liner, blush, eyeshadow, eyeliner — поверх общего full-face state, не через отдельные трекеры.
-8. **Калибровка:** разные тона кожи, освещение, front-camera mirroring, HDR/SDR и цветовые пространства устройств.
-9. **Adaptive quality tiers:** автоматическое снижение разрешения масок/частоты inference при нагреве или слабом GPU.
-
-Помада выбрана первым полноценным эффектом, потому что она быстро выявляет основные проблемы всей системы: точность контура, открытый рот, сохранение текстуры, отражения, задержку и temporal jitter.
-
-## Бюджет производительности
-
-Целевые, а не гарантированные значения; их нужно подтвердить минимум на слабом, среднем и флагманском реальном устройстве.
-
-- Отображение: 60 FPS на производительных устройствах, не ниже стабильных 30 FPS на поддерживаемом минимальном классе.
-- Render budget при 60 FPS: до 16.6 ms на кадр, желательно оставить макияжу и композитору не более 6–8 ms GPU.
-- Face landmarks: стремиться к 30–60 результатов/с; допускается inference реже рендера с prediction/reprojection.
-- Face parsing: 15–30 результатов/с по crop лица; не блокирует камеру и renderer.
-- Очереди кадров: глубина 1/latest-only для real-time веток.
-- Любое качество считается неприемлемым при заметном «плавании» маски, отставании при повороте головы или мерцании границ, даже если средний FPS высокий.
-
-## Что намеренно не выбрано
-
-- **ML Kit Face Detection:** слишком редкие landmarks для косметических границ.
-- **Selfie Segmentation как единственная маска:** отделяет человека/крупные области, но не даёт нужных классов губ и век.
-- **OpenCV в основном цикле:** CPU-обработка и копии кадров ухудшат latency; допустим только для offline-инструментов и отладки.
-- **Unity:** для этого native Android-приложения добавляет размер и интеграционную сложность без доказанного выигрыша в качестве.
-- **Чистый Canvas/2D overlay:** недостаточно для перспективы, нормалей, окклюзии и физически правдоподобных материалов.
-- **Облачная обработка:** неприемлемая задержка и риски приватности; камера и inference по умолчанию полностью on-device.
-- **Коммерческий beauty SDK:** может ускорить time-to-market, но создаёт лицензионную стоимость и black-box ограничения. Рассматривать только после сравнительного теста качества с собственным пайплайном.
-
-## Критерии качества перед релизом эффекта
-
-- Проверен на разных оттенках кожи, возрасте, форме лица и типах губ/глаз.
-- Проверен при тёплом, холодном, слабом и контровом освещении.
-- Проверен при улыбке, разговоре, моргании, открытом рте и повороте головы.
-- Нет окрашивания зубов, белков глаз, волос и фона.
-- Нет заметного jitter на статичном лице и отставания при движении.
-- Материал сохраняет естественную текстуру и освещение исходной камеры.
-- Есть визуальные golden tests и записи с реальных устройств, а не только скриншоты эмулятора.
-
-## Непринятые решения
-
-- Порог измеримого качества, после которого MediaPipe Face Landmarker заменяется собственной landmark/mesh model; до такого benchmark MediaPipe остаётся текущим backend.
-- Конкретная архитектура и лицензия собственного face-parsing датасета/модели.
-- Минимальный поддерживаемый класс GPU и окончательный список устройств.
-- Нужны ли запись фото/видео и сравнение before/after в первом релизе.
-- Формат каталога косметических продуктов и источник спектрально/цветометрически корректных оттенков.
-- Требуется ли офлайн-калибровка камеры/дисплея для устройств премиального уровня.
-
-## Проверенные первичные источники
-
-- MediaPipe repository license (Apache 2.0): https://github.com/google-ai-edge/mediapipe/blob/master/LICENSE
-- MediaPipe Face Landmarker for Android: https://developers.google.com/edge/mediapipe/solutions/vision/face_landmarker/android
-- MediaPipe Face Landmarker overview/models: https://developers.google.com/edge/mediapipe/solutions/vision/face_landmarker
-- MediaPipe BlazeFace Short Range model card (Apache 2.0): https://storage.googleapis.com/mediapipe-assets/MediaPipe%20BlazeFace%20Model%20Card%20%28Short%20Range%29.pdf
-- MediaPipe Face Mesh V2 model card (Apache 2.0): https://storage.googleapis.com/mediapipe-assets/Model%20Card%20MediaPipe%20Face%20Mesh%20V2.pdf
-- MediaPipe Blendshape V2 model card (Apache 2.0): https://storage.googleapis.com/mediapipe-assets/Model%20Card%20Blendshape%20V2.pdf
-- MediaPipe Image Segmenter: https://developers.google.com/edge/mediapipe/solutions/vision/image_segmenter
-- MediaPipe Android setup and GPU delegate: https://developers.google.com/edge/mediapipe/solutions/setup_android
-- ML Kit Terms & Privacy (отдельный продукт, не текущий backend): https://developers.google.com/ml-kit/terms
-- Vulkan Android Hardware Buffer external memory: https://docs.vulkan.org/refpages/latest/refpages/source/VK_ANDROID_external_memory_android_hardware_buffer.html
-- Vulkan AHB format/YCbCr properties: https://docs.vulkan.org/refpages/latest/refpages/source/VkAndroidHardwareBufferFormatPropertiesANDROID.html
-- Vulkan compute shaders: https://docs.vulkan.org/guide/latest/compute_shaders.html
-- Vulkan storage images and texel buffers: https://docs.vulkan.org/guide/latest/storage_image_and_texel_buffers.html
-- Vulkan synchronization examples: https://docs.vulkan.org/guide/latest/synchronization_examples.html
-- Vulkan synchronization specification: https://docs.vulkan.org/spec/latest/chapters/synchronization.html
-- Android `AImageReader` / `ImageReader` acquire-latest semantics: https://developer.android.com/reference/android/media/ImageReader
-- Android synchronization fences: https://developer.android.com/reference/android/hardware/SyncFence.html
-- CameraX releases: https://developer.android.com/jetpack/androidx/releases/camera
-- CameraX ImageAnalysis: https://developer.android.com/media/camera/camerax/analyze
-- Google Filament: https://github.com/google/filament
-- Filament Materials Guide: https://google.github.io/filament/main/materials.html
-- ARCore Augmented Faces: https://developers.google.com/ar/develop/augmented-faces
-- Apple ARFaceAnchor: https://developer.apple.com/documentation/arkit/arfaceanchor
-- Apple face tracking and geometry sample: https://developer.apple.com/documentation/arkit/tracking-and-visualizing-faces
-- Audited iOS repository and pinned commit: https://github.com/Dzhanaeva/virtual-makeup/commit/8baf9066aeafca744d7336c6f5f9847355ff8efb
-- Exact public CoreML FaceParsing artifact/source: https://github.com/tucan9389/SemanticSegmentation-CoreML
-- FaceParsing BiSeNet training source: https://github.com/zllrunning/face-parsing.PyTorch
-- CelebAMask-HQ non-commercial dataset agreement: https://github.com/switchablenorms/CelebAMask-HQ#dataset-agreement
+- Целевое направление — 2D hybrid: ARCore даёт вспомогательный global pose/anchor, MediaPipe-compatible backend — локальные 2D-контуры, semantic parsing — продуктовые границы и окклюзии.
+- Видимый canonical 3D face/lip renderer отклонён: он ухудшал контуры при мимике и поворотах.
+- Predictor, gyro, optical-flow correction, face-wide affine/projective warp и residual smoothing не возвращать без нового controlled A/B, который показывает преимущество над текущим launcher.
+- ARCore mesh не является продуктовой геометрией; он используется только внутренним pose/carrier backend.
+- MediaPipe остаётся заменяемым backend. Собственная landmark model рассматривается только после измеримого failure текущего решения и полного data/model license pipeline.
+- Semantic parsing начинать с геометрического/бесплатного baseline. Собственную модель обучать только при документированных коммерческих правах на code, weights, данные и разметку.
+- iOS-проект не изменять; отдельный общий SDK/JSON contract сейчас не нужен. Сравнивается поведение, а не буквальная реализация.
+
+## Ближайший порядок работы
+
+1. Зафиксировать текущий lower-lip/dedupe candidate после обновления документации и отдельной команды пользователя на commit.
+2. Локализовать и убрать ARCore cross-tracker rebase jitter при статике, движении глаз и медленном yaw без ухудшения fast-motion attachment.
+3. Вернуться к малому residual lag нижней губы и проверить delivery/camera age.
+4. Закончить model-independent `FullFaceRenderState` для общего pose, локальных областей, confidence, visibility и occlusion.
+5. Добавить semantic masks для lips/mouth-teeth, затем глаз/век/кожи; не добавлять модель до license gate.
+6. Перенести принятый hybrid/material state в production GPU/Vulkan path, сохранив OpenGL launcher как rollback до visual parity.
+7. Добавлять lip liner, blush, eyeshadow и eyeliner только поверх общего full-face state.
+8. Завершить device matrix, thermal/fallback, privacy/license и release acceptance.
+
+Подробный forward-only план находится в `FULL_FACE_ROADMAP.md`.
+
+## Performance budgets
+
+- Render: целевые `60 FPS`; минимум стабильные `30 FPS` на поддерживаемом классе устройств.
+- GPU makeup/compositor: желательно `6–8 ms` p95 в пределах общего `16.6 ms` кадра.
+- Face landmarks: стремиться к `30–60 results/s`; inference реже render допустим только без заметного lag.
+- Face parsing: `15–30 results/s` по face crop, без блокировки камеры и renderer.
+- Очереди realtime-веток: глубина `1`, latest-only, без накопления устаревших кадров.
+- Любой FPS считается недостаточным при заметном плавании маски, jitter, motion lag или мерцании границ.
+
+## Acceptance gates
+
+- Нет заметного jitter на статичном лице, при движении глаз, yaw/pitch, движении телефона и после dropout/reacquisition.
+- Нет заметного отставания при разговоре, улыбке и открытии/закрытии рта.
+- Нет окрашивания зубов, рта, белков глаз, волос и фона.
+- Проверены разные лица, оттенки кожи, освещение, мимика и поддерживаемые устройства.
+- Материал сохраняет текстуру и светотень камеры; gloss не превращается в статичную белую полосу.
+- Выполнены functional device runs, visual recordings, thermal soak и fallback checks.
+- До релиза закрыты требования `LICENSE_COMPLIANCE.md`.
+
+## Правила текущей работы
+
+- Перед изменениями читать этот файл и `AGENTS.md`.
+- Покадровый trace включать только на короткий controlled capture и выключать перед visual acceptance.
+- Unit-тесты запускать только по явной команде пользователя; обычный debug build/device check разрешён.
+- Не коммитить без явной команды пользователя.

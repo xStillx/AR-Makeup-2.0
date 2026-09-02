@@ -127,7 +127,12 @@ internal class LipContourTemporalRefiner(
             val maximumVerticalResponse = minOf(response, MOUTH_TRANSITION_MAX_RESPONSE)
             val upperVerticalResponse = response +
                 (maximumVerticalResponse - response) * opennessTransition
-            val lowerCenterResponse = upperVerticalResponse
+            // The frame trace shows the outer and inner lower arcs translating together during
+            // mouth motion. That shared band motion is expression, not thickness noise: delaying
+            // it leaves the lipstick behind the camera image. Preserve the existing response at
+            // rest, but pass the measured lower-band center through at a confirmed transition.
+            val lowerCenterResponse = response +
+                (1f - response) * opennessTransition
             val lowerThicknessResponse = upperVerticalResponse
             targetOuterLocal = currentOuterLocal.copyOf()
             targetInnerLocal = currentInnerLocal.copyOf()

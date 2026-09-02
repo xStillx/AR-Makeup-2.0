@@ -1,160 +1,106 @@
-# AR Makeup — лицензии и коммерческое использование
+# AR Makeup — лицензии и коммерческий release gate
 
-Статус: живой инженерный реестр, создан 2026-08-17.
+Актуально на 2026-09-02. Это инженерный реестр, не юридическое заключение. Перед коммерческим релизом нужен review профильного юриста в целевых юрисдикциях.
 
-Этот документ является единым актуальным реестром лицензий проекта. Его нужно обновлять **до** добавления новой runtime/build зависимости, ML-модели, pretrained/teacher weights, датасета, разметки, canonical mesh/UV, текстуры, шрифта, иконки, фотографии, брендового материала или внешнего SDK.
+Обновлять до добавления или замены dependency, SDK, модели, weights, датасета, разметки, шрифта, изображения, текстуры, бренда или другого внешнего asset.
 
-Это инженерный аудит первичных источников, а не юридическое заключение. Перед коммерческим релизом итоговый пакет должен проверить профильный юрист в юрисдикциях распространения приложения.
+## Статус
 
-## Базовое решение
-
-- Текущий Android/MediaPipe/Filament стек не требует покупки отдельной коммерческой лицензии или выплаты royalty. Добавленный ARCore AAR также не обозначен как `non-commercial`, но его использование регулируется Google APIs Terms of Service и отдельными ARCore Additional Terms; это не Apache 2.0 dependency.
-- Основные runtime-компоненты и текущая face-landmark model используют разрешительную Apache License 2.0. Она допускает коммерческое закрытое приложение, но требует сохранить применимые license/copyright/attribution/NOTICE материалы. Это обобщение не распространяется на бинарный `com.google.ar:core` AAR.
-- Собственный код приложения планируется распространять как закрытый proprietary product. До релиза нужно определить юридического правообладателя и подготовить EULA/Terms of Use.
-- Нельзя считать компонент коммерчески безопасным только потому, что его исходный код открыт, модель обучена самостоятельно или файл доступен для скачивания.
+- Публичный коммерческий релиз пока не готов по документам.
+- Собственный Kotlin/C++/GLSL код планируется как proprietary; правообладатель, передача прав, EULA и distribution notice не оформлены.
+- Активный ARCore/OpenGL path и legacy CameraX/Filament/native Vulkan rollback входят в Gradle graph; их лицензии остаются до фактического удаления из release artifact.
+- Face processing выполняется on-device, но MediaPipe Tasks имеет отдельный metrics/privacy gate.
 
 ## Текущий реестр
 
-### Компоненты release APK
+Источник версий — `gradle/libs.versions.toml`, состава — `app/build.gradle.kts`.
 
-1. **Собственный Kotlin/C++/GLSL код AR Makeup**
-   - Статус: собственный код, предполагаемая proprietary-лицензия.
-   - До релиза: зафиксировать правообладателя; получить передачу исключительных прав от сотрудников/подрядчиков; оформить EULA/Terms.
+### Android/Kotlin
 
-2. **AndroidX / CameraX / AppCompat / ConstraintLayout / Activity / Core**
-   - Используемые версии находятся в `gradle/libs.versions.toml`.
-   - Основная лицензия: Apache License 2.0.
-   - Требование: включить применимые license/copyright/NOTICE из точного release dependency graph.
+- AndroidX: Core `1.19.0`, AppCompat `1.7.1`, Activity `1.13.0`, ConstraintLayout `2.2.2`, CameraX `1.6.1`; Material Components `1.14.0`; Kotlin runtime.
+- Основной license family: Apache License 2.0. Перед релизом собрать exact transitive graph, copyright, LICENSE и NOTICE.
 
-3. **Material Components for Android 1.14.0**
-   - Лицензия: Apache License 2.0.
-   - Источник: https://github.com/material-components/material-components-android
+### MediaPipe Tasks Vision `1.0.0`
 
-4. **Kotlin runtime, попадающий в APK через Android/Kotlin toolchain**
-   - Лицензия: Apache License 2.0.
-   - Источник: https://github.com/JetBrains/kotlin
+- `com.google.mediapipe:tasks-vision:1.0.0`; repository — Apache License 2.0. Exact AAR, native/transitive components и NOTICE требуют release audit.
+- Privacy Notice: input обрабатывается on-device и не отправляется Google, но Tasks APIs отправляют Google performance/utilization metrics. Приложение отвечает за informed consent, если он требуется законом.
+- До релиза подтвердить telemetry/network поведение pinned Android runtime и подготовить disclosure/consent, Privacy Policy и Data Safety.
 
-5. **MediaPipe Tasks Vision 1.0.0**
-   - Лицензия runtime/repository: Apache License 2.0.
-   - Источник: https://github.com/google-ai-edge/mediapipe
-   - Дополнительный gate: проверить точный AAR и все его transitive/native notices в release graph; перед релизом повторно проверить актуальное privacy/telemetry поведение выбранной версии.
+### Bundled Face Landmarker
 
-6. **`face_landmarker.task`**
-   - Source, состав bundle, лицензия и SHA-256 зафиксированы в `app/src/main/assets/MODEL_LICENSES.md`.
-   - Компоненты BlazeFace Short Range, Face Mesh V2 и Blendshape V2: Apache License 2.0 по официальным model cards.
-   - Коммерческий статус: допустимый текущий кандидат при выполнении Apache attribution/NOTICE требований.
+- Единственный ML asset: `app/src/main/assets/face_landmarker.task`; BlazeFace Short Range, Face Mesh V2 и Blendshape V2.
+- Model cards указывают Apache License 2.0. Source и cards: `app/src/main/assets/MODEL_LICENSES.md`.
+- SHA-256: `64184E229B263107BC2B804C6625DB1341FF2BB731874B0BCC2FE6544E0BC9FF`. Перед релизом повторить hash/model-card/NOTICE audit shipped asset.
 
-7. **Google Filament / Filamat 1.74.0**
-   - Лицензия: Apache License 2.0.
-   - Источник: https://github.com/google/filament
-   - Требование: включить применимые license/NOTICE из AAR и транзитивных native-компонентов.
+### Google ARCore `1.54.0`
 
-8. **Vulkan API и Android system driver**
-   - Vulkan driver используется как системный компонент устройства и не распространяется внутри APK.
-   - Заголовки и build tools приходят из Android NDK; их точные third-party notices должны войти в release audit, если соответствующий код/материалы распространяются в итоговом artifact.
-   - Использование API само по себе не требует отдельной коммерческой runtime-лицензии.
+- `com.google.ar:core:1.54.0`; Gradle `.aar` регулируется ARCore Additional Terms, а не автоматически Apache 2.0.
+- Требуются Google APIs/ARCore Terms, prominent privacy disclosure и уведомление в Terms приложения об ARCore functionality, Google Terms и Google Privacy Policy.
+- Используются только локальные Augmented Faces; Cloud Anchors, Geospatial API и API key не подключены. Повторно проверить release artifact/runtime traffic.
+- Нужны ARCore-certified device check, Google Play Services for AR handling и unsupported-device/fallback UX.
 
-9. **Google ARCore SDK / Google Play Services for AR 1.54.0**
-   - Maven dependency: `com.google.ar:core:1.54.0`.
-   - Официальный `LICENSE` репозитория отдельно указывает, что бинарный AAR, получаемый через Gradle, регулируется ARCore Additional Terms of Service. Apache License 2.0 относится к исходным файлам/образцам репозитория, где это указано, и не должна приписываться самому AAR.
-   - Engineering review не обнаружил ограничения `non-commercial`, однако использование требует принятия Google APIs Terms of Service и актуальных ARCore Additional Terms; перед коммерческим релизом обязательна юридическая проверка этих условий в целевых юрисдикциях.
-   - Terms требуют, чтобы Terms приложения уведомляли пользователя: функциональность ARCore предоставляется Google и регулируется актуальными Google Terms of Service и Google Privacy Policy. Это уведомление, Privacy Policy и Google Play Data Safety декларация должны быть подготовлены до release.
-   - Runtime требует совместимое ARCore-certified устройство и Google Play Services for AR. Нужны документированная проверка поддержки и product fallback/unsupported-device flow.
-   - Текущий proof использует только локальные Augmented Faces; Cloud Anchors, Geospatial API, API key и сетевые ARCore cloud-функции не подключены. Это утверждение нужно повторно проверить по exact release artifact и runtime traffic.
+### Filament, Vulkan и toolchain
 
-### Build/test-only компоненты
+- `filament-android` и `filamat-android` `1.74.0`: Apache License 2.0; пока нужны legacy rollback. После host-side material compilation удалить `filamat-android` и обновить реестр.
+- NDK `29.0.14206865`, CMake `3.31.6`, C++20 и `glslc`: учесть Android SDK/NDK/toolchain notices и packaged native libraries по ABI.
+- Vulkan driver — системный компонент; приложение распространяет собственный native код и compiled shaders.
 
-- **JUnit 4.13.2** — Eclipse Public License 1.0; подключён только через `testImplementation` и не должен попадать в release APK.
-- Android Gradle Plugin, Android SDK/NDK, CMake и `glslc` используются как инструменты сборки. Их использование регулируется Android SDK License Agreement и соответствующими toolchain notices; это не лицензия конечного приложения.
-- Перед релизом необходимо проверить, что test/debug-only зависимости действительно отсутствуют в `releaseRuntimeClasspath` и APK/AAB.
+### Test/build-only
 
-## Будущие компоненты
+- JUnit `4.13.2`: Eclipse Public License 1.0. AndroidX Test JUnit `1.3.0` и Espresso `3.7.0`: test-only.
+- Android Gradle Plugin `9.3.1`, Android SDK/NDK, CMake и `glslc` регулируются соответствующими agreements/notices.
+- Release audit должен доказать отсутствие test/debug dependencies, recorders и diagnostics в APK/AAB.
 
-### MediaPipe Selfie Multiclass Segmenter — разрешён только после отдельного gate
+## Будущие модели и assets
 
-- Пока не добавлен в проект.
-- Официальная model card указывает Apache License 2.0.
-- Может использоваться для broad-классов `background / hair / body-skin / face-skin / clothes / accessories`.
-- Не является точной beauty parsing model для губ, зубов, глаз или век.
-- Перед добавлением: зафиксировать точный URL/version, SHA-256, model card, license/NOTICE, размер, latency, telemetry/privacy и коммерческий статус.
+MediaPipe Selfie Multiclass Segmenter пока не добавлен. Он допустим только после отдельного gate и только как broad `face-skin / hair / background` candidate, не как точная маска губ/зубов/век.
 
-### Собственная semantic parsing model
+До добавления внешней или собственной ML-модели нужны:
 
-Собственное обучение не отменяет проверку прав. До первого training run нужно зафиксировать:
+- exact name/publisher/version/source/SHA-256, license, model card и NOTICE;
+- commercial rights на code, weights, teacher checkpoints, изображения, labels и ML-training use;
+- consent/privacy/biometric review для данных лиц;
+- права на synthetic generators/assets и итоговые weights;
+- mobile latency/size benchmark и telemetry/privacy review.
 
-- лицензию architecture/training code;
-- лицензию каждого pretrained/teacher checkpoint;
-- права на изображения датасета и его коммерческое ML-training использование;
-- права на разметку и работу аннотаторов;
-- согласия/договоры для изображений лиц и применимые privacy/biometric требования;
-- лицензии synthetic assets/generators;
-- право распространять или закрыто использовать итоговые weights;
-- model card, provenance, version и SHA-256 итоговой модели.
+Запрещены без письменного разрешения `non-commercial`, `research only`, неизвестные лицензии и непрослеживаемые права.
 
-Запрещены без отдельного письменного разрешения: `non-commercial`, `research only`, неизвестная лицензия, неоднозначные ограничения на обучение/производные weights, а также датасеты без прослеживаемых прав на изображения лиц.
+Отдельно проверяются fonts, icons, textures/HDRI, фото/видео, каталог/упаковка косметики, логотипы, товарные знаки, marketing names, beauty SDK и cloud API. Open-source license не даёт право использовать товарный знак как знак одобрения продукта.
 
-### Внешние assets и бренды
+## Gate нового компонента
 
-Отдельный коммерческий документ/договор нужен для каждого внешнего:
+1. Зафиксировать primary source, publisher, version и SHA-256.
+2. Сохранить license/model card/NOTICE и проверить commercial use, redistribution, attribution, patents и trademarks.
+3. Проверить transitive/native dependencies; для ML — code, weights, data, labels, teachers и права на результат.
+4. Для данных лиц выполнить consent/privacy/biometric review целевых стран.
+5. Обновить этот файл и `MODEL_LICENSES.md`; архитектурное изменение — также `PROJECT_CONTEXT.md`.
+6. Не добавлять компонент в production graph при неизвестном обязательном источнике или праве.
 
-- шрифта, иконки, текстуры, HDRI и изображения;
-- фото/видео модели или пользователя, используемого не только для локального теста;
-- фото упаковки и каталога косметики;
-- логотипа, товарного знака и маркетингового названия бренда;
-- коммерческого beauty SDK или cloud API.
+## Release checklist
 
-Apache 2.0 не предоставляет права использовать товарные знаки Google, MediaPipe, Filament или косметических брендов как знак одобрения продукта.
-
-## Gate добавления нового компонента
-
-До merge нового компонента нужно:
-
-1. Зафиксировать точное имя, publisher/author, version, source URL и SHA-256 для скачиваемого binary/model/asset.
-2. Получить полный текст лицензии из первичного источника, model card и NOTICE, если он существует.
-3. Проверить коммерческое использование, модификацию, redistribution, source-disclosure, attribution, patent и trademark условия.
-4. Проверить все transitive dependencies и native binaries, а не только верхнеуровневый Maven package.
-5. Для моделей отдельно проверить weights, training code, datasets, labels, teacher models и право на итоговые weights.
-6. Для данных лиц отдельно проверить privacy/consent/biometric требования целевых стран.
-7. Обновить этот файл, `app/src/main/assets/MODEL_LICENSES.md` для bundled ML assets и `PROJECT_CONTEXT.md`, если решение меняет архитектуру или release risk.
-8. Не добавлять компонент в production/release graph, пока хотя бы один обязательный источник или право остаётся неизвестным.
-
-## Обязательный пакет коммерческого релиза
-
-Текущий статус — **ещё не release-ready по документам**. До публикации нужны:
-
-- [ ] Правообладатель проекта и proprietary EULA/Terms of Use.
-- [ ] Root `LICENSE`/distribution notice для собственного продукта.
-- [ ] Сгенерированный `THIRD_PARTY_NOTICES` по точному `releaseRuntimeClasspath` и native/model assets.
-- [ ] Полные тексты применимых лицензий, включая Apache License 2.0.
-- [ ] Экран или раздел `Open source licenses` в приложении.
-- [ ] SBOM и архив dependency/license report для конкретной release-сборки.
+- [ ] Правообладатель, передача прав, proprietary EULA/Terms и root distribution notice.
+- [ ] `THIRD_PARTY_NOTICES`, полные licenses/NOTICE и экран Open source licenses.
+- [ ] SBOM и архив exact dependency/model/hash reports release artifact.
 - [x] Source и SHA-256 текущего `face_landmarker.task` зафиксированы.
-- [ ] Release-аудит всех ML model cards/NOTICE повторён на конкретных shipped versions.
-- [ ] Privacy Policy, camera disclosure/consent и корректная Google Play Data Safety декларация.
-- [ ] Terms приложения содержат требуемое ARCore-уведомление о Google Terms of Service и Google Privacy Policy; актуальные ARCore Additional Terms прошли юридическую проверку.
-- [ ] Поддержка Google Play Services for AR, unsupported-device UX и fallback backend проверены на release device matrix.
-- [ ] Проверено фактическое MediaPipe/third-party telemetry поведение release APK.
-- [ ] Права на все продуктовые изображения, шрифты, иконки, текстуры и бренды подтверждены.
-- [ ] Финальный юридический review выполнен перед публичным коммерческим запуском.
+- [ ] Release audit AAR, native/transitive dependencies, models и assets.
+- [ ] Privacy Policy, camera/MediaPipe metrics disclosure/consent и Google Play Data Safety.
+- [ ] ARCore notice/Terms legal review, device support и fallback UX.
+- [ ] Фактический network/telemetry audit release APK.
+- [ ] Права на product images, fonts, icons, textures и brands.
+- [ ] Test/debug code и dependencies отсутствуют в release artifact.
+- [ ] Финальный юридический review до публичного запуска.
 
 ## Первичные источники
 
-- Apache License 2.0: https://www.apache.org/licenses/LICENSE-2.0.html
-- MediaPipe repository/license: https://github.com/google-ai-edge/mediapipe
-- MediaPipe Face Landmarker models: https://developers.google.com/edge/mediapipe/solutions/vision/face_landmarker
-- MediaPipe Multiclass Segmentation model card: https://storage.googleapis.com/mediapipe-assets/Model%20Card%20Multiclass%20Segmentation.pdf
+- Apache 2.0: https://www.apache.org/licenses/LICENSE-2.0.html
+- MediaPipe license/privacy: https://github.com/google-ai-edge/mediapipe
+- Face Landmarker: https://ai.google.dev/edge/mediapipe/solutions/vision/face_landmarker
 - AndroidX: https://github.com/androidx/androidx
-- Material Components Android: https://github.com/material-components/material-components-android
-- Filament: https://github.com/google/filament
+- Material Components: https://github.com/material-components/material-components-android
 - Kotlin: https://github.com/JetBrains/kotlin
-- JUnit 4 EPL 1.0: https://github.com/junit-team/junit4/blob/main/LICENSE-junit.txt
-- Android SDK License Agreement: https://developer.android.com/studio/terms
-- Google Play Data Safety guidance: https://developer.android.com/privacy-and-security/declare-data-use
-- ARCore Additional Terms of Service: https://developers.google.com/ar/develop/terms
-- ARCore Android SDK repository: https://github.com/google-ar/arcore-android-sdk
-- ARCore Android SDK LICENSE / AAR terms boundary: https://github.com/google-ar/arcore-android-sdk/blob/main/LICENSE
-
-## История изменений
-
-- 2026-08-17 — создан единый коммерческий лицензионный реестр; зафиксирован текущий Apache 2.0 runtime/model baseline, test-only EPL dependency, future ML/data/asset gates и обязательный release package.
-- 2026-08-21 — добавлен `com.google.ar:core:1.54.0`; зафиксированы отдельные ARCore Additional Terms, обязательное user notice/privacy review, device-support/fallback gate и отличие бинарного AAR от Apache-licensed source samples.
+- Filament: https://github.com/google/filament
+- ARCore Terms: https://developers.google.com/ar/develop/terms
+- ARCore binary/source boundary: https://github.com/google-ar/arcore-android-sdk/blob/main/LICENSE
+- Google Play Data Safety: https://developer.android.com/privacy-and-security/declare-data-use
+- Android SDK Terms: https://developer.android.com/studio/terms
+- JUnit license: https://github.com/junit-team/junit4/blob/main/LICENSE-junit.txt

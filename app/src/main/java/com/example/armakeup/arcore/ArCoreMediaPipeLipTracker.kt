@@ -34,6 +34,7 @@ internal class ArCoreMediaPipeLipTracker(
     private val lock = Any()
     private val busy = AtomicBoolean(false)
     private val latestObservation = AtomicReference<Observation?>()
+    private val sensorTimestampGate = MonotonicSensorTimestampGate()
     private val conversionExecutor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "arcore-mediapipe-conversion")
     }
@@ -81,6 +82,11 @@ internal class ArCoreMediaPipeLipTracker(
         } catch (error: RuntimeException) {
             busy.set(false)
             onError("ARCore camera image acquisition failed: ${error.message}")
+            return
+        }
+        if (!sensorTimestampGate.accept(cameraImage.timestamp)) {
+            cameraImage.close()
+            busy.set(false)
             return
         }
         synchronized(lock) { activeCameraImage = cameraImage }
