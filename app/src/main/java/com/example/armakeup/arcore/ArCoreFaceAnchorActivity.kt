@@ -91,6 +91,13 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
             }
             renderer.setLipstickFinish(finish)
         }
+        binding.timelineToggleGroup.addOnButtonCheckedListener { _, checkedId, isChecked ->
+            if (!isChecked) return@addOnButtonCheckedListener
+            val sameFrame = checkedId == R.id.timeline_same_frame
+            surfaceView.queueEvent {
+                renderer.setSameFrameSynchronizationEnabled(sameFrame)
+            }
+        }
         binding.permissionButton.setOnClickListener {
             cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
         }

@@ -4,6 +4,7 @@ import android.opengl.GLES11Ext
 import android.opengl.GLES20
 import android.opengl.GLSurfaceView
 import android.opengl.Matrix
+import android.os.SystemClock
 import android.util.Log
 import com.example.armakeup.makeup.LipLandmarkTopology
 import com.example.armakeup.makeup.LipMeshTessellator
@@ -102,8 +103,24 @@ internal class ArCoreFaceAnchorRenderer(
 
     private var statusWindowStartNs = 0L
     private var statusWindowFrames = 0
+    private var statusWindowSyncInferredFrames = 0
+    private var statusWindowSyncReusedFrames = 0
+    private var statusWindowSyncMissingFrames = 0
     private var lastLipMetricsTimestampNs = 0L
     private var missingFaceFrameCount = 0
+
+    @Volatile
+    private var sameFrameSynchronizationEnabled = false
+
+    fun setSameFrameSynchronizationEnabled(enabled: Boolean) {
+        if (sameFrameSynchronizationEnabled == enabled) return
+        sameFrameSynchronizationEnabled = enabled
+        lipContourRefiner.reset()
+        lipFrameDiagnostics.reset()
+        lastLipMetricsTimestampNs = 0L
+        resetSyncStatusWindow()
+        Log.i(TAG, "Same-frame camera/ARCore/MediaPipe synchronization: $enabled")
+    }
 
     fun bindSession(value: Session?) {
         session = value
@@ -148,9 +165,38 @@ internal class ArCoreFaceAnchorRenderer(
             val timestampNs = frame.timestamp
 
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT or GLES20.GL_DEPTH_BUFFER_BIT)
+            var synchronizedObservation: ArCoreMediaPipeLipTracker.Observation? = null
+            var synchronizationWaitMs = 0f
+            var syncFrameOutcome = SyncFrameOutcome.NOT_ENABLED
             if (timestampNs != 0L) {
                 drawCameraBackground(frame)
-                mediaPipeTracker?.tryDetect(frame, imageRotationDegrees())
+                val tracker = mediaPipeTracker
+                val submittedTimestampNs = tracker?.tryDetect(frame, imageRotationDegrees())
+                if (sameFrameSynchronizationEnabled) {
+                    if (submittedTimestampNs != null) {
+                        val waitStartedAtNs = SystemClock.elapsedRealtimeNanos()
+                        synchronizedObservation = tracker.await(
+                            timestampNs = submittedTimestampNs,
+                            timeoutMs = SAME_FRAME_WAIT_TIMEOUT_MS,
+                        )
+                        synchronizationWaitMs = (
+                            SystemClock.elapsedRealtimeNanos() - waitStartedAtNs
+                            ).coerceAtLeast(0L) / 1_000_000f
+                    } else {
+                        // LATEST_CAMERA_IMAGE can return the same camera frame on consecutive
+                        // display vsyncs. Dedupe correctly skips a second inference; retain the
+                        // already completed geometry only when its sensor timestamp is identical.
+                        synchronizedObservation = tracker?.latest()
+                    }
+                    synchronizedObservation = synchronizedObservation?.takeIf {
+                        it.sensorTimestampNs == timestampNs
+                    }
+                    syncFrameOutcome = when {
+                        synchronizedObservation == null -> SyncFrameOutcome.MISSING
+                        submittedTimestampNs != null -> SyncFrameOutcome.INFERRED
+                        else -> SyncFrameOutcome.REUSED
+                    }
+                }
             }
 
             val face = activeSession
@@ -174,10 +220,30 @@ internal class ArCoreFaceAnchorRenderer(
                 CanonicalFaceTransform.fromColumnMajor(viewModel)?.metricPitchRadians
             }
             val lipVisible = pitchRadians?.let(lipVisibilityGate::update) ?: false
-            val hybridStatus = face?.let {
-                drawMediaPipeLipContour(timestampNs, it, lipVisible, pitchRadians)
+            val observation = if (sameFrameSynchronizationEnabled) {
+                synchronizedObservation
+            } else {
+                mediaPipeTracker?.latest()
             }
-            publishStatus(timestampNs, face != null, screenPoint, hybridStatus)
+            val hybridStatus = face?.let { trackedFace ->
+                observation?.let {
+                    drawMediaPipeLipContour(
+                        cameraTimestampNs = timestampNs,
+                        face = trackedFace,
+                        lipVisible = lipVisible,
+                        pitchRadians = pitchRadians,
+                        observation = it,
+                        synchronizationWaitMs = synchronizationWaitMs,
+                    )
+                }
+            }
+            publishStatus(
+                timestampNs,
+                face != null,
+                screenPoint,
+                hybridStatus,
+                syncFrameOutcome,
+            )
         } catch (error: CameraNotAvailableException) {
             Log.e(TAG, "ARCore camera became unavailable", error)
             onFatalError("ARCore camera unavailable: ${error.message ?: "unknown error"}")
@@ -286,8 +352,9 @@ internal class ArCoreFaceAnchorRenderer(
         face: AugmentedFace,
         lipVisible: Boolean,
         pitchRadians: Float?,
+        observation: ArCoreMediaPipeLipTracker.Observation,
+        synchronizationWaitMs: Float,
     ): HybridStatus? {
-        val observation = mediaPipeTracker?.latest() ?: return null
         val faceObservation = observation.face
         val lips = faceObservation.lips
         if (lips.outer.pointCount != LipLandmarkTopology.outerContour.size) return null
@@ -498,6 +565,9 @@ internal class ArCoreFaceAnchorRenderer(
             inferenceDurationMs = observation.inferenceDurationMs,
             conversionDurationMs = observation.conversionDurationMs,
             cameraAgeMs = observationAgeNs / 1_000_000f,
+            synchronizationWaitMs = synchronizationWaitMs,
+            sameFrameSynchronized = sameFrameSynchronizationEnabled &&
+                faceObservation.sensorTimestampNs == cameraTimestampNs,
             anchorTranslationPixels = anchorTranslationPixels,
             anchorCorrectionAvailable = anchorCorrection != null,
             pitchDegrees = pitchRadians?.let { Math.toDegrees(it.toDouble()).toFloat() },
@@ -685,10 +755,17 @@ internal class ArCoreFaceAnchorRenderer(
         faceTracked: Boolean,
         screenPoint: Pair<Float, Float>?,
         hybridStatus: HybridStatus?,
+        syncFrameOutcome: SyncFrameOutcome,
     ) {
         if (timestampNs == 0L) return
         if (statusWindowStartNs == 0L) statusWindowStartNs = timestampNs
         statusWindowFrames++
+        when (syncFrameOutcome) {
+            SyncFrameOutcome.INFERRED -> statusWindowSyncInferredFrames++
+            SyncFrameOutcome.REUSED -> statusWindowSyncReusedFrames++
+            SyncFrameOutcome.MISSING -> statusWindowSyncMissingFrames++
+            SyncFrameOutcome.NOT_ENABLED -> Unit
+        }
         val durationNs = timestampNs - statusWindowStartNs
         if (durationNs < STATUS_INTERVAL_NS) return
 
@@ -696,6 +773,12 @@ internal class ArCoreFaceAnchorRenderer(
         val pointLabel = screenPoint?.let { point ->
             "point ${(point.first * viewportWidth).roundToInt()},${(point.second * viewportHeight).roundToInt()}"
         } ?: "point —"
+        val syncWindowLabel = if (sameFrameSynchronizationEnabled) {
+            " · sync $statusWindowSyncInferredFrames/$statusWindowSyncReusedFrames/" +
+                statusWindowSyncMissingFrames
+        } else {
+            ""
+        }
         val state = if (faceTracked) "FACE TRACKING" else "SEARCHING FOR FACE"
         val hybridLabel = hybridStatus?.let { status ->
             val anchorLabel = if (status.anchorCorrectionAvailable) {
@@ -709,7 +792,7 @@ internal class ArCoreFaceAnchorRenderer(
             val visibilityLabel = if (status.lipVisible) "VISIBLE" else "HIDDEN: HEAD DOWN"
             String.format(
                 Locale.US,
-                "MediaPipe %.1f FPS · YUV %.0f + ML %.0f ms · age %.0f ms · %s · " +
+                "MediaPipe %.1f FPS · YUV %.0f + ML %.0f ms · age %.0f ms · %s · %s · " +
                     "pitch %s · shape %.2f · semantic %.2f · " +
                     "refine %.2f/%.2f · mouth %.2f/%.2f s^-1 · %s\n" +
                     "upper center %+.2f -> %+.2f%% · thickness %+.2f -> %+.2f%% · upperR %.2f",
@@ -717,6 +800,11 @@ internal class ArCoreFaceAnchorRenderer(
                 status.conversionDurationMs,
                 status.inferenceDurationMs,
                 status.cameraAgeMs,
+                if (status.sameFrameSynchronized) {
+                    String.format(Locale.US, "SYNC frame · wait %.0f ms", status.synchronizationWaitMs)
+                } else {
+                    "ASYNC 60 Hz"
+                },
                 anchorLabel,
                 pitchLabel,
                 status.geometryConfidence,
@@ -732,19 +820,31 @@ internal class ArCoreFaceAnchorRenderer(
                 status.filteredUpperThicknessDelta * 100f,
                 status.upperVerticalResponse,
             )
-        } ?: "MediaPipe: waiting for synchronized result"
+        } ?: if (sameFrameSynchronizationEnabled) {
+            "MediaPipe: SYNC timeout or no same-timestamp face"
+        } else {
+            "MediaPipe: waiting for asynchronous result"
+        }
         val text = String.format(
             Locale.US,
-            "%s\nARCore %.1f FPS · %s\n%s\nanchored tessellated lipstick",
+            "%s\nARCore %.1f FPS · %s%s\n%s\nanchored tessellated lipstick",
             state,
             fps,
             pointLabel,
+            syncWindowLabel,
             hybridLabel,
         )
         onStatus(text)
         Log.d(TAG, text.replace('\n', ' '))
         statusWindowStartNs = timestampNs
         statusWindowFrames = 0
+        resetSyncStatusWindow()
+    }
+
+    private fun resetSyncStatusWindow() {
+        statusWindowSyncInferredFrames = 0
+        statusWindowSyncReusedFrames = 0
+        statusWindowSyncMissingFrames = 0
     }
 
     private data class HybridStatus(
@@ -752,6 +852,8 @@ internal class ArCoreFaceAnchorRenderer(
         val inferenceDurationMs: Float,
         val conversionDurationMs: Float,
         val cameraAgeMs: Float,
+        val synchronizationWaitMs: Float,
+        val sameFrameSynchronized: Boolean,
         val anchorTranslationPixels: Float,
         val anchorCorrectionAvailable: Boolean,
         val pitchDegrees: Float?,
@@ -768,6 +870,13 @@ internal class ArCoreFaceAnchorRenderer(
         val rawUpperThicknessDelta: Float,
         val filteredUpperThicknessDelta: Float,
     )
+
+    private enum class SyncFrameOutcome {
+        NOT_ENABLED,
+        INFERRED,
+        REUSED,
+        MISSING,
+    }
 
     private fun createExternalTexture(): Int {
         val textures = IntArray(1)
@@ -840,6 +949,7 @@ internal class ArCoreFaceAnchorRenderer(
         const val NEAR_METERS = 0.05f
         const val FAR_METERS = 100f
         const val STATUS_INTERVAL_NS = 1_000_000_000L
+        const val SAME_FRAME_WAIT_TIMEOUT_MS = 100L
         const val DRAW_DIAGNOSTIC_POINTS = false
         const val ILLUMINATION_SAMPLE_RADIUS_PIXELS = 14f
 

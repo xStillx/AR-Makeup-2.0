@@ -1,6 +1,6 @@
 # AR Makeup — план развития 2D hybrid full-face
 
-Актуально на 2026-09-02. Это forward-only roadmap: выполненная и отменённая история хранится в Git. Текущее состояние и измерения находятся в `PROJECT_CONTEXT.md`.
+Актуально на 2026-09-03. Это forward-only roadmap: выполненная и отменённая история хранится в Git. Текущее состояние и измерения находятся в `PROJECT_CONTEXT.md`.
 
 ## Целевое состояние
 
@@ -36,8 +36,11 @@ ARCore, MediaPipe и конкретный renderer остаются заменя
 1. Добавить в короткий controlled trace абсолютные `anchor(M)`, `anchor(R)`, `MediaPipe center(M)` и residual между двумя tracker-сигналами.
 2. Проверить, возникает ли скачок в `face.centerPose`, при смене measurement timestamp или в обоих местах.
 3. Провести runtime A/B текущего timestamped transport против continuity-preserving global owner и диагностического anchor bypass.
-4. Не использовать общий low-pass как первое решение; fast-motion attachment ARCore должен сохраниться.
-5. Проверить статичное лицо, движение глаз, медленный yaw, быстрый поворот, движение телефона и dropout/reacquisition.
+4. Выполнить добавленный same-frame lockstep A/B: точное совпадение camera/ARCore/MediaPipe sensor timestamp ценой блокировки renderer. Использовать его только для проверки причинности frequency/rebase гипотезы.
+5. Не использовать общий low-pass как первое решение; fast-motion attachment ARCore должен сохраниться.
+6. Проверить статичное лицо, движение глаз, медленный yaw, быстрый поворот, движение телефона и dropout/reacquisition.
+
+Статус A/B на SM-G990B: после устранения blank-frame flicker пользователь предварительно не видит прежнего jitter; exact окна имеют `missing=0`, `age 0 ms`, `anchor 0.0 px`. До production-решения результат нужно повторить на других устройствах и заменить блокирующий lockstep на неблокирующий continuity-preserving rebase.
 
 Gate:
 

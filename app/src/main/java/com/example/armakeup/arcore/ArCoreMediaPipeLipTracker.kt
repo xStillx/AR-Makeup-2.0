@@ -16,8 +16,11 @@ import com.google.mediapipe.tasks.vision.facelandmarker.FaceLandmarkerResult
 import java.nio.ByteBuffer
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 
 /**
  * ARCore-camera MediaPipe shadow backend.
@@ -34,6 +37,8 @@ internal class ArCoreMediaPipeLipTracker(
     private val lock = Any()
     private val busy = AtomicBoolean(false)
     private val latestObservation = AtomicReference<Observation?>()
+    private val completionLock = ReentrantLock()
+    private val completionChanged = completionLock.newCondition()
     private val sensorTimestampGate = MonotonicSensorTimestampGate()
     private val conversionExecutor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "arcore-mediapipe-conversion")
@@ -53,7 +58,9 @@ internal class ArCoreMediaPipeLipTracker(
     private var lastSubmittedTimestampMs = Long.MIN_VALUE
     private var lastResultTimestampNs = 0L
     private var smoothedFps = 0f
+    @Volatile
     private var closed = false
+    private var latestCompletion: Completion? = null
 
     fun initialize() {
         synchronized(lock) {
@@ -67,30 +74,31 @@ internal class ArCoreMediaPipeLipTracker(
         }
     }
 
-    fun tryDetect(frame: Frame, rotationDegrees: Int) {
+    fun tryDetect(frame: Frame, rotationDegrees: Int): Long? {
         val activeLandmarker = synchronized(lock) {
-            if (closed) return
+            if (closed) return null
             landmarker
-        } ?: return
-        if (!busy.compareAndSet(false, true)) return
+        } ?: return null
+        if (!busy.compareAndSet(false, true)) return null
 
         val cameraImage = try {
             frame.acquireCameraImage()
         } catch (_: NotYetAvailableException) {
             busy.set(false)
-            return
+            return null
         } catch (error: RuntimeException) {
             busy.set(false)
             onError("ARCore camera image acquisition failed: ${error.message}")
-            return
+            return null
         }
         if (!sensorTimestampGate.accept(cameraImage.timestamp)) {
             cameraImage.close()
             busy.set(false)
-            return
+            return null
         }
+        val sensorTimestampNs = cameraImage.timestamp
         synchronized(lock) { activeCameraImage = cameraImage }
-        try {
+        return try {
             conversionExecutor.execute {
                 prepareAndSubmit(
                     landmarker = activeLandmarker,
@@ -98,10 +106,36 @@ internal class ArCoreMediaPipeLipTracker(
                     rotationDegrees = rotationDegrees,
                 )
             }
+            sensorTimestampNs
         } catch (_: RejectedExecutionException) {
             synchronized(lock) { if (activeCameraImage === cameraImage) activeCameraImage = null }
             cameraImage.close()
             busy.set(false)
+            null
+        }
+    }
+
+    /**
+     * Waits for the MediaPipe callback belonging to one camera sensor timestamp.
+     *
+     * This is intentionally used only by the diagnostic same-frame lockstep mode. The regular
+     * realtime path remains non-blocking and latest-only.
+     */
+    fun await(timestampNs: Long, timeoutMs: Long): Observation? {
+        if (timestampNs <= 0L || timeoutMs <= 0L) return null
+        var remainingNs = TimeUnit.MILLISECONDS.toNanos(timeoutMs)
+        return completionLock.withLock {
+            while (!closed) {
+                val completion = latestCompletion
+                if (completion != null && completion.sensorTimestampNs >= timestampNs) {
+                    return@withLock completion.observation.takeIf {
+                        completion.sensorTimestampNs == timestampNs
+                    }
+                }
+                if (remainingNs <= 0L) return@withLock null
+                remainingNs = completionChanged.awaitNanos(remainingNs)
+            }
+            null
         }
     }
 
@@ -120,6 +154,7 @@ internal class ArCoreMediaPipeLipTracker(
         } catch (error: RuntimeException) {
             releaseCameraImage(cameraImage)
             busy.set(false)
+            publishCompletion(sensorTimestampNs, null)
             onError("ARCore YUV conversion failed: ${error.message}")
             return
         }
@@ -136,6 +171,7 @@ internal class ArCoreMediaPipeLipTracker(
             ).build()
         } catch (error: RuntimeException) {
             busy.set(false)
+            publishCompletion(sensorTimestampNs, null)
             onError("MediaPipe RGBA wrapping failed: ${error.message}")
             return
         }
@@ -148,6 +184,7 @@ internal class ArCoreMediaPipeLipTracker(
             if (closed) {
                 inputImage.close()
                 busy.set(false)
+                publishCompletion(sensorTimestampNs, null)
                 return
             }
             if (timestampMs <= lastSubmittedTimestampMs) {
@@ -169,6 +206,7 @@ internal class ArCoreMediaPipeLipTracker(
             landmarker.detectAsync(inputImage, processingOptions, timestampMs)
         } catch (error: RuntimeException) {
             releaseActiveInput(inputImage)
+            publishCompletion(sensorTimestampNs, null)
             onError("MediaPipe ARCore frame submission failed: ${error.message}")
         }
     }
@@ -193,6 +231,7 @@ internal class ArCoreMediaPipeLipTracker(
         inputToClose?.close()
         busy.set(false)
         latestObservation.set(null)
+        completionLock.withLock { completionChanged.signalAll() }
     }
 
     private fun createLandmarker(delegate: Delegate): FaceLandmarker {
@@ -212,8 +251,11 @@ internal class ArCoreMediaPipeLipTracker(
             .setOutputFacialTransformationMatrixes(false)
             .setResultListener(::handleResult)
             .setErrorListener { error ->
-                val input = synchronized(lock) { activeInput }
+                val (input, sensorTimestampNs) = synchronized(lock) {
+                    Pair(activeInput, activeSensorTimestampNs)
+                }
                 if (input != null) releaseActiveInput(input)
+                publishCompletion(sensorTimestampNs, null)
                 onError("MediaPipe ARCore inference failed: ${error.message}")
             }
             .build()
@@ -237,6 +279,7 @@ internal class ArCoreMediaPipeLipTracker(
             rotationDegrees = activeRotationDegrees
         }
         val landmarks = result.faceLandmarks().firstOrNull()
+        var observation: Observation? = null
         if (landmarks != null) {
             val coordinates = FloatArray(landmarks.size * COMPONENT_COUNT)
             landmarks.forEachIndexed { index, landmark ->
@@ -254,6 +297,7 @@ internal class ArCoreMediaPipeLipTracker(
             )
             if (faceObservation == null) {
                 releaseActiveInput(inputImage)
+                publishCompletion(sensorTimestampNs, null)
                 return
             }
             val intervalNs = resultAtNs - lastResultTimestampNs
@@ -268,8 +312,7 @@ internal class ArCoreMediaPipeLipTracker(
                 smoothedFps + FPS_RESPONSE * (instantaneousFps - smoothedFps)
             }
             lastResultTimestampNs = resultAtNs
-            latestObservation.set(
-                Observation(
+            observation = Observation(
                     face = faceObservation,
                     coordinates = coordinates,
                     sensorTimestampNs = sensorTimestampNs,
@@ -280,10 +323,25 @@ internal class ArCoreMediaPipeLipTracker(
                     inputWidth = inputWidth,
                     inputHeight = inputHeight,
                     rotationDegrees = rotationDegrees,
-                ),
-            )
+                )
+            latestObservation.set(observation)
         }
         releaseActiveInput(inputImage)
+        // Wake the lockstep renderer only after busy=false. GLSurfaceView may already have a
+        // coalesced requestRender waiting; publishing first lets that render race ahead, fail to
+        // submit its camera image, and present a frame without makeup.
+        publishCompletion(sensorTimestampNs, observation)
+    }
+
+    private fun publishCompletion(sensorTimestampNs: Long, observation: Observation?) {
+        if (sensorTimestampNs <= 0L) return
+        completionLock.withLock {
+            val current = latestCompletion
+            if (current == null || sensorTimestampNs >= current.sensorTimestampNs) {
+                latestCompletion = Completion(sensorTimestampNs, observation)
+            }
+            completionChanged.signalAll()
+        }
     }
 
     private fun releaseActiveInput(inputImage: MPImage) {
@@ -341,6 +399,11 @@ internal class ArCoreMediaPipeLipTracker(
         val inputWidth: Int,
         val inputHeight: Int,
         val rotationDegrees: Int,
+    )
+
+    private data class Completion(
+        val sensorTimestampNs: Long,
+        val observation: Observation?,
     )
 
     private companion object {

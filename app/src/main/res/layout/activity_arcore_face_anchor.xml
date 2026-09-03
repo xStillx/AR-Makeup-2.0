@@ -205,6 +205,52 @@
                     android:textAllCaps="false"
                     android:visibility="visible" />
             </com.google.android.material.button.MaterialButtonToggleGroup>
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:letterSpacing="0.1"
+                android:text="@string/timeline_label"
+                android:textColor="@color/rose_300"
+                android:textSize="11sp"
+                android:textStyle="bold" />
+
+            <com.google.android.material.button.MaterialButtonToggleGroup
+                android:id="@+id/timeline_toggle_group"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                app:checkedButton="@id/timeline_async"
+                app:selectionRequired="true"
+                app:singleSelection="true">
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/timeline_async"
+                    style="@style/Widget.Material3.Button.OutlinedButton"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:minHeight="40dp"
+                    android:minWidth="0dp"
+                    android:text="@string/timeline_async"
+                    android:textAllCaps="false"
+                    android:textColor="@color/finish_button_text"
+                    android:textSize="12sp" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/timeline_same_frame"
+                    style="@style/Widget.Material3.Button.OutlinedButton"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:minHeight="40dp"
+                    android:minWidth="0dp"
+                    android:text="@string/timeline_same_frame"
+                    android:textAllCaps="false"
+                    android:textColor="@color/finish_button_text"
+                    android:textSize="12sp" />
+            </com.google.android.material.button.MaterialButtonToggleGroup>
         </LinearLayout>
     </com.google.android.material.card.MaterialCardView>
 

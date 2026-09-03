@@ -28,4 +28,7 @@
     <string name="finish_satin">Сатин</string>
     <string name="finish_gloss">Глянец</string>
     <string name="finish_tracking_test">Трек</string>
+    <string name="timeline_label">СИНХРОНИЗАЦИЯ КАДРА</string>
+    <string name="timeline_async">Async 60 Гц</string>
+    <string name="timeline_same_frame">Sync кадр</string>
 </resources>

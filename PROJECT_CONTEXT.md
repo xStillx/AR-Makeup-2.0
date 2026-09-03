@@ -1,6 +1,6 @@
 # AR Makeup — актуальный контекст проекта
 
-Актуально на 2026-09-02. Этот файл хранит только текущее состояние и долгоживущие решения. История экспериментов и старые метрики доступны в Git.
+Актуально на 2026-09-03. Этот файл хранит только текущее состояние и долгоживущие решения. История экспериментов и старые метрики доступны в Git.
 
 Связанные документы:
 
@@ -27,12 +27,12 @@
 
 ## Репозиторий и текущий checkpoint
 
-- Проект: `C:\Users\User\AndroidStudioProjects\ARMakeup`.
+- Проект: `C:\Users\arc11\AndroidStudioProjects\AR-Makeup-2.0`.
 - Ветка: `codex/lipstick-material-v2`.
-- Последний committed checkpoint: `512aac5` (`[Tracking] Checkpoint lip transition diagnostics`).
+- Базовый checkpoint перед same-frame candidate: `6e4c613` (`[Tracking] Checkpoint lower lip and anchor diagnostics`).
 - Текущее устройство: Samsung SM-G990B.
 - Launcher: `ArCoreFaceAnchorActivity`; `MainActivity` сохраняет legacy CameraX/Filament/Vulkan rollback и не экспортируется.
-- Незакоммиченный candidate содержит покадровую lip-диагностику, запрет повторного inference одного ARCore image и исправление shared center нижней губы. Коммит разрешён только отдельной командой пользователя.
+- Текущий candidate добавляет диагностический same-frame lockstep A/B; тесты выбора ARCore-точек, оставшиеся на другом ПК, в этом checkout отсутствуют.
 
 ## Активная архитектура
 
@@ -67,11 +67,28 @@ Rotation, front-camera mirror и `FILL_CENTER` обязаны быть общи�
 
 Материалы остаются рабочей базой, а не финальным продуктовым качеством. Нужны проверки при разном освещении, защита от shimmer/auto-exposure, BRDF/HDR/edge refinement и multi-device acceptance.
 
+## Активный A/B: same-frame synchronization
+
+Для проверки гипотезы о конфликте частот добавлен переключатель `Async 60 Гц / Sync кадр`.
+
+- `Async 60 Гц` сохраняет основной latest-only путь: камера и ARCore обновляются на display vsync, а более старый результат MediaPipe переносится на текущий кадр через timestamped anchor transport.
+- `Sync кадр` является диагностическим lockstep: после одного `Session.update()` renderer отправляет CPU image этого кадра в MediaPipe, ждёт callback до 100 ms и рисует губы только если sensor timestamp результата точно совпадает с timestamp видимого ARCore camera frame.
+- В lockstep cross-frame anchor correction обязан быть нулевым, но GL thread намеренно блокируется на YUV + inference. Ожидаемая цена — снижение camera/render cadence примерно до MediaPipe cadence и увеличение end-to-end latency.
+- Этот A/B проверяет причинность, но не является production-решением. Если jitter исчезнет, проблема находится в asynchronous rebase/transport seam; если сохранится — различие частот не является первопричиной и нужно продолжить разбор абсолютных ARCore/MediaPipe anchor samples.
+
+В status overlay режим отображается как `ASYNC 60 Hz` либо `SYNC frame · wait N ms`; счётчики `inferred/reused/missing` показывают состав каждого контрольного окна.
+
+Первый device run выявил сильное мерцание lockstep-маски. Причина была не в геометрии: после exact callback накопленный `requestRender()` часто получал повторный ARCore camera timestamp, dedupe не запускал второй inference, а renderer ошибочно рисовал такой повторный кадр без помады. Дополнительно callback первоначально будил renderer до сброса tracker `busy`.
+
+Исправленный вариант сначала полностью освобождает input/`busy`, затем публикует completion, а при повторном camera timestamp повторно использует только observation с точно тем же sensor timestamp. Контрольный run на SM-G990B показал `missing=0` во всех 1-секундных окнах: примерно `14–17` новых inference и `15–30` безопасных same-timestamp reuse, MediaPipe `16–18 FPS`, wait обычно `25–48 ms`, `age 0 ms`, anchor correction `0.0 px`.
+
+Предварительный пользовательский verdict на SM-G990B: после исправления мерцание исчезло, исходное дёрганье при движении головы и глаз визуально выглядит исправленным. Это поддерживает гипотезу об asynchronous cross-tracker rebase seam. Результат ещё нужно повторить на других устройствах; lockstep остаётся диагностикой, а не production-решением из-за блокировки GL thread и низкой inference cadence. Во время этого visual test тяжёлый `LipFrameTrace` был выключен (`S`); более лёгкий `LipJumpMetrics` оставался включён и логировал один раз на новый MediaPipe result.
+
 ## Открытые tracking-дефекты
 
 ### 1. Global jitter при движении головы и глаз
 
-Мелкое дрожание остаётся при движении головы вправо/влево. Оно также воспроизводится при неподвижных голове и закрытом рте, если переводить только взгляд вверх/вниз.
+В основном asynchronous transport мелкое дрожание воспроизводилось при yaw и при движении только глаз. Same-frame lockstep предварительно убрал его на SM-G990B, поэтому дефект локализован к разрыву timelines/rebase, но не закрыт для production async path и device matrix.
 
 Диагностика локализовала дефект в global anchor/fusion path:
 
@@ -103,8 +120,8 @@ Rotation, front-camera mirror и `FILL_CENTER` обязаны быть общи�
 
 ## Ближайший порядок работы
 
-1. Зафиксировать текущий lower-lip/dedupe candidate после обновления документации и отдельной команды пользователя на commit.
-2. Локализовать и убрать ARCore cross-tracker rebase jitter при статике, движении глаз и медленном yaw без ухудшения fast-motion attachment.
+1. Повторить same-frame verdict на других устройствах: покой, глаза, медленный yaw, быстрый motion, движение телефона и reacquisition.
+2. Если результат подтверждается, заменить блокирующий lockstep на production-safe continuity-preserving global owner/rebase без ухудшения fast-motion attachment.
 3. Вернуться к малому residual lag нижней губы и проверить delivery/camera age.
 4. Закончить model-independent `FullFaceRenderState` для общего pose, локальных областей, confidence, visibility и occlusion.
 5. Добавить semantic masks для lips/mouth-teeth, затем глаз/век/кожи; не добавлять модель до license gate.
