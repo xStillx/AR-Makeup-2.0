@@ -53,6 +53,15 @@ internal class ArCoreFaceAnchorRenderer(
     private var backgroundProgram = 0
     private var pointProgram = 0
     private var lipMeshProgram = 0
+    private var pairedBackgroundProgram = 0
+    private var pairedLipMeshProgram = 0
+    private val pairedCameraFrames = PairedCameraFrameStore()
+    private var pendingPair: CameraPair? = null
+    private var presentedPair: CameraPair? = null
+    private var presentedObservation: ArCoreMediaPipeLipTracker.Observation? = null
+    private var configuredDisplayRotation = -1
+    private var configuredWidth = 0
+    private var configuredHeight = 0
     private var cameraTextureBoundSession: Session? = null
 
     private val transformedCameraUvs = directFloatBuffer(8)
@@ -110,11 +119,13 @@ internal class ArCoreFaceAnchorRenderer(
     private var missingFaceFrameCount = 0
 
     @Volatile
-    private var sameFrameSynchronizationEnabled = false
+    private var sameFrameSynchronizationEnabled = true
 
     fun setSameFrameSynchronizationEnabled(enabled: Boolean) {
         if (sameFrameSynchronizationEnabled == enabled) return
         sameFrameSynchronizationEnabled = enabled
+        invalidateSameFrameState()
+        if (!enabled) pairedCameraFrames.release()
         lipContourRefiner.reset()
         lipFrameDiagnostics.reset()
         lastLipMetricsTimestampNs = 0L
@@ -124,7 +135,9 @@ internal class ArCoreFaceAnchorRenderer(
 
     fun bindSession(value: Session?) {
         session = value
+        invalidateSameFrameState()
         cameraTextureBoundSession = null
+        configuredDisplayRotation = -1
         anchorTransport.reset()
         lipVisibilityGate.reset()
         lipContourRefiner.reset()
@@ -136,14 +149,36 @@ internal class ArCoreFaceAnchorRenderer(
 
     fun bindMediaPipeTracker(value: ArCoreMediaPipeLipTracker?) {
         mediaPipeTracker = value
+        invalidateSameFrameState()
+    }
+
+    /** Drop pending callbacks and displayed frames at lifecycle/timeline boundaries. No GL calls. */
+    fun invalidateSameFrameState() {
+        pendingPair = null
+        presentedPair = null
+        presentedObservation = null
+        lipContourRefiner.reset()
+        lipFrameDiagnostics.reset()
+        lastLipMetricsTimestampNs = 0L
     }
 
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
+        pairedCameraFrames.onContextCreated()
+        invalidateSameFrameState()
+        cameraTextureBoundSession = null
+        configuredDisplayRotation = -1
         GLES20.glClearColor(0f, 0f, 0f, 1f)
         cameraTextureId = createExternalTexture()
         backgroundProgram = createProgram(BACKGROUND_VERTEX_SHADER, BACKGROUND_FRAGMENT_SHADER)
         pointProgram = createProgram(POINT_VERTEX_SHADER, POINT_FRAGMENT_SHADER)
         lipMeshProgram = createProgram(LIP_MESH_VERTEX_SHADER, LIP_MESH_FRAGMENT_SHADER)
+        // Only the sampler changes. All pigment, lighting and coverage equations stay identical.
+        pairedBackgroundProgram = createProgram(
+            BACKGROUND_VERTEX_SHADER, bufferedCameraShader(BACKGROUND_FRAGMENT_SHADER),
+        )
+        pairedLipMeshProgram = createProgram(
+            LIP_MESH_VERTEX_SHADER, bufferedCameraShader(LIP_MESH_FRAGMENT_SHADER),
+        )
         checkGlError("surface creation")
     }
 
@@ -160,43 +195,26 @@ internal class ArCoreFaceAnchorRenderer(
                 activeSession.setCameraTextureName(cameraTextureId)
                 cameraTextureBoundSession = activeSession
             }
-            activeSession.setDisplayGeometry(displayRotation(), viewportWidth, viewportHeight)
+            val rotation = displayRotation()
+            if (rotation != configuredDisplayRotation || viewportWidth != configuredWidth ||
+                viewportHeight != configuredHeight
+            ) {
+                activeSession.setDisplayGeometry(rotation, viewportWidth, viewportHeight)
+                configuredDisplayRotation = rotation
+                configuredWidth = viewportWidth
+                configuredHeight = viewportHeight
+                invalidateSameFrameState()
+                anchorTransport.reset()
+                lipContourRefiner.reset()
+            }
             val frame = activeSession.update()
             val timestampNs = frame.timestamp
 
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT or GLES20.GL_DEPTH_BUFFER_BIT)
-            var synchronizedObservation: ArCoreMediaPipeLipTracker.Observation? = null
-            var synchronizationWaitMs = 0f
-            var syncFrameOutcome = SyncFrameOutcome.NOT_ENABLED
-            if (timestampNs != 0L) {
+            if (timestampNs == 0L) return
+            if (!sameFrameSynchronizationEnabled) {
                 drawCameraBackground(frame)
-                val tracker = mediaPipeTracker
-                val submittedTimestampNs = tracker?.tryDetect(frame, imageRotationDegrees())
-                if (sameFrameSynchronizationEnabled) {
-                    if (submittedTimestampNs != null) {
-                        val waitStartedAtNs = SystemClock.elapsedRealtimeNanos()
-                        synchronizedObservation = tracker.await(
-                            timestampNs = submittedTimestampNs,
-                            timeoutMs = SAME_FRAME_WAIT_TIMEOUT_MS,
-                        )
-                        synchronizationWaitMs = (
-                            SystemClock.elapsedRealtimeNanos() - waitStartedAtNs
-                            ).coerceAtLeast(0L) / 1_000_000f
-                    } else {
-                        // LATEST_CAMERA_IMAGE can return the same camera frame on consecutive
-                        // display vsyncs. Dedupe correctly skips a second inference; retain the
-                        // already completed geometry only when its sensor timestamp is identical.
-                        synchronizedObservation = tracker?.latest()
-                    }
-                    synchronizedObservation = synchronizedObservation?.takeIf {
-                        it.sensorTimestampNs == timestampNs
-                    }
-                    syncFrameOutcome = when {
-                        synchronizedObservation == null -> SyncFrameOutcome.MISSING
-                        submittedTimestampNs != null -> SyncFrameOutcome.INFERRED
-                        else -> SyncFrameOutcome.REUSED
-                    }
-                }
+                mediaPipeTracker?.tryDetect(frame, imageRotationDegrees())
             }
 
             val face = activeSession
@@ -211,20 +229,23 @@ internal class ArCoreFaceAnchorRenderer(
                 missingFaceFrameCount++
                 if (missingFaceFrameCount == FACE_LOSS_RESET_FRAME_COUNT) {
                     lipVisibilityGate.reset()
-                    lipContourRefiner.reset()
-                    lipFrameDiagnostics.reset()
-                    lastLipMetricsTimestampNs = 0L
+                    // Sync resets local geometry when its own buffered no-face frame is presented.
+                    if (!sameFrameSynchronizationEnabled) {
+                        lipContourRefiner.reset()
+                        lipFrameDiagnostics.reset()
+                        lastLipMetricsTimestampNs = 0L
+                    }
                 }
             }
             val pitchRadians = face?.let {
                 CanonicalFaceTransform.fromColumnMajor(viewModel)?.metricPitchRadians
             }
             val lipVisible = pitchRadians?.let(lipVisibilityGate::update) ?: false
-            val observation = if (sameFrameSynchronizationEnabled) {
-                synchronizedObservation
-            } else {
-                mediaPipeTracker?.latest()
+            if (sameFrameSynchronizationEnabled) {
+                drawSynchronizedPair(frame, face != null, screenPoint, lipVisible, pitchRadians)
+                return
             }
+            val observation = mediaPipeTracker?.latest()
             val hybridStatus = face?.let { trackedFace ->
                 observation?.let {
                     drawMediaPipeLipContour(
@@ -233,7 +254,7 @@ internal class ArCoreFaceAnchorRenderer(
                         lipVisible = lipVisible,
                         pitchRadians = pitchRadians,
                         observation = it,
-                        synchronizationWaitMs = synchronizationWaitMs,
+                        bufferedCameraAgeMs = 0f,
                     )
                 }
             }
@@ -242,7 +263,7 @@ internal class ArCoreFaceAnchorRenderer(
                 face != null,
                 screenPoint,
                 hybridStatus,
-                syncFrameOutcome,
+                SyncFrameOutcome.NOT_ENABLED,
             )
         } catch (error: CameraNotAvailableException) {
             Log.e(TAG, "ARCore camera became unavailable", error)
@@ -254,6 +275,97 @@ internal class ArCoreFaceAnchorRenderer(
             bindSession(null)
         }
     }
+
+    private fun drawSynchronizedPair(
+        frame: com.google.ar.core.Frame,
+        faceTracked: Boolean,
+        screenPoint: Pair<Float, Float>?,
+        lipVisible: Boolean,
+        pitchRadians: Float?,
+    ) {
+        val nowNs = SystemClock.elapsedRealtimeNanos()
+        val tracker = mediaPipeTracker
+        var promoted = false
+        pendingPair?.let { pending ->
+            val completion = tracker?.completionFor(pending.timestampNs)
+            if (completion != null && nowNs - pending.capturedAtNs <= MAX_PAIR_AGE_NS) {
+                check(completion.observation == null ||
+                    completion.observation.sensorTimestampNs == pending.timestampNs)
+                pairedCameraFrames.promote()
+                presentedPair = pending
+                presentedObservation = completion.observation
+                pendingPair = null
+                promoted = true
+                if (completion.observation == null || !pending.faceTracked) lipContourRefiner.reset()
+            } else if (nowNs - pending.capturedAtNs > MAX_PAIR_AGE_NS) {
+                // Late results can never attach to a newer camera image.
+                pendingPair = null
+            }
+        }
+        if (presentedPair?.let { nowNs - it.capturedAtNs > MAX_PAIR_AGE_NS } == true) {
+            presentedPair = null
+            presentedObservation = null
+            lipContourRefiner.reset()
+        }
+
+        if (pendingPair == null) {
+            val submittedTimestampNs = tracker?.tryDetect(
+                frame, imageRotationDegrees(), requireSameTimestamp = true,
+            )
+            if (submittedTimestampNs != null) {
+                check(submittedTimestampNs == frame.timestamp)
+                pairedCameraFrames.ensureSize(viewportWidth, viewportHeight)
+                pairedCameraFrames.bindPending()
+                try {
+                    // Bake this frame's rotation, mirror and crop into a viewport-sized GPU image.
+                    // The external camera texture may change on the next Session.update().
+                    drawCameraBackground(frame)
+                } finally {
+                    GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+                }
+                pendingPair = CameraPair(
+                    submittedTimestampNs, nowNs, faceTracked, screenPoint, lipVisible, pitchRadians,
+                )
+            }
+        }
+
+        val pair = presentedPair
+        if (pair == null) {
+            // Startup, tracking backend failure or expiry: live camera, never mismatched makeup.
+            drawCameraBackground(frame)
+            publishStatus(frame.timestamp, faceTracked, screenPoint, null, SyncFrameOutcome.MISSING)
+            return
+        }
+        val textureId = pairedCameraFrames.presentedTextureId
+        BUFFERED_CAMERA_UVS.copyInto(cameraUvCorners)
+        transformedCameraUvs.clear()
+        transformedCameraUvs.put(BUFFERED_CAMERA_UVS).position(0)
+        drawCameraQuad(pairedBackgroundProgram, GLES20.GL_TEXTURE_2D, textureId)
+        val hybridStatus = presentedObservation?.takeIf { pair.faceTracked }?.let {
+            drawMediaPipeLipContour(
+                cameraTimestampNs = pair.timestampNs,
+                face = null, // Never read a live ARCore mesh/pose for a buffered image.
+                lipVisible = pair.lipVisible,
+                pitchRadians = pair.pitchRadians,
+                observation = it,
+                bufferedCameraAgeMs = (frame.timestamp - pair.timestampNs).coerceAtLeast(0L) / 1_000_000f,
+                bufferedCameraTextureId = textureId,
+            )
+        }
+        publishStatus(
+            frame.timestamp, pair.faceTracked, pair.screenPoint, hybridStatus,
+            if (promoted) SyncFrameOutcome.INFERRED else SyncFrameOutcome.REUSED,
+        )
+    }
+
+    private data class CameraPair(
+        val timestampNs: Long,
+        val capturedAtNs: Long,
+        val faceTracked: Boolean,
+        val screenPoint: Pair<Float, Float>?,
+        val lipVisible: Boolean,
+        val pitchRadians: Float?,
+    )
 
     private fun drawCameraBackground(frame: com.google.ar.core.Frame) {
         transformedCameraUvs.position(0)
@@ -267,10 +379,15 @@ internal class ArCoreFaceAnchorRenderer(
         transformedCameraUvs.position(0)
         transformedCameraUvs.get(cameraUvCorners)
         transformedCameraUvs.position(0)
+        drawCameraQuad(backgroundProgram, GLES11Ext.GL_TEXTURE_EXTERNAL_OES, cameraTextureId)
+    }
+
+    private fun drawCameraQuad(backgroundProgram: Int, textureTarget: Int, textureId: Int) {
         GLES20.glDisable(GLES20.GL_DEPTH_TEST)
+        GLES20.glDisable(GLES20.GL_BLEND)
         GLES20.glUseProgram(backgroundProgram)
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, cameraTextureId)
+        GLES20.glBindTexture(textureTarget, textureId)
         GLES20.glUniform1i(GLES20.glGetUniformLocation(backgroundProgram, "uCamera"), 0)
 
         FULLSCREEN_QUAD.position(0)
@@ -349,11 +466,12 @@ internal class ArCoreFaceAnchorRenderer(
 
     private fun drawMediaPipeLipContour(
         cameraTimestampNs: Long,
-        face: AugmentedFace,
+        face: AugmentedFace?,
         lipVisible: Boolean,
         pitchRadians: Float?,
         observation: ArCoreMediaPipeLipTracker.Observation,
-        synchronizationWaitMs: Float,
+        bufferedCameraAgeMs: Float,
+        bufferedCameraTextureId: Int? = null,
     ): HybridStatus? {
         val faceObservation = observation.face
         val lips = faceObservation.lips
@@ -511,7 +629,7 @@ internal class ArCoreFaceAnchorRenderer(
             sourceIndex += LipMeshTessellator.VERTEX_COMPONENT_COUNT
         }
         tessellatedLipVertices.position(0)
-        if (lipVisible) drawLipMesh(lips.semantics, lips.mouthOpenness)
+        if (lipVisible) drawLipMesh(lips.semantics, lips.mouthOpenness, bufferedCameraTextureId)
 
         if (DRAW_DIAGNOSTIC_POINTS && lipVisible) drawPointCloud(
             vertices = mappedMediaPipeOuterLipVertices,
@@ -530,29 +648,32 @@ internal class ArCoreFaceAnchorRenderer(
             ringColor = DARK_YELLOW,
         )
 
-        val meshVertices = face.meshVertices
-        projectedArCoreLipVertices.clear()
-        var arCorePointCount = 0
-        fun appendArCoreLandmark(landmark: Int) {
-            if (meshVertices.limit() / 3 <= landmark) return
-            val projected = projectFaceVertex(meshVertices, landmark) ?: return
-            projectedArCoreLipVertices
-                .put(projected.first * 2f - 1f)
-                .put(1f - projected.second * 2f)
-                .put(0f)
-            arCorePointCount++
+        if (DRAW_DIAGNOSTIC_POINTS && face != null) {
+            val meshVertices = face.meshVertices
+            projectedArCoreLipVertices.clear()
+            var arCorePointCount = 0
+            fun appendArCoreLandmark(landmark: Int) {
+                if (meshVertices.limit() / 3 <= landmark) return
+                val projected = projectFaceVertex(meshVertices, landmark) ?: return
+                projectedArCoreLipVertices
+                    .put(projected.first * 2f - 1f)
+                    .put(1f - projected.second * 2f)
+                    .put(0f)
+                arCorePointCount++
+            }
+            LipLandmarkTopology.outerContour.forEach(::appendArCoreLandmark)
+            LipLandmarkTopology.innerContour.forEach(::appendArCoreLandmark)
+            projectedArCoreLipVertices.position(0)
+            if (DRAW_DIAGNOSTIC_POINTS && lipVisible) drawPointCloud(
+                vertices = projectedArCoreLipVertices,
+                pointCount = arCorePointCount,
+                transform = identity,
+                pointSize = 5f,
+                color = GREEN,
+                ringColor = DARK_GREEN,
+            )
+
         }
-        LipLandmarkTopology.outerContour.forEach(::appendArCoreLandmark)
-        LipLandmarkTopology.innerContour.forEach(::appendArCoreLandmark)
-        projectedArCoreLipVertices.position(0)
-        if (DRAW_DIAGNOSTIC_POINTS && lipVisible) drawPointCloud(
-            vertices = projectedArCoreLipVertices,
-            pointCount = arCorePointCount,
-            transform = identity,
-            pointSize = 5f,
-            color = GREEN,
-            ringColor = DARK_GREEN,
-        )
 
         val observationAgeNs = (cameraTimestampNs - faceObservation.sensorTimestampNs)
             .coerceAtLeast(0L)
@@ -565,7 +686,7 @@ internal class ArCoreFaceAnchorRenderer(
             inferenceDurationMs = observation.inferenceDurationMs,
             conversionDurationMs = observation.conversionDurationMs,
             cameraAgeMs = observationAgeNs / 1_000_000f,
-            synchronizationWaitMs = synchronizationWaitMs,
+            bufferedCameraAgeMs = bufferedCameraAgeMs,
             sameFrameSynchronized = sameFrameSynchronizationEnabled &&
                 faceObservation.sensorTimestampNs == cameraTimestampNs,
             anchorTranslationPixels = anchorTranslationPixels,
@@ -600,7 +721,9 @@ internal class ArCoreFaceAnchorRenderer(
     private fun drawLipMesh(
         semantics: LipSemanticState,
         mouthOpenness: Float,
+        bufferedCameraTextureId: Int? = null,
     ) {
+        val lipMeshProgram = if (bufferedCameraTextureId != null) pairedLipMeshProgram else this.lipMeshProgram
         GLES20.glDisable(GLES20.GL_DEPTH_TEST)
         GLES20.glDisable(GLES20.GL_BLEND)
         GLES20.glUseProgram(lipMeshProgram)
@@ -611,7 +734,10 @@ internal class ArCoreFaceAnchorRenderer(
             LipstickPigmentPalette.TRACKING_MAGENTA -> TRACKING_PIGMENT
         }
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, cameraTextureId)
+        GLES20.glBindTexture(
+            if (bufferedCameraTextureId != null) GLES20.GL_TEXTURE_2D else GLES11Ext.GL_TEXTURE_EXTERNAL_OES,
+            bufferedCameraTextureId ?: cameraTextureId,
+        )
         GLES20.glUniform1i(GLES20.glGetUniformLocation(lipMeshProgram, "uCamera"), 0)
         GLES20.glUniform2f(GLES20.glGetUniformLocation(lipMeshProgram, "uUvBottomLeft"), cameraUvCorners[0], cameraUvCorners[1])
         GLES20.glUniform2f(GLES20.glGetUniformLocation(lipMeshProgram, "uUvBottomRight"), cameraUvCorners[2], cameraUvCorners[3])
@@ -801,7 +927,7 @@ internal class ArCoreFaceAnchorRenderer(
                 status.inferenceDurationMs,
                 status.cameraAgeMs,
                 if (status.sameFrameSynchronized) {
-                    String.format(Locale.US, "SYNC frame · wait %.0f ms", status.synchronizationWaitMs)
+                    String.format(Locale.US, "SYNC pair · camera lag %.0f ms", status.bufferedCameraAgeMs)
                 } else {
                     "ASYNC 60 Hz"
                 },
@@ -821,7 +947,7 @@ internal class ArCoreFaceAnchorRenderer(
                 status.upperVerticalResponse,
             )
         } ?: if (sameFrameSynchronizationEnabled) {
-            "MediaPipe: SYNC timeout or no same-timestamp face"
+            "MediaPipe: SYNC pair pending, no face or expired"
         } else {
             "MediaPipe: waiting for asynchronous result"
         }
@@ -852,7 +978,7 @@ internal class ArCoreFaceAnchorRenderer(
         val inferenceDurationMs: Float,
         val conversionDurationMs: Float,
         val cameraAgeMs: Float,
-        val synchronizationWaitMs: Float,
+        val bufferedCameraAgeMs: Float,
         val sameFrameSynchronized: Boolean,
         val anchorTranslationPixels: Float,
         val anchorCorrectionAvailable: Boolean,
@@ -949,9 +1075,16 @@ internal class ArCoreFaceAnchorRenderer(
         const val NEAR_METERS = 0.05f
         const val FAR_METERS = 100f
         const val STATUS_INTERVAL_NS = 1_000_000_000L
-        const val SAME_FRAME_WAIT_TIMEOUT_MS = 100L
+        // A failure bound, not a smoothing coefficient. Never freeze an old face indefinitely.
+        const val MAX_PAIR_AGE_NS = 500_000_000L
         const val DRAW_DIAGNOSTIC_POINTS = false
         const val ILLUMINATION_SAMPLE_RADIUS_PIXELS = 14f
+
+        val BUFFERED_CAMERA_UVS = floatArrayOf(0f, 0f, 1f, 0f, 0f, 1f, 1f, 1f)
+
+        fun bufferedCameraShader(source: String): String = source
+            .replace("#extension GL_OES_EGL_image_external : require", "")
+            .replace("samplerExternalOES", "sampler2D")
 
         val MAGENTA = floatArrayOf(1f, 0.05f, 0.8f)
         val CYAN = floatArrayOf(0.05f, 1f, 0.95f)

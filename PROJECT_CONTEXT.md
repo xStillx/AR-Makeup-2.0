@@ -1,6 +1,6 @@
 # AR Makeup — актуальный контекст проекта
 
-Актуально на 2026-09-03. Этот файл хранит только текущее состояние и долгоживущие решения. История экспериментов и старые метрики доступны в Git.
+Актуально на 2026-09-04. Этот файл хранит только текущее состояние и долгоживущие решения. История экспериментов и старые метрики доступны в Git.
 
 Связанные документы:
 
@@ -27,19 +27,19 @@
 
 ## Репозиторий и текущий checkpoint
 
-- Проект: `C:\Users\arc11\AndroidStudioProjects\AR-Makeup-2.0`.
+- Проект: `C:\Users\User\AndroidStudioProjects\ARMakeup`.
 - Ветка: `codex/lipstick-material-v2`.
-- Базовый checkpoint перед same-frame candidate: `6e4c613` (`[Tracking] Checkpoint lower lip and anchor diagnostics`).
+- Принятый checkpoint: `fe8ffe2` (`[Tracking] Add same-frame synchronization checkpoint`).
 - Текущее устройство: Samsung SM-G990B.
 - Launcher: `ArCoreFaceAnchorActivity`; `MainActivity` сохраняет legacy CameraX/Filament/Vulkan rollback и не экспортируется.
-- Текущий candidate добавляет диагностический same-frame lockstep A/B; тесты выбора ARCore-точек, оставшиеся на другом ПК, в этом checkout отсутствуют.
+- Незакоммиченный candidate заменяет блокирующий Sync на неблокирующие GPU-пары. По команде пользователя Sync — основной режим по умолчанию; Async сохранён для ручного сравнения/отката.
 
 ## Активная архитектура
 
 1. ARCore `1.54.0` владеет фронтальной камерой, camera timeline и текущей глобальной позой лица.
 2. MediaPipe Tasks Vision `1.0.0` асинхронно получает latest-only `YUV_420_888` image той же ARCore session и выдаёт внешний/внутренний 2D-контур губ.
 3. `MediaPipeFaceObservationAdapter` формирует model-independent `FaceObservation`: sensor timestamp, source transform, нормализованные контуры, geometry confidence, mouth openness и analytic `LipSemanticState`.
-4. `TimestampedLipAnchorTransport` переносит MediaPipe-контур translation-only между фиксированным face-local mouth carrier на measurement timestamp и текущим ARCore render frame.
+4. В Async `TimestampedLipAnchorTransport` переносит контур translation-only между measurement/render timestamps. В Sync сохраняется GPU-пара camera image + exact MediaPipe observation, поэтому cross-frame correction равна нулю.
 5. `LipContourTemporalRefiner` обрабатывает только lip-local deformation относительно текущих mouth center/width. Global translation остаётся ответственностью ARCore transport.
 6. `LipMeshTessellator` строит динамическую mesh; OpenGL ES compositor семплирует ARCore camera texture внутри неё и применяет coverage, reconstructed normals, camera luminance/gradient и lip-local UV.
 7. `HeadDownLipVisibilityGate` скрывает помаду при устойчивом сильном наклоне головы вниз.
@@ -61,34 +61,35 @@ Rotation, front-camera mirror и `FILL_CENTER` обязаны быть общи�
 
 ## Текущий визуальный статус
 
-На SM-G990B открытие/закрытие рта после lower-band candidate улучшилось значительно. На сильных переходах измеренный отрыв `ref` от `corr` снизился примерно с `12–16 px` до `0.2–1.8 px`. Пользователь считает результат пригодным как checkpoint, но небольшое остаточное отставание нижней губы ещё заметно.
+Пользователь принял Sync из `fe8ffe2`: рот, медленные/быстрые движения головы и движения глаз — всё отлично, прежнего дрожания не видно. После перехода на неблокирующие GPU-пары пользователь сообщил «вроде всё норм», затем подтвердил нормальную работу сворачивания/возврата и потери/повторного обнаружения лица. Новый Sync выбран основным; малый lag нижней губы не является текущей визуальной претензией. Расширенный device/performance acceptance остаётся открытым.
 
 Покадровый trace нельзя держать включённым во время visual acceptance: форматирование большой строки на каждом render frame снижало MediaPipe примерно до `15 FPS`. После `adb shell setprop log.tag.LipFrameTrace S` наблюдались ARCore `58–59 FPS`, MediaPipe `24–27 FPS`, YUV `2–3 ms`, ML `22–32 ms`, age около `41 ms`.
 
 Материалы остаются рабочей базой, а не финальным продуктовым качеством. Нужны проверки при разном освещении, защита от shimmer/auto-exposure, BRDF/HDR/edge refinement и multi-device acceptance.
 
-## Активный A/B: same-frame synchronization
+## Текущий candidate: неблокирующие same-frame GPU-пары
 
-Для проверки гипотезы о конфликте частот добавлен переключатель `Async 60 Гц / Sync кадр`.
+Принятый `fe8ffe2` ожидал callback до 100 ms на GL thread. Его визуальный результат сохраняем как эталон, механизм ожидания заменяем:
 
-- `Async 60 Гц` сохраняет основной latest-only путь: камера и ARCore обновляются на display vsync, а более старый результат MediaPipe переносится на текущий кадр через timestamped anchor transport.
-- `Sync кадр` является диагностическим lockstep: после одного `Session.update()` renderer отправляет CPU image этого кадра в MediaPipe, ждёт callback до 100 ms и рисует губы только если sensor timestamp результата точно совпадает с timestamp видимого ARCore camera frame.
-- В lockstep cross-frame anchor correction обязан быть нулевым, но GL thread намеренно блокируется на YUV + inference. Ожидаемая цена — снижение camera/render cadence примерно до MediaPipe cadence и увеличение end-to-end latency.
-- Этот A/B проверяет причинность, но не является production-решением. Если jitter исчезнет, проблема находится в asynchronous rebase/transport seam; если сохранится — различие частот не является первопричиной и нужно продолжить разбор абсолютных ARCore/MediaPipe anchor samples.
+- `Session.update()` продолжает обновляться; tracker отдаёт completion через atomic reference без `await`/condition.
+- `PairedCameraFrameStore`: две viewport-sized RGBA8 GPU texture/FBO — одна pending, другая presented. Один inference in flight, без очереди и CPU readback.
+- CPU image допускается в Sync только при точном равенстве image/frame timestamp. До следующего update камера копируется GPU-проходом с rotation/mirror/crop; pitch/visibility/point сохраняются значениями, не live ARCore объектами.
+- Только exact completion продвигает пару. No-face/error completion даёт изображение без помады; отсутствие completion удерживает готовую пару.
+- Фон и материал читают одну сохранённую текстуру. В shader меняется только samplerExternalOES на sampler2D; BRDF/coverage/pigment, refiner и tessellator не изменены.
+- Повторы пары используют её прежние sensor/render timestamps. Live ARCore pose и локальный render transition не двигают геометрию на удерживаемом изображении.
+- Mode/session/tracker/pause/GL context и фактические rotation/viewport changes сбрасывают пары. Максимальное удержание 500 ms; затем live camera без помады. Это failure bound, не коэффициент фильтра.
+- Status `SYNC pair · camera lag N ms` — разница latest camera и presented timestamp. `age 0 ms` означает совпадение геометрии и изображения, не нулевой motion-to-photon. Sync counters — promoted/reused/no-ready-pair.
+- Цена: `2 × width × height × 4` байт GPU memory и один camera-copy pass на submit. Число уникальных пар ограничено MP throughput; свободный GL thread не гарантирует снижения задержки.
 
-В status overlay режим отображается как `ASYNC 60 Hz` либо `SYNC frame · wait N ms`; счётчики `inferred/reused/missing` показывают состав каждого контрольного окна.
+Сборка `:app:assembleDebug` прошла без unit-тестов, включая изменение стартового режима на Sync. После несовпадения debug-подписей пользователь самостоятельно переустановил APK. Runtime `SYNC pair` на SM-G990B подтверждён 2026-09-04: в просмотренных status-окнах 23–26 новых пар, no-ready-pair=0, MP 23–28 FPS, render 42–58 FPS, age=0 ms, anchor=0.0 px; camera lag преимущественно 41 ms, иногда 81 ms. В просмотренном runtime/crash log ошибок не найдено, trace выключен (`S`). Пользователь предварительно принял визуальный результат и подтвердил pause/resume и reacquisition. Старт по умолчанию, ручное переключение режимов и расширенные failure/performance checks ещё требуют проверки на устройстве. Зависимости, модели и лицензируемые assets не добавлены.
 
-Первый device run выявил сильное мерцание lockstep-маски. Причина была не в геометрии: после exact callback накопленный `requestRender()` часто получал повторный ARCore camera timestamp, dedupe не запускал второй inference, а renderer ошибочно рисовал такой повторный кадр без помады. Дополнительно callback первоначально будил renderer до сброса tracker `busy`.
-
-Исправленный вариант сначала полностью освобождает input/`busy`, затем публикует completion, а при повторном camera timestamp повторно использует только observation с точно тем же sensor timestamp. Контрольный run на SM-G990B показал `missing=0` во всех 1-секундных окнах: примерно `14–17` новых inference и `15–30` безопасных same-timestamp reuse, MediaPipe `16–18 FPS`, wait обычно `25–48 ms`, `age 0 ms`, anchor correction `0.0 px`.
-
-Предварительный пользовательский verdict на SM-G990B: после исправления мерцание исчезло, исходное дёрганье при движении головы и глаз визуально выглядит исправленным. Это поддерживает гипотезу об asynchronous cross-tracker rebase seam. Результат ещё нужно повторить на других устройствах; lockstep остаётся диагностикой, а не production-решением из-за блокировки GL thread и низкой inference cadence. Во время этого visual test тяжёлый `LipFrameTrace` был выключен (`S`); более лёгкий `LipJumpMetrics` оставался включён и логировал один раз на новый MediaPipe result.
+Успех Sync поддерживает temporal mismatch/rebase гипотезу, но не выделяет единственную причину: одновременно обнуляется anchor correction и меняется cadence. Прежние варианты опорных точек/live mesh не дали принятого результата; bypass уменьшал jitter ценой lag. Повторять эти эксперименты без новых данных не планируется.
 
 ## Открытые tracking-дефекты
 
 ### 1. Global jitter при движении головы и глаз
 
-В основном asynchronous transport мелкое дрожание воспроизводилось при yaw и при движении только глаз. Same-frame lockstep предварительно убрал его на SM-G990B, поэтому дефект локализован к разрыву timelines/rebase, но не закрыт для production async path и device matrix.
+В Async дрожание воспроизводилось при yaw и движении глаз. В принятом Sync оно отсутствует визуально. Точная доля шума позы и rebase не доказана; текущий gate — сохранить результат без GL wait и расширить device matrix.
 
 Диагностика локализовала дефект в global anchor/fusion path:
 
@@ -102,11 +103,11 @@ Rotation, front-camera mirror и `FILL_CENTER` обязаны быть общи�
 
 Фиксированная 3D-точка carrier уже не зависит от деформации губ. Наиболее вероятный источник — шум `face.centerPose` и cross-tracker rebase в выражении `MediaPipe center(M) + anchor(R) - anchor(M)` при поступлении нового sensor timestamp.
 
-Следующее исследование должно раздельно записать абсолютные ARCore anchor samples на `M` и `R`, residual `MediaPipe center(M)-anchor(M)` и момент смены measurement. Затем нужен controlled A/B текущего transport против continuity-preserving global owner/bypass. Нельзя начинать с общего low-pass или случайного коэффициента: решение обязано сохранить преимущество ARCore при быстром движении.
+Следующий шаг — расширенная проверка основного exact-pair Sync, без изменения anchor/filter coefficients. Стартовое значение renderer и checkedButton интерфейса установлены в Sync; Async включается вручную.
 
 ### 2. Малый residual lag нижней губы
 
-Основное отставание устранено переносом shared lower-band center. Остаток нужно искать в MediaPipe delivery cadence и sensor-to-visible-camera age, не меняя уже принятую верхнюю губу и не смешивая этот эксперимент с ARCore jitter.
+Основное отставание устранено переносом shared lower-band center; в принятом Sync пользователь доволен ртом. Локальные фильтры не менять профилактически. Delivery/presentation cadence исследовать только при воспроизводимой регрессии.
 
 ## Действующие архитектурные решения
 
@@ -120,9 +121,9 @@ Rotation, front-camera mirror и `FILL_CENTER` обязаны быть общи�
 
 ## Ближайший порядок работы
 
-1. Повторить same-frame verdict на других устройствах: покой, глаза, медленный yaw, быстрый motion, движение телефона и reacquisition.
-2. Если результат подтверждается, заменить блокирующий lockstep на production-safe continuity-preserving global owner/rebase без ухудшения fast-motion attachment.
-3. Вернуться к малому residual lag нижней губы и проверить delivery/camera age.
+1. Проверить старт с Sync по умолчанию и ручное переключение Async/Sync на устройстве; runtime exact pairing уже подтверждён, pause/resume и reacquisition приняты пользователем.
+2. Оценить latency, GPU memory/copy cost и thermal основного Sync. Локальные фильтры и материал без конкретной регрессии не менять.
+3. Расширить acceptance на другие устройства и движение телефона. Не считать render FPS числом уникальных camera/MP пар.
 4. Закончить model-independent `FullFaceRenderState` для общего pose, локальных областей, confidence, visibility и occlusion.
 5. Добавить semantic masks для lips/mouth-teeth, затем глаз/век/кожи; не добавлять модель до license gate.
 6. Перенести принятый hybrid/material state в production GPU/Vulkan path, сохранив OpenGL launcher как rollback до visual parity.

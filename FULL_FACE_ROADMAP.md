@@ -1,6 +1,6 @@
 # AR Makeup — план развития 2D hybrid full-face
 
-Актуально на 2026-09-03. Это forward-only roadmap: выполненная и отменённая история хранится в Git. Текущее состояние и измерения находятся в `PROJECT_CONTEXT.md`.
+Актуально на 2026-09-04. Это forward-only roadmap: выполненная и отменённая история хранится в Git. Текущее состояние и измерения находятся в `PROJECT_CONTEXT.md`.
 
 ## Целевое состояние
 
@@ -27,40 +27,24 @@ ARCore, MediaPipe и конкретный renderer остаются заменя
 
 ## Now — принять tracking губ
 
-### T1. Устранить global anchor/fusion jitter
+### T1. Сохранить принятый Sync без блокировки GL
 
-Проблема: маска мелко дрожит при yaw головы и при движении только глаз. Local lip shape остаётся стабильной; основной шум появляется в ARCore/cross-tracker global correction.
+Пользователь принял `fe8ffe2`, затем предварительно подтвердил визуальный результат неблокирующего GPU-pair Sync и нормальную работу pause/resume и reacquisition. Sync выбран основным по умолчанию; Async оставлен для ручного сравнения. Прежние anchor/live-mesh эксперименты не повторяем без новых данных.
 
-Действия:
+1. Проверить старт с Sync по умолчанию, ручное Async/Sync, error/fallback и смену поверхности; exact pairing и обычные pause/resume/reacquisition уже проверены.
+2. Расширить visual acceptance материалов и краёв после GPU camera-copy на разные условия освещения.
+3. Измерить частоту новых пар, задержку изображения, GPU cost и thermal. Свободный GL thread не означает 60 уникальных MP кадров.
+4. Расширить device matrix, освещение, движение телефона и dropout/reacquisition.
 
-1. Добавить в короткий controlled trace абсолютные `anchor(M)`, `anchor(R)`, `MediaPipe center(M)` и residual между двумя tracker-сигналами.
-2. Проверить, возникает ли скачок в `face.centerPose`, при смене measurement timestamp или в обоих местах.
-3. Провести runtime A/B текущего timestamped transport против continuity-preserving global owner и диагностического anchor bypass.
-4. Выполнить добавленный same-frame lockstep A/B: точное совпадение camera/ARCore/MediaPipe sensor timestamp ценой блокировки renderer. Использовать его только для проверки причинности frequency/rebase гипотезы.
-5. Не использовать общий low-pass как первое решение; fast-motion attachment ARCore должен сохраниться.
-6. Проверить статичное лицо, движение глаз, медленный yaw, быстрый поворот, движение телефона и dropout/reacquisition.
+Gate: прежний jitter не возвращается; рот и быстрые движения не хуже checkpoint; фон и макияж относятся к одному sensor timestamp; локальные фильтры не меняются.
 
-Статус A/B на SM-G990B: после устранения blank-frame flicker пользователь предварительно не видит прежнего jitter; exact окна имеют `missing=0`, `age 0 ms`, `anchor 0.0 px`. До production-решения результат нужно повторить на других устройствах и заменить блокирующий lockstep на неблокирующий continuity-preserving rebase.
+### T2. Проверить latency без профилактического изменения губ
 
-Gate:
+В принятом Sync пользователь не отмечает проблем открытия/закрытия рта. Residual lag исследовать только при воспроизводимой регрессии нового candidate.
 
-- jitter визуально не заметен в покое и при движении глаз;
-- медленный yaw не даёт дрожания или ступеней;
-- быстрый motion не возвращает прежний слёт/lag;
-- тесселяция и local expression geometry не меняются в этом A/B.
-
-### T2. Убрать остаточный lag нижней губы
-
-Основной lag shared lower-band center уже снижен до малозаметного. Следующий поиск ограничен delivery cadence и sensor-to-visible-camera age.
-
-Действия:
-
-1. Измерить residual только с выключенным тяжёлым `LipFrameTrace` либо с непертурбирующей записью.
-2. Сопоставить camera timestamp, sensor timestamp, callback delivery и первый render с новым contour.
-3. Не менять принятую верхнюю губу и не смешивать candidate с T1.
-4. Проверить обычное и быстрое открытие/закрытие, речь и улыбку.
-
-Gate: нижняя губа совпадает с camera image без заметного запаздывания, overshoot или нового резкого щелчка.
+- Разделять alignment age и задержку всего предъявленного изображения.
+- Проверять речь, улыбку и быстрое открытие/закрытие с выключенным тяжёлым trace.
+- При регрессии сначала проверить delivery/presentation cadence, не подбирать коэффициенты губ вслепую.
 
 ## Next — общий full-face state
 

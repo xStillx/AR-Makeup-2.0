@@ -16,11 +16,8 @@ import com.google.mediapipe.tasks.vision.facelandmarker.FaceLandmarkerResult
 import java.nio.ByteBuffer
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
-import java.util.concurrent.locks.ReentrantLock
-import kotlin.concurrent.withLock
 
 /**
  * ARCore-camera MediaPipe shadow backend.
@@ -37,8 +34,7 @@ internal class ArCoreMediaPipeLipTracker(
     private val lock = Any()
     private val busy = AtomicBoolean(false)
     private val latestObservation = AtomicReference<Observation?>()
-    private val completionLock = ReentrantLock()
-    private val completionChanged = completionLock.newCondition()
+    private val latestCompletion = AtomicReference<Completion?>()
     private val sensorTimestampGate = MonotonicSensorTimestampGate()
     private val conversionExecutor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "arcore-mediapipe-conversion")
@@ -60,7 +56,6 @@ internal class ArCoreMediaPipeLipTracker(
     private var smoothedFps = 0f
     @Volatile
     private var closed = false
-    private var latestCompletion: Completion? = null
 
     fun initialize() {
         synchronized(lock) {
@@ -74,7 +69,7 @@ internal class ArCoreMediaPipeLipTracker(
         }
     }
 
-    fun tryDetect(frame: Frame, rotationDegrees: Int): Long? {
+    fun tryDetect(frame: Frame, rotationDegrees: Int, requireSameTimestamp: Boolean = false): Long? {
         val activeLandmarker = synchronized(lock) {
             if (closed) return null
             landmarker
@@ -91,7 +86,9 @@ internal class ArCoreMediaPipeLipTracker(
             onError("ARCore camera image acquisition failed: ${error.message}")
             return null
         }
-        if (!sensorTimestampGate.accept(cameraImage.timestamp)) {
+        if ((requireSameTimestamp && cameraImage.timestamp != frame.timestamp) ||
+            !sensorTimestampGate.accept(cameraImage.timestamp)
+        ) {
             cameraImage.close()
             busy.set(false)
             return null
@@ -115,28 +112,9 @@ internal class ArCoreMediaPipeLipTracker(
         }
     }
 
-    /**
-     * Waits for the MediaPipe callback belonging to one camera sensor timestamp.
-     *
-     * This is intentionally used only by the diagnostic same-frame lockstep mode. The regular
-     * realtime path remains non-blocking and latest-only.
-     */
-    fun await(timestampNs: Long, timeoutMs: Long): Observation? {
-        if (timestampNs <= 0L || timeoutMs <= 0L) return null
-        var remainingNs = TimeUnit.MILLISECONDS.toNanos(timeoutMs)
-        return completionLock.withLock {
-            while (!closed) {
-                val completion = latestCompletion
-                if (completion != null && completion.sensorTimestampNs >= timestampNs) {
-                    return@withLock completion.observation.takeIf {
-                        completion.sensorTimestampNs == timestampNs
-                    }
-                }
-                if (remainingNs <= 0L) return@withLock null
-                remainingNs = completionChanged.awaitNanos(remainingNs)
-            }
-            null
-        }
+    /** Null means pending; a completion with null observation means a finished no-face/error frame. */
+    fun completionFor(timestampNs: Long): Completion? = latestCompletion.get()?.takeIf {
+        it.sensorTimestampNs == timestampNs
     }
 
     private fun prepareAndSubmit(
@@ -231,7 +209,7 @@ internal class ArCoreMediaPipeLipTracker(
         inputToClose?.close()
         busy.set(false)
         latestObservation.set(null)
-        completionLock.withLock { completionChanged.signalAll() }
+        latestCompletion.set(null)
     }
 
     private fun createLandmarker(delegate: Delegate): FaceLandmarker {
@@ -327,20 +305,17 @@ internal class ArCoreMediaPipeLipTracker(
             latestObservation.set(observation)
         }
         releaseActiveInput(inputImage)
-        // Wake the lockstep renderer only after busy=false. GLSurfaceView may already have a
-        // coalesced requestRender waiting; publishing first lets that render race ahead, fail to
-        // submit its camera image, and present a frame without makeup.
+        // Publish a fully released result. The GL thread polls this without waiting for inference.
         publishCompletion(sensorTimestampNs, observation)
     }
 
     private fun publishCompletion(sensorTimestampNs: Long, observation: Observation?) {
         if (sensorTimestampNs <= 0L) return
-        completionLock.withLock {
-            val current = latestCompletion
+        if (closed) return
+        latestCompletion.updateAndGet { current ->
             if (current == null || sensorTimestampNs >= current.sensorTimestampNs) {
-                latestCompletion = Completion(sensorTimestampNs, observation)
-            }
-            completionChanged.signalAll()
+                Completion(sensorTimestampNs, observation)
+            } else current
         }
     }
 
@@ -401,7 +376,7 @@ internal class ArCoreMediaPipeLipTracker(
         val rotationDegrees: Int,
     )
 
-    private data class Completion(
+    data class Completion(
         val sensorTimestampNs: Long,
         val observation: Observation?,
     )

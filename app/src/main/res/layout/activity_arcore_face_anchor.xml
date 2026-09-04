@@ -221,7 +221,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="6dp"
-                app:checkedButton="@id/timeline_async"
+                app:checkedButton="@id/timeline_same_frame"
                 app:selectionRequired="true"
                 app:singleSelection="true">
 

@@ -114,6 +114,7 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
 
     override fun onPause() {
         resumed = false
+        surfaceView.queueEvent { renderer.invalidateSameFrameState() }
         surfaceView.onPause()
         session?.pause()
         stopRenderScheduler()
