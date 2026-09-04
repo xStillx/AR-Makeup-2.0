@@ -7,8 +7,31 @@
 - `AGENTS.md` — обязательные правила работы в репозитории;
 - `FULL_FACE_ROADMAP.md` — только будущий план;
 - `CHAT_HANDOFF.md` — короткая оперативная передача контекста;
+- `IOS_REFERENCE_CONTEXT.md` — исследование iOS-reference, различия материалов/масок и новые требования;
 - `LICENSE_COMPLIANCE.md` — единый реестр лицензий и release gates;
 - `app/src/main/assets/MODEL_LICENSES.md` — происхождение и hash bundled ML-модели.
+
+## Текущая задача: изучение iOS и фиксация требований — 2026-09-04
+
+Полный разбор предоставленного iOS-reference сохранён в [IOS_REFERENCE_CONTEXT.md](IOS_REFERENCE_CONTEXT.md): карта всех 12 Swift-компонентов, камера/трекинг, matte/satin/gloss, каталог, цветовая цепочка, маски/blur, смыкание, fallback, румяна, build/assets и отдельный неиспользуемый ML-прототип.
+
+Последняя оценка пользователя: после linear compositing сатин стал чуть ближе к iOS, но результат всё ещё не тот и не принят. Сравнивается Dior Rouge Dior Satin 999 / #B8202D / high / creamy; iOS-скриншота нет.
+
+Требования следующей реализации:
+
+- Достичь сходства сатина, опираясь на полный путь камеры/материала, без подбора яркости вслепую.
+- Добавить небольшое размытие краёв помады, сохраняя фактуру и плотность внутри губ, без мерцания и широкого ореола.
+- Исправить незакрашенную полоску между верхней и нижней губой; реальное отверстие рта и зубы должны оставаться без помады.
+
+**Исследование завершено; пользователь поручил закоммитить весь текущий результат.** Checkpoint включает перенос сатина с linear compositing и документацию iOS, но не означает visual acceptance. Мягкий край и исправление полоски ещё не реализованы; код не менять до следующей задачи. База перед этим checkpoint — 2042ee6, ветка codex/lipstick-material-v2; принятое поведение трекинга основано на ca80814. Актуальный hash checkpoint смотреть в git log. Повторная сборка/установка и unit-тесты для фиксации не выполняются; push не запрошен.
+
+Ключевые уточнения исследования:
+
+- Основной iOS материал — MetalLipColorCompositor, а не только LipMeshRenderer. Цвет берётся из ориентированного BGRA-входа MediaPipe с длинной стороной 512, затем материал растеризуется в canonical 224×112. Android сейчас семплирует GPU camera texels другого масштаба: одинаковые радиусы 5/12/8 ещё не доказывают одинаковый рельеф/блик.
+- SceneKit multiply 0.90–1.0 относится **только к CPU fallback**. При доступном Metal Coordinator передаёт factor=1; прежнее объяснение разницы отсутствующим общим затемнением уточнено. ARKit ambient всё же участвует в Metal detail adaptation. Android ARCore light estimation остаётся DISABLED.
+- iOS размывает alpha двумя 13-tap GPU-проходами, сохраняя RGB, и ограничивает её внешней маской и aperture gate. Для непрерывности внутреннего края используются плотная alpha на стороне губы, aperture-only переход, восстановление цветовых texels и 18 fill triangles SceneKit.
+- Android снижает coverage к нулю у внутреннего края каждой губы и дополнительно применяет innerGuard; это кандидат причины полоски, пока без доказанной локализации по снимку. Нельзя исправлять её безусловным закрашиванием рта.
+- iOS live pose/expression prediction не переносить в принятый exact-pair Android Sync. Новые модели/обучение остаются вне scope; прежние отклонённые contour/anchor эксперименты не возобновлять автоматически.
 
 ## Цель и обязательные требования
 
@@ -30,7 +53,7 @@
 
 - Проект: `C:\Users\User\AndroidStudioProjects\ARMakeup`.
 - Ветка: `codex/lipstick-material-v2`.
-- Базовый checkpoint кода приложения: `ca80814` (`[Tracking] Make non-blocking same-frame Sync the default`).
+- Принятый базовый checkpoint трекинга и материалов до переноса сатина: `ca80814` (`[Tracking] Make non-blocking same-frame Sync the default`).
 - Текущее устройство: Samsung SM-G990B.
 - Launcher: `ArCoreFaceAnchorActivity`; `MainActivity` сохраняет legacy CameraX/Filament/Vulkan rollback и не экспортируется.
 - В ca80814 блокирующий Sync заменён на неблокирующие GPU-пары. По команде пользователя Sync — основной режим по умолчанию; Async сохранён для ручного сравнения/отката.
@@ -54,7 +77,7 @@ Rotation, front-camera mirror и `FILL_CENTER` обязаны быть общи�
 - Timestamped ARCore translation transport и фиксированный face-local carrier вместо expression-sensitive mouth vertices.
 - Динамическая outer/inner lip mesh с защитой рта/зубов и мягкими границами.
 - Material foundation для matte, satin и gloss; рабочая база принята, но финальная optical/HDR/lighting калибровка не завершена.
-- Текущие pigments: matte/gloss `#9E2620`, satin `#B8202D`.
+- Текущие pigments: matte/gloss `#9E2620`, satin `#B8202D`. Сатин переносится из актуального iOS-эталона; визуальное принятие Android-варианта ещё требуется.
 - Верхняя губа визуально принята при открытии/закрытии рта.
 - Debug `LipFrameTrace` разделяет MediaPipe-only, ARCore-corrected, local-refined и tessellated координаты.
 - `MonotonicSensorTimestampGate` устраняет повторный inference одного camera image: same-sensor изменения снижены с `140` до `0`.
@@ -95,7 +118,7 @@ Rotation, front-camera mirror и `FILL_CENTER` обязаны быть общи�
 - Общее ослабление/выключение помады при сжатии отклонено как замена точной границе. Принятый HeadDownLipVisibilityGate к этому эксперименту не относится и сохранён.
 - Scores существующего Blendshape V2 реагировали на трубочку и смыкание, но не выделили ключевой сильный подворот. Они выводятся из landmarks, а не независимо из пикселей; оснований деформировать контур по ним не получено. Источник: https://storage.googleapis.com/mediapipe-assets/Model%20Card%20Blendshape%20V2.pdf .
 - Финальная проверка на SM-G990B: в семи снимках exact CPU RGBA input + GPU background timestamps совпали; наше display mapping и независимое ARCore IMAGE_NORMALIZED -> VIEW_NORMALIZED различались менее чем на 0.000220 px. Вход 640x480, rotation=270. При сильном подвороте сырые MediaPipe points уже охватывают кожу на CPU-изображении до display mapping, refiner, tessellation и материала. Дополнительное смещение при отображении не обнаружено в проверенных позах; это не гарантия для всех устройств/ориентаций.
-- По команде пользователя экспериментальный GPU-проход, переключатель, захват по громкости вниз, CPU/GPU readback-диагностика, blendshape output/контракт и tools/diagnostics удалены. Код приложения снова соответствует ca80814; Sync, материалы, topology и принятые фильтры сохранены. Blendshape output выключен, новых моделей/assets нет.
+- По команде пользователя экспериментальный GPU-проход, переключатель, захват по громкости вниз, CPU/GPU readback-диагностика, blendshape output/контракт и tools/diagnostics удалены. После очистки код приложения соответствовал ca80814; Sync, материалы, topology и принятые фильтры сохранены. Blendshape output выключен, новых моделей/assets нет.
 - Локальные снимки и результаты сохранены только в gitignored captures/lip-boundary (32 снимка; итог CPU mapping — cpu-mapping/report.json и series.jpg). В Git фотографии не добавлять. Не повторять отклонённые варианты и не подбирать коэффициенты без новых данных и задачи пользователя.
 
 ## Открытые tracking-дефекты
@@ -134,6 +157,7 @@ Rotation, front-camera mirror и `FILL_CENTER` обязаны быть общи�
 
 ## Ближайший порядок работы
 
+0. Текущий приоритет — изучение iOS и документация, затем по новой команде сатин/мягкие края/полоска согласно IOS_REFERENCE_CONTEXT.md. Перечисленные ниже tracking/device задачи сейчас не выполняются.
 1. Проверить ручное переключение Async/Sync на устройстве; старт с Sync по умолчанию подтверждён в диагностических сборках; runtime exact pairing уже подтверждён, pause/resume и reacquisition приняты пользователем.
 2. Оценить latency, GPU memory/copy cost и thermal основного Sync. Локальные фильтры и материал без конкретной регрессии не менять.
 3. Расширить acceptance на другие устройства и движение телефона. Не считать render FPS числом уникальных camera/MP пар.
@@ -170,3 +194,26 @@ Rotation, front-camera mirror и `FILL_CENTER` обязаны быть общи�
 - Покадровый trace включать только на короткий controlled capture и выключать перед visual acceptance.
 - Unit-тесты запускать только по явной команде пользователя; обычный debug build/device check разрешён.
 - Не коммитить без явной команды пользователя.
+
+## Активная задача: перенос принятого iOS-сатина — 2026-09-04
+
+- Пользователь предоставил C:\Users\User\Desktop\ios makeup\virtual-makeup-main как эталон; iOS-проект только прочитан. Git-метаданных в этой копии нет. Проверены MetalLipColorCompositor.swift (основной путь), LipTextureRenderer.swift (CPU fallback), LipMeshRenderer.swift (SceneKit), LipstickTypes.swift и продуктовые presets ContentView.swift. Матовая, сатиновая и глянцевая формулы отличаются от старого Android-переноса; в текущем scope обновляется сатин.
+- Выбран соответствующий текущему Android-оттенку iOS Dior Rouge Dior Satin: B8202D, high density, creamy. Не добавлены каталог, бренды/текстуры в UI или новые модели. Матовая и глянцевая отрисовка сохраняют прежнее поведение.
+- IosSatinLipMaterial переносит Metal sRGB-формулу: выбранный RGB без прежнего смешивания pigmentStrength=0.42/экспозиционного затемнения; раздельная передача теневого/светлого рельефа, detailStrength=1.7*0.92; реальные отражения из камеры с highlightStrength=1.16*1.32, maximum=0.48, concentration=1.15; tooth/seam/corner guards и компенсация низкочастотного цвета при coverage=0.92, opacity=0.99. Искусственные дуги/круги прежнего сатина больше не используются.
+- 40 reference UV knots взяты из iOS CanonicalLipGeometry.swift, нормализованы с его padding и интерполируются существующим tessellator один раз для атрибута материала. Геометрические координаты, topology, temporal filters и принятая coverage mask не меняются. iOS маска/feather compute и SceneKit carrier не переносятся.
+- Радиусы 5 px для рельефа и 12x8 px для отражения задаются в исходных GPU camera texels; inverse camera-UV transform учитывает rotation/mirror/crop. Эти два вектора сохраняются с exact Sync-парой. CPU readback, новые FBO и новый inference не добавлены; материал остаётся одним GPU draw, 13 camera samples внутри сатиновой формулы плюс существующий coverage stage.
+- Ограничения паритета: ARKit ambientIntensity не имеет подключённого эквивалента в этом Android path; используется нейтральный fallback=1 как в iOS при отсутствии оценки. Уточнено полным исследованием: дополнительное SceneKit затемнение 0.90–1.0 применяется только к CPU fallback, при доступном Metal множитель нейтрален. Цветопередача камер, разрешения, SceneKit color management/фильтрация и разные mesh/mask могут давать визуальные различия. Не объявлять полное совпадение до device A/B.
+- Открытие для material guards вычисляется по существующему inner contour в display pixels относительно ширины рта с iOS smoothstep 0.018–0.055. ARKit closure veto не переносится; трекинг и видимость всей помады не меняются.
+- Источник MetalLipColorCompositor.swift SHA-256 D07A655DFD47417658C5564FA64E900071224B4B83BBD9059E4F7CF185053D05; LipstickTypes.swift A5D5DE84184914DF0055107783BB2B08F3723BEF28E870A280AE226FDA012E4B. Перенос основан на предоставленном пользователем локальном коде, не на стороннем скачанном asset.
+- Обычный :app:assembleDebug прошёл, unit-тесты не добавлялись/не запускались. Финальная сборка после удаления старой ветки сатина установлена на SM-G990B. Первый запуск вернул CAMERA_DISABLED; после разблокировки пользователем камера восстановилась. Снимок экрана подтвердил выбранный SATIN, видимую помаду и FACE TRACKING. В просмотренном runtime-окне render 48–59 FPS, MP 24–29 FPS, age=0, anchor=0, camera lag 41–81 ms; ошибок GL/шейдера/камеры после перезапуска не найдено. Это smoke-проверка, не benchmark и не подтверждение визуального паритета. У пользователя запрошена оценка оттенка, плотности, рельефа и блика относительно iOS. LipFrameTrace=S. Коммит/push в этой задаче не выполнялись.
+
+
+### Проверка избыточной яркости сатина
+
+Пользователь сообщил, что Android-сатин слишком яркий, и подтвердил сравнение с тем же B8202D; скриншот iOS предоставить не может. В iOS-копии сохранённых изображений-эталонов нет. Причина субъективной разницы пока не доказана; первый перенос не принят.
+
+Обнаружено отличие финального композитинга: iOS формирует sRGB-tagged CGImage для SceneKit, Android смешивал correctiveColor и camera RGB непосредственно в sRGB. В IosSatinLipMaterial добавлены отдельные кусочные sRGB transfer functions (12.92 / 0.04045 / 2.4 / 0.0031308), финальный alpha blend выполняется в linear light с обратным кодированием. Формула самого Metal-пигмента остаётся в исходном sRGB; B8202D, плотность 0.92, opacity 0.99, блики и geometry/coverage не менялись. Это исправление этапа переноса, не произвольное затемнение и не доказанное решение жалобы. Linear blending может повышать светлоту отдельных каналов; нужно оценить насыщенность/общий вид на устройстве, не обещать уменьшение численной яркости.
+
+Оценка ARCore lighting в текущей Activity явно DISABLED. Полное исследование уточнило: iOS multiply 0.90–1.0 используется только в CPU fallback; в основном Metal-пути SceneKit factor=1. Открытым остаётся соответствие ambient-dependent detail и цветовой цепочки, а не обязательный перенос ×0.90. Подставлять затемнение без измерений или выдавать camera luma за lux нельзя.
+
+Debug собран без unit-тестов, версия с linear compositing установлена и запущена на SM-G990B. В просмотренном логе нет ошибок шейдера/камеры; на момент проверки SEARCHING FOR FACE. Последующая оценка пользователя: «стал чуть ближе, но всё ещё не тот результат». Визуальный результат не принят; дальнейший подбор остановлен для полного исследования iOS (см. текущую задачу в начале файла). На этом этапе переноса коммит/push ещё не выполнялись; последующая команда на checkpoint указана в начале файла.

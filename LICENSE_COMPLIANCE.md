@@ -104,3 +104,8 @@
 - Google Play Data Safety: https://developer.android.com/privacy-and-security/declare-data-use
 - Android SDK Terms: https://developer.android.com/studio/terms
 - JUnit license: https://github.com/junit-team/junit4/blob/main/LICENSE-junit.txt
+
+
+## Происхождение переноса сатина — 2026-09-04
+
+IosSatinLipMaterial.kt адаптирует формулы MetalLipColorCompositor.swift, параметры LipstickTypes.swift и нормализованные UV-константы CanonicalLipGeometry.swift из предоставленного пользователем локального iOS-проекта virtual-makeup-main. Файлы iOS не изменены. Новые модели, datasets, texture/mesh assets, SDK и зависимости не добавлены; заимствованные данные здесь — константы координат материала в коде, не новая лицевая mesh. Hash исходника и точный локальный путь зафиксированы в PROJECT_CONTEXT.md. Перед release происхождение/права на этот код и UV-константы входят в существующий аудит собственного кода; перенос не означает отдельного завершённого юридического release gate.
