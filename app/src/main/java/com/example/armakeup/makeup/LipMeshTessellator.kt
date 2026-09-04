@@ -9,12 +9,13 @@ import kotlin.math.sqrt
 /**
  * Converts the paired MediaPipe lip contours into two feathered triangle strips.
  *
- * Each lip is represented by several rings between its outer and inner contour. Coverage grows
- * toward the lip core and returns to zero at the mouth boundary, so the oral cavity and teeth are
- * never part of the rendered mesh.
+ * Each lip is represented by several rings between its outer and inner contour. The mesh ends
+ * at the inner contour, excluding the mouth aperture independently of coverage. Inner feathering
+ * is optional: the ARCore renderer keeps pigment on the lip side of that boundary to avoid a seam.
  */
 internal class LipMeshTessellator(
     private val subdivisionsPerSegment: Int = DEFAULT_SUBDIVISIONS_PER_SEGMENT,
+    private val featherInnerBoundary: Boolean = true,
 ) {
     init {
         require(subdivisionsPerSegment > 0)
@@ -226,7 +227,14 @@ internal class LipMeshTessellator(
         val edge = profile.edgeCoverage / MAX_ALPHA
         val mid = 1f - (1f - edge) * (1f - profile.midCoverage / MAX_ALPHA)
         val core = profile.effectiveCoreCoverage
-        return floatArrayOf(0f, edge, mid, core, core, mid, edge, 0f)
+        // A symmetric fade exposes the natural lip colour on both sides of the mouth seam.
+        // Preserve the outer feather, but carry core coverage to the inner contour when requested.
+        // This changes coverage only: positions, normals, UVs and the open-mouth topology stay put.
+        return if (featherInnerBoundary) {
+            floatArrayOf(0f, edge, mid, core, core, mid, edge, 0f)
+        } else {
+            floatArrayOf(0f, edge, mid, core, core, core, core, core)
+        }
     }
 
     private fun buildIndices(): ShortArray {

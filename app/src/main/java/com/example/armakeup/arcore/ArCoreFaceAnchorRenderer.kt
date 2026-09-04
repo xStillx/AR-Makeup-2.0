@@ -78,7 +78,7 @@ internal class ArCoreFaceAnchorRenderer(
     private val anchorTransport = TimestampedLipAnchorTransport()
     private val lipVisibilityGate = HeadDownLipVisibilityGate()
     private val lipContourRefiner = LipContourTemporalRefiner()
-    private val lipTessellator = LipMeshTessellator()
+    private val lipTessellator = LipMeshTessellator(featherInnerBoundary = false)
     private val satinUvs = directFloatBuffer(IosSatinLipMaterial.textureCoordinates(lipTessellator))
     private val satinSourceTexels = FloatArray(4)
     private val lipFrameDiagnostics = LipFrameDiagnostics()
@@ -652,7 +652,7 @@ internal class ArCoreFaceAnchorRenderer(
             sourceIndex += LipMeshTessellator.VERTEX_COMPONENT_COUNT
         }
         tessellatedLipVertices.position(0)
-        if (lipVisible) drawLipMesh(lips.semantics, lips.mouthOpenness, bufferedCameraTextureId)
+        if (lipVisible) drawLipMesh(lips.semantics, bufferedCameraTextureId)
 
         if (DRAW_DIAGNOSTIC_POINTS && lipVisible) drawPointCloud(
             vertices = mappedMediaPipeOuterLipVertices,
@@ -743,7 +743,6 @@ internal class ArCoreFaceAnchorRenderer(
 
     private fun drawLipMesh(
         semantics: LipSemanticState,
-        mouthOpenness: Float,
         bufferedCameraTextureId: Int? = null,
     ) {
         val lipMeshProgram = if (bufferedCameraTextureId != null) pairedLipMeshProgram else this.lipMeshProgram
@@ -783,16 +782,8 @@ internal class ArCoreFaceAnchorRenderer(
             semantics.lipConfidence,
         )
         GLES20.glUniform1f(
-            GLES20.glGetUniformLocation(lipMeshProgram, "uMouthExclusionConfidence"),
-            semantics.mouthTeethExclusionConfidence,
-        )
-        GLES20.glUniform1f(
             GLES20.glGetUniformLocation(lipMeshProgram, "uSemanticEdgeStrength"),
             semantics.edgeRefinementStrength,
-        )
-        GLES20.glUniform1f(
-            GLES20.glGetUniformLocation(lipMeshProgram, "uMouthOpenness"),
-            mouthOpenness,
         )
         GLES20.glUniform1f(
             GLES20.glGetUniformLocation(lipMeshProgram, "uFinishMode"),
@@ -1230,9 +1221,7 @@ internal class ArCoreFaceAnchorRenderer(
             uniform float uSatinApertureVisibility;
             uniform vec2 uIlluminationSampleStep;
             uniform float uSemanticConfidence;
-            uniform float uMouthExclusionConfidence;
             uniform float uSemanticEdgeStrength;
-            uniform float uMouthOpenness;
             varying vec2 vDisplayUv;
             varying vec3 vNormal;
             varying float vCoverage;
@@ -1528,13 +1517,9 @@ internal class ArCoreFaceAnchorRenderer(
                 float strength = uSemanticConfidence * uSemanticEdgeStrength *
                     cameraEdge * edgeBand;
                 float refined = mix(rawCoverage, sharpened, strength);
-                float innerStart = mix(0.94, 0.88, uMouthOpenness);
-                float innerGuard = smoothstep(innerStart, 1.0, vLipUv.x);
-                return clamp(
-                    refined * (1.0 - innerGuard * uMouthExclusionConfidence),
-                    0.0,
-                    1.0
-                );
+                // The tessellated mesh excludes the mouth aperture. Do not apply a second
+                // opacity fade on the lip side: it creates an unpainted strip at the seam.
+                return clamp(refined, 0.0, 1.0);
             }
 
             void main() {
