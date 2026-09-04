@@ -1,6 +1,8 @@
 # AR Makeup — план развития 2D hybrid full-face
 
-Актуально на 2026-09-04. Это forward-only roadmap: выполненная и отменённая история хранится в Git. Текущее состояние и измерения находятся в `PROJECT_CONTEXT.md`.
+Актуально на 2026-09-04. Это forward-only roadmap. Текущее состояние, измерения и итоги завершённых исследований находятся в `PROJECT_CONTEXT.md`.
+
+Ограничение пользователя от 2026-09-04: развивать проект без новых ML-моделей — готовых, собственных или дообученных. Существующий MediaPipe Face Landmarker сохраняется. Новые модели не являются запасным вариантом при провале visual acceptance; вернуться к этому направлению можно только по новой явной команде пользователя.
 
 ## Целевое состояние
 
@@ -8,7 +10,7 @@
 
 - ARCore-compatible backend даёт camera timeline и быстрый global pose/anchor;
 - MediaPipe-compatible backend даёт локальные 2D-контуры мимики;
-- semantic parsing уточняет продуктовые области и окклюзии;
+- геометрия и анализ пикселей согласованного кадра уточняют продуктовые области и окклюзии без новых ML-моделей;
 - один temporal fusion слой согласует timestamps, confidence и visibility;
 - один GPU compositor рисует помаду, lip liner, blush, eyeshadow и eyeliner.
 
@@ -31,7 +33,7 @@ ARCore, MediaPipe и конкретный renderer остаются заменя
 
 Пользователь принял `fe8ffe2`, затем предварительно подтвердил визуальный результат неблокирующего GPU-pair Sync и нормальную работу pause/resume и reacquisition. Sync выбран основным по умолчанию; Async оставлен для ручного сравнения. Прежние anchor/live-mesh эксперименты не повторяем без новых данных.
 
-1. Проверить старт с Sync по умолчанию, ручное Async/Sync, error/fallback и смену поверхности; exact pairing и обычные pause/resume/reacquisition уже проверены.
+1. Проверить ручное Async/Sync, error/fallback и смену поверхности; старт с Sync по умолчанию, exact pairing и обычные pause/resume/reacquisition уже проверены в диагностических сборках.
 2. Расширить visual acceptance материалов и краёв после GPU camera-copy на разные условия освещения.
 3. Измерить частоту новых пар, задержку изображения, GPU cost и thermal. Свободный GL thread не означает 60 уникальных MP кадров.
 4. Расширить device matrix, освещение, движение телефона и dropout/reacquisition.
@@ -58,25 +60,15 @@ Gate: прежний jitter не возвращается; рот и быстр�
 
 Gate: renderer и material API компилируются без прямых зависимостей на ARCore/MediaPipe типы.
 
-### F2. Semantic masks без новой собственной модели
+### F2. Маски видимых областей без новых ML-моделей
 
-- Улучшить lips и mouth/teeth exclusion текущими contour/edge cues.
-- Добавить broad skin/hair/background mask только после отдельного model/license gate.
-- Определить контракты вероятностей для lips, mouth-teeth, skin, eyes, eyelids, brows и hair-background.
-- Не запускать segmentation на каждом render frame; обновлять face crop latest-only и репроецировать mask на общий state.
+Исследование точной границы губ приостановлено по решению пользователя. Возвращаться к нему только по новой задаче; текущая точность при сильном сжатии/профиле не прошла acceptance. Непринятые эксперименты и временная диагностика удалены из приложения, их ограничения записаны в PROJECT_CONTEXT.md.
 
-Gate: нет окрашивания зубов, рта, глаз и фона; границы стабильнее landmark-only baseline.
+- Для будущих эффектов определить model-independent контракты областей, confidence и occlusion.
+- Маски должны соответствовать exact pair; не подмешивать другой timestamp к Sync-изображению.
+- Новые модели не планируются. Общее выключение помады при сжатии не заменяет точной границы.
 
-### F3. Решение о собственной parsing model
-
-Собственная компактная LiteRT-модель допускается только если F2 не проходит visual acceptance.
-
-До обучения обязательны:
-
-- права на изображения лиц и коммерческое ML-training использование;
-- права на labels, annotator work, pretrained/teacher weights и synthetic assets;
-- model card, provenance, version и SHA-256;
-- mobile benchmark GPU/NPU/CPU и privacy review.
+Gate будущего возобновления: подтверждённое улучшение относительно текущего baseline без мерцания и окрашивания зубов, рта, глаз и фона.
 
 ## Then — production compositor и материалы
 
@@ -132,6 +124,6 @@ Sub-pixel eyelid contour, относительная толщина/wing, кор
 - Сначала controlled trace/A/B, затем изменение алгоритма.
 - Покадровая диагностика не должна влиять на visual acceptance; тяжёлый trace после capture выключается.
 - Не возвращать predictor, gyro, optical flow, visible 3D mesh или face-wide warp без измеримого преимущества.
-- Не добавлять ML-модели, datasets, weights, SDK или assets до обновления `LICENSE_COMPLIANCE.md`.
+- Новые ML-модели, weights и обучающие datasets исключены из scope. Для новых SDK/assets сохраняется `LICENSE_COMPLIANCE.md`; отдельное разрешение пользователя на изменение ML-scope не отменяет license gate.
 - Unit-тесты запускать только по явной команде пользователя; обычный debug/device gate разрешён.
 - После visual acceptance обновить `PROJECT_CONTEXT.md` и `CHAT_HANDOFF.md`; Git checkpoint создавать только по команде пользователя.

@@ -53,9 +53,9 @@
 
 ## Будущие модели и assets
 
-MediaPipe Selfie Multiclass Segmenter пока не добавлен. Он допустим только после отдельного gate и только как broad `face-skin / hair / background` candidate, не как точная маска губ/зубов/век.
+По решению пользователя от 2026-09-04 новые ML-модели исключены из текущего scope, включая MediaPipe Selfie Multiclass Segmenter, другие pretrained models и собственное обучение/дообучение. Существующий bundled Face Landmarker сохраняется. Это ограничение плана и ресурсов, а не вывод о запрете коммерческого использования любых готовых моделей.
 
-До добавления внешней или собственной ML-модели нужны:
+Следующий gate сохраняется только для случая, если пользователь новой явной командой разрешит вернуться к новым моделям. Сам по себе положительный лицензионный результат не меняет scope. До добавления внешней или собственной ML-модели нужны:
 
 - exact name/publisher/version/source/SHA-256, license, model card и NOTICE;
 - commercial rights на code, weights, teacher checkpoints, изображения, labels и ML-training use;

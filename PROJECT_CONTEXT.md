@@ -1,6 +1,6 @@
 # AR Makeup — актуальный контекст проекта
 
-Актуально на 2026-09-04. Этот файл хранит только текущее состояние и долгоживущие решения. История экспериментов и старые метрики доступны в Git.
+Актуально на 2026-09-04. Этот файл хранит только текущее состояние и долгоживущие решения. Итоги отклонённых экспериментов сохранены кратко; локальные снимки не входят в Git.
 
 Связанные документы:
 
@@ -23,16 +23,17 @@
 - один model-independent timestamped full-face state для всех эффектов;
 - ARCore/MediaPipe-типы не должны попадать в material API;
 - inference и камера работают on-device, realtime-очереди — latest-only;
-- новые модели, датасеты, weights, SDK и assets добавляются только после license gate.
+- Новые ML-модели исключены из текущего плана по решению пользователя от 2026-09-04: не искать и не подключать готовые модели, не обучать и не дообучать собственные. Существующий MediaPipe Face Landmarker сохраняется. Вернуться к этому направлению можно только по новой явной команде пользователя.
+- Для новых SDK/assets и отдельно разрешённых будущих моделей/датасетов/weights сохраняется license gate; прохождение gate само по себе не разрешает добавление модели.
 
 ## Репозиторий и текущий checkpoint
 
 - Проект: `C:\Users\User\AndroidStudioProjects\ARMakeup`.
 - Ветка: `codex/lipstick-material-v2`.
-- Принятый checkpoint: `fe8ffe2` (`[Tracking] Add same-frame synchronization checkpoint`).
+- Базовый checkpoint кода приложения: `ca80814` (`[Tracking] Make non-blocking same-frame Sync the default`).
 - Текущее устройство: Samsung SM-G990B.
 - Launcher: `ArCoreFaceAnchorActivity`; `MainActivity` сохраняет legacy CameraX/Filament/Vulkan rollback и не экспортируется.
-- Незакоммиченный candidate заменяет блокирующий Sync на неблокирующие GPU-пары. По команде пользователя Sync — основной режим по умолчанию; Async сохранён для ручного сравнения/отката.
+- В ca80814 блокирующий Sync заменён на неблокирующие GPU-пары. По команде пользователя Sync — основной режим по умолчанию; Async сохранён для ручного сравнения/отката.
 
 ## Активная архитектура
 
@@ -67,7 +68,7 @@ Rotation, front-camera mirror и `FILL_CENTER` обязаны быть общи�
 
 Материалы остаются рабочей базой, а не финальным продуктовым качеством. Нужны проверки при разном освещении, защита от shimmer/auto-exposure, BRDF/HDR/edge refinement и multi-device acceptance.
 
-## Текущий candidate: неблокирующие same-frame GPU-пары
+## Основной Sync: неблокирующие same-frame GPU-пары (ca80814)
 
 Принятый `fe8ffe2` ожидал callback до 100 ms на GL thread. Его визуальный результат сохраняем как эталон, механизм ожидания заменяем:
 
@@ -81,9 +82,21 @@ Rotation, front-camera mirror и `FILL_CENTER` обязаны быть общи�
 - Status `SYNC pair · camera lag N ms` — разница latest camera и presented timestamp. `age 0 ms` означает совпадение геометрии и изображения, не нулевой motion-to-photon. Sync counters — promoted/reused/no-ready-pair.
 - Цена: `2 × width × height × 4` байт GPU memory и один camera-copy pass на submit. Число уникальных пар ограничено MP throughput; свободный GL thread не гарантирует снижения задержки.
 
-Сборка `:app:assembleDebug` прошла без unit-тестов, включая изменение стартового режима на Sync. После несовпадения debug-подписей пользователь самостоятельно переустановил APK. Runtime `SYNC pair` на SM-G990B подтверждён 2026-09-04: в просмотренных status-окнах 23–26 новых пар, no-ready-pair=0, MP 23–28 FPS, render 42–58 FPS, age=0 ms, anchor=0.0 px; camera lag преимущественно 41 ms, иногда 81 ms. В просмотренном runtime/crash log ошибок не найдено, trace выключен (`S`). Пользователь предварительно принял визуальный результат и подтвердил pause/resume и reacquisition. Старт по умолчанию, ручное переключение режимов и расширенные failure/performance checks ещё требуют проверки на устройстве. Зависимости, модели и лицензируемые assets не добавлены.
+Сборка `:app:assembleDebug` прошла без unit-тестов, включая изменение стартового режима на Sync. После несовпадения debug-подписей пользователь самостоятельно переустановил APK. Runtime `SYNC pair` на SM-G990B подтверждён 2026-09-04: в просмотренных status-окнах 23–26 новых пар, no-ready-pair=0, MP 23–28 FPS, render 42–58 FPS, age=0 ms, anchor=0.0 px; camera lag преимущественно 41 ms, иногда 81 ms. В просмотренном runtime/crash log ошибок не найдено, trace выключен (`S`). Пользователь предварительно принял визуальный результат и подтвердил pause/resume и reacquisition. В последующих диагностических debug-сборках запуск с Sync по умолчанию подтверждён. Ручное переключение режимов и расширенные failure/performance checks остаются открытыми. Зависимости, модели и лицензируемые assets не добавлены.
 
 Успех Sync поддерживает temporal mismatch/rebase гипотезу, но не выделяет единственную причину: одновременно обнуляется anchor correction и меняется cadence. Прежние варианты опорных точек/live mesh не дали принятого результата; bypass уменьшал jitter ценой lag. Повторять эти эксперименты без новых данных не планируется.
+
+
+## Граница губ: исследование завершено без принятого улучшения
+
+При сильном сжатии/подвороте и некоторых поворотах помада может выходить на кожу. Это известное ограничение, visual acceptance точной границы не пройден. По решению пользователя от 2026-09-04 дальнейшие эксперименты приостановлены до новой явной задачи.
+
+- GPU-уточнение по цвету не дало уверенного улучшения и добавляло мерцание. Временная стабилизация уменьшила мерцание, но не решила сильное сжатие. Офлайн-поиск видимого контура также отклонён: линии неверны.
+- Общее ослабление/выключение помады при сжатии отклонено как замена точной границе. Принятый HeadDownLipVisibilityGate к этому эксперименту не относится и сохранён.
+- Scores существующего Blendshape V2 реагировали на трубочку и смыкание, но не выделили ключевой сильный подворот. Они выводятся из landmarks, а не независимо из пикселей; оснований деформировать контур по ним не получено. Источник: https://storage.googleapis.com/mediapipe-assets/Model%20Card%20Blendshape%20V2.pdf .
+- Финальная проверка на SM-G990B: в семи снимках exact CPU RGBA input + GPU background timestamps совпали; наше display mapping и независимое ARCore IMAGE_NORMALIZED -> VIEW_NORMALIZED различались менее чем на 0.000220 px. Вход 640x480, rotation=270. При сильном подвороте сырые MediaPipe points уже охватывают кожу на CPU-изображении до display mapping, refiner, tessellation и материала. Дополнительное смещение при отображении не обнаружено в проверенных позах; это не гарантия для всех устройств/ориентаций.
+- По команде пользователя экспериментальный GPU-проход, переключатель, захват по громкости вниз, CPU/GPU readback-диагностика, blendshape output/контракт и tools/diagnostics удалены. Код приложения снова соответствует ca80814; Sync, материалы, topology и принятые фильтры сохранены. Blendshape output выключен, новых моделей/assets нет.
+- Локальные снимки и результаты сохранены только в gitignored captures/lip-boundary (32 снимка; итог CPU mapping — cpu-mapping/report.json и series.jpg). В Git фотографии не добавлять. Не повторять отклонённые варианты и не подбирать коэффициенты без новых данных и задачи пользователя.
 
 ## Открытые tracking-дефекты
 
@@ -111,21 +124,21 @@ Rotation, front-camera mirror и `FILL_CENTER` обязаны быть общи�
 
 ## Действующие архитектурные решения
 
-- Целевое направление — 2D hybrid: ARCore даёт вспомогательный global pose/anchor, MediaPipe-compatible backend — локальные 2D-контуры, semantic parsing — продуктовые границы и окклюзии.
+- Целевое направление — 2D hybrid: ARCore даёт вспомогательный global pose/anchor, существующий MediaPipe backend — локальные 2D-контуры, геометрия и анализ изображения — уточнение продуктовых границ и окклюзий без нового ML inference.
 - Видимый canonical 3D face/lip renderer отклонён: он ухудшал контуры при мимике и поворотах.
 - Predictor, gyro, optical-flow correction, face-wide affine/projective warp и residual smoothing не возвращать без нового controlled A/B, который показывает преимущество над текущим launcher.
 - ARCore mesh не является продуктовой геометрией; он используется только внутренним pose/carrier backend.
-- MediaPipe остаётся заменяемым backend. Собственная landmark model рассматривается только после измеримого failure текущего решения и полного data/model license pipeline.
-- Semantic parsing начинать с геометрического/бесплатного baseline. Собственную модель обучать только при документированных коммерческих правах на code, weights, данные и разметку.
+- MediaPipe остаётся изолированным за model-independent контрактами; замена landmark model и разработка собственной модели исключены из текущего плана.
+- Маски видимых областей строить из существующих landmarks, геометрических ограничений и изображения exact pair. Новые pretrained models, training, fine-tuning и сбор обучающих датасетов не входят в scope: пользователь не выделяет на это время и ресурсы. Это продуктовое ограничение, а не утверждение о запрете коммерческого использования всех готовых моделей.
 - iOS-проект не изменять; отдельный общий SDK/JSON contract сейчас не нужен. Сравнивается поведение, а не буквальная реализация.
 
 ## Ближайший порядок работы
 
-1. Проверить старт с Sync по умолчанию и ручное переключение Async/Sync на устройстве; runtime exact pairing уже подтверждён, pause/resume и reacquisition приняты пользователем.
+1. Проверить ручное переключение Async/Sync на устройстве; старт с Sync по умолчанию подтверждён в диагностических сборках; runtime exact pairing уже подтверждён, pause/resume и reacquisition приняты пользователем.
 2. Оценить latency, GPU memory/copy cost и thermal основного Sync. Локальные фильтры и материал без конкретной регрессии не менять.
 3. Расширить acceptance на другие устройства и движение телефона. Не считать render FPS числом уникальных camera/MP пар.
 4. Закончить model-independent `FullFaceRenderState` для общего pose, локальных областей, confidence, visibility и occlusion.
-5. Добавить semantic masks для lips/mouth-teeth, затем глаз/век/кожи; не добавлять модель до license gate.
+5. Исследование точной границы губ приостановлено до новой задачи. Дальнейшие masks для mouth-teeth/глаз/век/кожи планировать в пределах подтверждённого качества и без новых ML-моделей.
 6. Перенести принятый hybrid/material state в production GPU/Vulkan path, сохранив OpenGL launcher как rollback до visual parity.
 7. Добавлять lip liner, blush, eyeshadow и eyeliner только поверх общего full-face state.
 8. Завершить device matrix, thermal/fallback, privacy/license и release acceptance.
@@ -137,7 +150,7 @@ Rotation, front-camera mirror и `FILL_CENTER` обязаны быть общи�
 - Render: целевые `60 FPS`; минимум стабильные `30 FPS` на поддерживаемом классе устройств.
 - GPU makeup/compositor: желательно `6–8 ms` p95 в пределах общего `16.6 ms` кадра.
 - Face landmarks: стремиться к `30–60 results/s`; inference реже render допустим только без заметного lag.
-- Face parsing: `15–30 results/s` по face crop, без блокировки камеры и renderer.
+- Уточнение масок по геометрии/изображению: без нового ML inference, внутри существующего GPU budget и без блокировки камеры/renderer. Прежний ориентир отдельного face parsing inference `15–30 results/s` больше не является активным требованием.
 - Очереди realtime-веток: глубина `1`, latest-only, без накопления устаревших кадров.
 - Любой FPS считается недостаточным при заметном плавании маски, jitter, motion lag или мерцании границ.
 
