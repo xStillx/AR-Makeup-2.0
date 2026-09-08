@@ -110,7 +110,7 @@
 
 Публичный `Banuba/beauty-ios` исследован на commit `79e41745638c46788e4faba95dd68114a3f3094a`; корневой sample code опубликован под MIT. Сам Banuba Face AR SDK, client token, бинарные библиотеки и генерируемые SDK masks `LIPS`/`LIPS_SHINING` регулируются отдельной коммерческой лицензией и в проект не добавлены. Новых dependency, моделей, shaders, textures и assets из Banuba в текущем checkpoint нет.
 
-Разрешённый следующий шаг — самостоятельно реализовать общий принцип camera-value color transfer в собственном GLSL на существующем ARCore/MediaPipe pipeline. При буквальном или существенном переносе MIT-кода потребуется сохранить copyright/license notice; предпочтителен самостоятельный эквивалент стандартного HSV-преобразования с документированием provenance.
+Общий принцип camera-value color transfer реализован самостоятельно в GLSL на существующем ARCore/MediaPipe pipeline: стандартные RGB↔HSV функции и смешивание написаны в проекте без буквального или существенного переноса Banuba-кода. Из reference использован только алгоритмический принцип hue/saturation от пигмента, value от камеры и опубликованный нормализующий коэффициент 0.85. Banuba SDK, бинарники, token, модели, masks, shaders и assets в проект не добавлены.
 
 ## Происхождение переноса сатина — 2026-09-04
 

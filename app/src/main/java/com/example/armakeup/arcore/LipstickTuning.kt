@@ -1,17 +1,24 @@
 package com.example.armakeup.arcore
 
 import com.example.armakeup.makeup.LipstickFinish
+import com.example.armakeup.makeup.ReferenceLipstickPigments
+import kotlin.math.roundToInt
 
 /** Runtime material controls. Defaults preserve the checked-in finish profiles. */
 internal data class LipstickTuning(
     val opacity: Float = 1f,
     val coverage: Float = 1f,
+    val pigmentRed: Float = ReferenceLipstickPigments.PRODUCT_CLASSIC_RED_999_RED_SRGB,
+    val pigmentGreen: Float = ReferenceLipstickPigments.PRODUCT_CLASSIC_RED_999_GREEN_SRGB,
+    val pigmentBlue: Float = ReferenceLipstickPigments.PRODUCT_CLASSIC_RED_999_BLUE_SRGB,
+    val pigmentBrightness: Float = 1f,
     val brightness: Float = 1f,
     val contrast: Float = 1f,
     val saturation: Float = 1f,
     val hueDegrees: Float = 0f,
     val naturalLipBlend: Float = 0f,
     val luminancePreservation: Float = 1f,
+    val cameraValueTransfer: Float = 1f,
     val cameraDetail: Float = 1f,
     val materialDetail: Float = 1f,
     val shadowStrength: Float = 1f,
@@ -38,14 +45,19 @@ internal data class LipstickTuning(
     companion object {
         fun defaultsFor(finish: LipstickFinish): LipstickTuning = when (finish) {
             LipstickFinish.SATIN -> LipstickTuning(
-                opacity = 0.96f,
+                opacity = 0.69f,
                 coverage = 1.00f,
-                naturalLipBlend = 0.08f,
-                brightness = 0.90f,
-                contrast = 1.03f,
-                saturation = 0.86f,
-                hueDegrees = 0.0f,
+                naturalLipBlend = 0.50f,
+                pigmentRed = ReferenceLipstickPigments.SATIN_RED_B8202D_RED_SRGB,
+                pigmentGreen = ReferenceLipstickPigments.SATIN_RED_B8202D_GREEN_SRGB,
+                pigmentBlue = ReferenceLipstickPigments.SATIN_RED_B8202D_BLUE_SRGB,
+                pigmentBrightness = 0.90f,
+                brightness = 1.00f,
+                contrast = 1.37f,
+                saturation = 1.57f,
+                hueDegrees = -0.9f,
                 luminancePreservation = 1.00f,
+                cameraValueTransfer = 1.00f,
                 cameraDetail = 1.00f,
                 materialDetail = 1.00f,
                 shadowStrength = 1.00f,
@@ -60,14 +72,14 @@ internal data class LipstickTuning(
                 highlightConcentration = 1.00f,
                 satinGlow = 1.00f,
                 wetInnerEdge = 1.00f,
-                edgeRefinement = 1.00f,
+                edgeRefinement = 2.00f,
                 edgeSoftness = 0.00f,
                 edgeBlur = 0.05f,
-                innerCoverage = 0.38f,
-                cornerFade = 1.00f,
-                seamShadow = 1.00f,
-                toothProtection = 1.00f,
-                cameraSampleScale = 1.00f,
+                innerCoverage = 1.00f,
+                cornerFade = 2.00f,
+                seamShadow = 1.97f,
+                toothProtection = 2.00f,
+                cameraSampleScale = 1.91f,
             )
             else -> LipstickTuning()
         }
@@ -88,11 +100,16 @@ internal enum class LipstickTuningParameter(
     COVERAGE("ОБЩЕЕ", "Плотность покрытия", 0.25f, 2f, 1f, update = { s, v -> s.copy(coverage = v) }, read = { it.coverage }),
     NATURAL_LIP("ОБЩЕЕ", "Естественный цвет губ", 0f, 1f, 0f, update = { s, v -> s.copy(naturalLipBlend = v) }, read = { it.naturalLipBlend }),
 
-    BRIGHTNESS("ЦВЕТ", "Яркость", 0.55f, 1.45f, 1f, update = { s, v -> s.copy(brightness = v) }, read = { it.brightness }),
+    PIGMENT_RED("ЦВЕТ", "Пигмент — красный", 0f, 255f, 158f, 0, update = { s, v -> s.copy(pigmentRed = v.roundToInt() / 255f) }, read = { it.pigmentRed * 255f }),
+    PIGMENT_GREEN("ЦВЕТ", "Пигмент — зелёный", 0f, 255f, 38f, 0, update = { s, v -> s.copy(pigmentGreen = v.roundToInt() / 255f) }, read = { it.pigmentGreen * 255f }),
+    PIGMENT_BLUE("ЦВЕТ", "Пигмент — синий", 0f, 255f, 32f, 0, update = { s, v -> s.copy(pigmentBlue = v.roundToInt() / 255f) }, read = { it.pigmentBlue * 255f }),
+    PIGMENT_BRIGHTNESS("ЦВЕТ", "Яркость пигмента", 0.50f, 1.20f, 1f, update = { s, v -> s.copy(pigmentBrightness = v) }, read = { it.pigmentBrightness }),
+    BRIGHTNESS("ЦВЕТ", "Яркость материала", 0.55f, 1.45f, 1f, update = { s, v -> s.copy(brightness = v) }, read = { it.brightness }),
     CONTRAST("ЦВЕТ", "Контраст", 0.5f, 1.5f, 1f, update = { s, v -> s.copy(contrast = v) }, read = { it.contrast }),
     SATURATION("ЦВЕТ", "Насыщенность", 0f, 2f, 1f, update = { s, v -> s.copy(saturation = v) }, read = { it.saturation }),
     HUE("ЦВЕТ", "Оттенок, °", -45f, 45f, 0f, 1, update = { s, v -> s.copy(hueDegrees = v) }, read = { it.hueDegrees }),
     LUMINANCE("ЦВЕТ", "Сохранение светотени", 0f, 2f, 1f, update = { s, v -> s.copy(luminancePreservation = v) }, read = { it.luminancePreservation }),
+    CAMERA_VALUE_TRANSFER("ЦВЕТ", "Яркость из камеры", 0f, 1f, 1f, update = { s, v -> s.copy(cameraValueTransfer = v) }, read = { it.cameraValueTransfer }),
 
     CAMERA_DETAIL("ФАКТУРА", "Фактура камеры", 0f, 2f, 1f, update = { s, v -> s.copy(cameraDetail = v) }, read = { it.cameraDetail }),
     MATERIAL_DETAIL("ФАКТУРА", "Рельеф материала", 0f, 2f, 1f, update = { s, v -> s.copy(materialDetail = v) }, read = { it.materialDetail }),

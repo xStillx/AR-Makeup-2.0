@@ -10,8 +10,6 @@ import com.example.armakeup.makeup.LipLandmarkTopology
 import com.example.armakeup.makeup.LipMeshTessellator
 import com.example.armakeup.makeup.ReferenceMatteLipstickProfile
 import com.example.armakeup.makeup.LipstickFinish
-import com.example.armakeup.makeup.LipstickPigmentPalette
-import com.example.armakeup.makeup.ReferenceLipstickPigments
 import com.example.armakeup.makeup.ReferenceLipstickRenderProfiles
 import com.example.armakeup.tracking.CanonicalFaceTransform
 import com.example.armakeup.tracking.FillCenterTransform
@@ -758,10 +756,21 @@ internal class ArCoreFaceAnchorRenderer(
         GLES20.glUseProgram(lipMeshProgram)
         val profile = ReferenceLipstickRenderProfiles.forFinish(lipstickFinish)
         val tuning = lipstickTuning
-        val pigment = when (profile.pigmentPalette) {
-            LipstickPigmentPalette.PRODUCT_CLASSIC_RED_999 -> PRODUCT_PIGMENT
-            LipstickPigmentPalette.SATIN_RED_B8202D -> SATIN_PIGMENT
-            LipstickPigmentPalette.TRACKING_MAGENTA -> TRACKING_PIGMENT
+        val pigmentBrightness = tuning.pigmentBrightness
+        val pigmentRed = if (lipstickFinish == LipstickFinish.TRACKING_TEST) {
+            TRACKING_PIGMENT[0]
+        } else {
+            (tuning.pigmentRed * pigmentBrightness).coerceIn(0f, 1f)
+        }
+        val pigmentGreen = if (lipstickFinish == LipstickFinish.TRACKING_TEST) {
+            TRACKING_PIGMENT[1]
+        } else {
+            (tuning.pigmentGreen * pigmentBrightness).coerceIn(0f, 1f)
+        }
+        val pigmentBlue = if (lipstickFinish == LipstickFinish.TRACKING_TEST) {
+            TRACKING_PIGMENT[2]
+        } else {
+            (tuning.pigmentBlue * pigmentBrightness).coerceIn(0f, 1f)
         }
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
         GLES20.glBindTexture(
@@ -773,7 +782,12 @@ internal class ArCoreFaceAnchorRenderer(
         GLES20.glUniform2f(GLES20.glGetUniformLocation(lipMeshProgram, "uUvBottomRight"), cameraUvCorners[2], cameraUvCorners[3])
         GLES20.glUniform2f(GLES20.glGetUniformLocation(lipMeshProgram, "uUvTopLeft"), cameraUvCorners[4], cameraUvCorners[5])
         GLES20.glUniform2f(GLES20.glGetUniformLocation(lipMeshProgram, "uUvTopRight"), cameraUvCorners[6], cameraUvCorners[7])
-        GLES20.glUniform3fv(GLES20.glGetUniformLocation(lipMeshProgram, "uPigment"), 1, pigment, 0)
+        GLES20.glUniform3f(
+            GLES20.glGetUniformLocation(lipMeshProgram, "uPigment"),
+            pigmentRed,
+            pigmentGreen,
+            pigmentBlue,
+        )
         GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uCoverageMultiplier"), profile.coverageMultiplier * tuning.coverage)
         GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uLuminancePreservation"), profile.luminancePreservation * tuning.luminancePreservation)
         GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uMinimumLuminanceGain"), profile.minimumLuminanceGain)
@@ -814,6 +828,7 @@ internal class ArCoreFaceAnchorRenderer(
         GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uTuningSaturation"), tuning.saturation)
         GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uTuningHueDegrees"), tuning.hueDegrees)
         GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uTuningNaturalLipBlend"), tuning.naturalLipBlend)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uTuningCameraValueTransfer"), tuning.cameraValueTransfer)
         GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uTuningCameraDetail"), tuning.cameraDetail)
         GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uTuningMaterialDetail"), tuning.materialDetail)
         GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uTuningShadowStrength"), tuning.shadowStrength)
@@ -1170,16 +1185,6 @@ internal class ArCoreFaceAnchorRenderer(
         val GREEN = floatArrayOf(0.1f, 1f, 0.15f)
         val DARK_GREEN = floatArrayOf(0f, 0.25f, 0.02f)
         val WHITE = floatArrayOf(1f, 1f, 1f)
-        val PRODUCT_PIGMENT = floatArrayOf(
-            ReferenceLipstickPigments.PRODUCT_CLASSIC_RED_999_RED_SRGB,
-            ReferenceLipstickPigments.PRODUCT_CLASSIC_RED_999_GREEN_SRGB,
-            ReferenceLipstickPigments.PRODUCT_CLASSIC_RED_999_BLUE_SRGB,
-        )
-        val SATIN_PIGMENT = floatArrayOf(
-            ReferenceLipstickPigments.SATIN_RED_B8202D_RED_SRGB,
-            ReferenceLipstickPigments.SATIN_RED_B8202D_GREEN_SRGB,
-            ReferenceLipstickPigments.SATIN_RED_B8202D_BLUE_SRGB,
-        )
         val TRACKING_PIGMENT = floatArrayOf(1f, 0f, 0.831f)
 
         val FULLSCREEN_QUAD: FloatBuffer = directFloatBuffer(
@@ -1265,6 +1270,7 @@ internal class ArCoreFaceAnchorRenderer(
             uniform float uTuningSaturation;
             uniform float uTuningHueDegrees;
             uniform float uTuningNaturalLipBlend;
+            uniform float uTuningCameraValueTransfer;
             uniform float uTuningCameraDetail;
             uniform float uTuningMaterialDetail;
             uniform float uTuningShadowStrength;
@@ -1329,6 +1335,59 @@ internal class ArCoreFaceAnchorRenderer(
                     adjusted /= maximum;
                 }
                 return clamp(adjusted, vec3(0.0), vec3(1.0));
+            }
+
+            vec3 lipRgbToHsv(vec3 color) {
+                float maximum = max(color.r, max(color.g, color.b));
+                float minimum = min(color.r, min(color.g, color.b));
+                float delta = maximum - minimum;
+                float hue = 0.0;
+                if (delta > 0.0001) {
+                    if (maximum == color.r) {
+                        hue = mod((color.g - color.b) / delta, 6.0);
+                    } else if (maximum == color.g) {
+                        hue = (color.b - color.r) / delta + 2.0;
+                    } else {
+                        hue = (color.r - color.g) / delta + 4.0;
+                    }
+                    hue = fract(hue / 6.0);
+                }
+                float saturation = maximum > 0.0001 ? delta / maximum : 0.0;
+                return vec3(hue, saturation, maximum);
+            }
+
+            vec3 lipHsvToRgb(vec3 hsv) {
+                float hue = fract(hsv.x) * 6.0;
+                float chroma = hsv.z * hsv.y;
+                float intermediate = chroma * (1.0 - abs(mod(hue, 2.0) - 1.0));
+                vec3 sector;
+                if (hue < 1.0) {
+                    sector = vec3(chroma, intermediate, 0.0);
+                } else if (hue < 2.0) {
+                    sector = vec3(intermediate, chroma, 0.0);
+                } else if (hue < 3.0) {
+                    sector = vec3(0.0, chroma, intermediate);
+                } else if (hue < 4.0) {
+                    sector = vec3(0.0, intermediate, chroma);
+                } else if (hue < 5.0) {
+                    sector = vec3(intermediate, 0.0, chroma);
+                } else {
+                    sector = vec3(chroma, 0.0, intermediate);
+                }
+                return sector + vec3(hsv.z - chroma);
+            }
+
+            vec3 cameraValuePigment(vec3 camera, vec3 pigment) {
+                vec3 cameraHsv = lipRgbToHsv(clamp(camera, 0.0, 1.0));
+                vec3 pigmentHsv = lipRgbToHsv(clamp(pigment, 0.0, 1.0));
+                float pigmentValueScale = pigmentHsv.z / 0.85;
+                float transferredValue = clamp(cameraHsv.z * pigmentValueScale, 0.0, 1.0);
+                vec3 transferred = lipHsvToRgb(vec3(
+                    pigmentHsv.x,
+                    pigmentHsv.y,
+                    transferredValue
+                ));
+                return mix(pigment, transferred, clamp(uTuningCameraValueTransfer, 0.0, 1.0));
             }
 
             float stableHighlightHash(vec2 cell) {
@@ -1521,7 +1580,8 @@ internal class ArCoreFaceAnchorRenderer(
 
                 float baseLuminance = parityLuminance(base);
                 float blurredLuminance = max(parityLuminance(blurred), 0.055);
-                float pigmentLuminance = parityLuminance(uPigment);
+                vec3 valueTransferredPigment = cameraValuePigment(base, uPigment);
+                float pigmentLuminance = parityLuminance(valueTransferredPigment);
                 float localLighting = smoothstep(0.10, 0.55, blurredLuminance);
                 float sceneLighting = smoothstep(0.08, 0.72, blurredLuminance);
                 float combinedLighting = clamp(
@@ -1540,7 +1600,7 @@ internal class ArCoreFaceAnchorRenderer(
                     toneStrength
                 );
                 vec3 tonedPigment = parityColorWithLuminance(
-                    uPigment,
+                    valueTransferredPigment,
                     targetLuminance
                 );
                 float tonedLuminance = parityLuminance(tonedPigment);
@@ -1679,7 +1739,7 @@ internal class ArCoreFaceAnchorRenderer(
                 float suppressedHighlight = positiveCameraDetail *
                     (1.0 - uHighlightRetention) * coverage;
                 float materialLuminance = max(surfaceLuminance - suppressedHighlight, 0.0001);
-                vec3 pigmentLinear = srgbToLinear(uPigment);
+                vec3 pigmentLinear = srgbToLinear(cameraValuePigment(cameraSrgb, uPigment));
                 float pigmentLuminance = max(dot(pigmentLinear, luminanceWeights), 0.0001);
                 float luminanceGain = clamp(
                     materialLuminance / pigmentLuminance,

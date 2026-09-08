@@ -128,7 +128,9 @@ internal object IosSatinLipMaterial {
                 float apertureClosure = 1.0 - openMouth;
                 float seamShadow = 1.0 - innerSeamRegion * smoothstep(0.30, 0.56, openMouth) *
                     (0.020 + localShadow * 0.08 * uTuningShadowStrength) * uTuningSeamShadow;
-                vec3 pigment = clamp(uPigment * exp2(detailExponent) * seamShadow, 0.0, 1.0);
+                vec3 valueTransferredPigment = cameraValuePigment(base, uPigment);
+                vec3 pigment = clamp(valueTransferredPigment * exp2(detailExponent) *
+                    seamShadow, 0.0, 1.0);
                 float maximum = max(base.r, max(base.g, base.b));
                 float minimum = min(base.r, min(base.g, base.b));
                 float saturation = maximum > 0.001 ? (maximum - minimum) / maximum : 0.0;
