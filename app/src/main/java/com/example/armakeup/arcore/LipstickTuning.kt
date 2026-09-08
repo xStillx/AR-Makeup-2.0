@@ -1,0 +1,122 @@
+package com.example.armakeup.arcore
+
+import com.example.armakeup.makeup.LipstickFinish
+
+/** Runtime material controls. Defaults preserve the checked-in finish profiles. */
+internal data class LipstickTuning(
+    val opacity: Float = 1f,
+    val coverage: Float = 1f,
+    val brightness: Float = 1f,
+    val contrast: Float = 1f,
+    val saturation: Float = 1f,
+    val hueDegrees: Float = 0f,
+    val naturalLipBlend: Float = 0f,
+    val luminancePreservation: Float = 1f,
+    val cameraDetail: Float = 1f,
+    val materialDetail: Float = 1f,
+    val shadowStrength: Float = 1f,
+    val microTexture: Float = 1f,
+    val surfaceDetail: Float = 1f,
+    val roughness: Float = 1f,
+    val specular: Float = 1f,
+    val highlightRetention: Float = 1f,
+    val highlightStrength: Float = 1f,
+    val highlightSize: Float = 1f,
+    val highlightThreshold: Float = 1f,
+    val highlightConcentration: Float = 1f,
+    val satinGlow: Float = 1f,
+    val wetInnerEdge: Float = 1f,
+    val edgeRefinement: Float = 1f,
+    val edgeSoftness: Float = 0f,
+    val edgeBlur: Float = 0f,
+    val innerCoverage: Float = 1f,
+    val cornerFade: Float = 1f,
+    val seamShadow: Float = 1f,
+    val toothProtection: Float = 1f,
+    val cameraSampleScale: Float = 1f,
+) {
+    companion object {
+        fun defaultsFor(finish: LipstickFinish): LipstickTuning = when (finish) {
+            LipstickFinish.SATIN -> LipstickTuning(
+                opacity = 0.96f,
+                coverage = 1.00f,
+                naturalLipBlend = 0.08f,
+                brightness = 0.90f,
+                contrast = 1.03f,
+                saturation = 0.86f,
+                hueDegrees = 0.0f,
+                luminancePreservation = 1.00f,
+                cameraDetail = 1.00f,
+                materialDetail = 1.00f,
+                shadowStrength = 1.00f,
+                microTexture = 1.00f,
+                surfaceDetail = 1.00f,
+                roughness = 0.90f,
+                specular = 1.00f,
+                highlightRetention = 1.00f,
+                highlightStrength = 0.65f,
+                highlightSize = 1.30f,
+                highlightThreshold = 1.00f,
+                highlightConcentration = 1.00f,
+                satinGlow = 1.00f,
+                wetInnerEdge = 1.00f,
+                edgeRefinement = 1.00f,
+                edgeSoftness = 0.00f,
+                edgeBlur = 0.05f,
+                innerCoverage = 0.38f,
+                cornerFade = 1.00f,
+                seamShadow = 1.00f,
+                toothProtection = 1.00f,
+                cameraSampleScale = 1.00f,
+            )
+            else -> LipstickTuning()
+        }
+    }
+}
+
+internal enum class LipstickTuningParameter(
+    val group: String,
+    val label: String,
+    val minimum: Float,
+    val maximum: Float,
+    val default: Float,
+    val decimals: Int = 2,
+    val update: (LipstickTuning, Float) -> LipstickTuning,
+    val read: (LipstickTuning) -> Float,
+) {
+    OPACITY("ОБЩЕЕ", "Интенсивность", 0f, 1f, 1f, update = { s, v -> s.copy(opacity = v) }, read = { it.opacity }),
+    COVERAGE("ОБЩЕЕ", "Плотность покрытия", 0.25f, 2f, 1f, update = { s, v -> s.copy(coverage = v) }, read = { it.coverage }),
+    NATURAL_LIP("ОБЩЕЕ", "Естественный цвет губ", 0f, 1f, 0f, update = { s, v -> s.copy(naturalLipBlend = v) }, read = { it.naturalLipBlend }),
+
+    BRIGHTNESS("ЦВЕТ", "Яркость", 0.55f, 1.45f, 1f, update = { s, v -> s.copy(brightness = v) }, read = { it.brightness }),
+    CONTRAST("ЦВЕТ", "Контраст", 0.5f, 1.5f, 1f, update = { s, v -> s.copy(contrast = v) }, read = { it.contrast }),
+    SATURATION("ЦВЕТ", "Насыщенность", 0f, 2f, 1f, update = { s, v -> s.copy(saturation = v) }, read = { it.saturation }),
+    HUE("ЦВЕТ", "Оттенок, °", -45f, 45f, 0f, 1, update = { s, v -> s.copy(hueDegrees = v) }, read = { it.hueDegrees }),
+    LUMINANCE("ЦВЕТ", "Сохранение светотени", 0f, 2f, 1f, update = { s, v -> s.copy(luminancePreservation = v) }, read = { it.luminancePreservation }),
+
+    CAMERA_DETAIL("ФАКТУРА", "Фактура камеры", 0f, 2f, 1f, update = { s, v -> s.copy(cameraDetail = v) }, read = { it.cameraDetail }),
+    MATERIAL_DETAIL("ФАКТУРА", "Рельеф материала", 0f, 2f, 1f, update = { s, v -> s.copy(materialDetail = v) }, read = { it.materialDetail }),
+    SHADOW("ФАКТУРА", "Тени и складки", 0f, 2f, 1f, update = { s, v -> s.copy(shadowStrength = v) }, read = { it.shadowStrength }),
+    MICRO_TEXTURE("ФАКТУРА", "Микротекстура", 0f, 2f, 1f, update = { s, v -> s.copy(microTexture = v) }, read = { it.microTexture }),
+    SURFACE_DETAIL("ФАКТУРА", "Детали поверхности", 0f, 2f, 1f, update = { s, v -> s.copy(surfaceDetail = v) }, read = { it.surfaceDetail }),
+    ROUGHNESS("ФАКТУРА", "Шероховатость", 0.35f, 1.65f, 1f, update = { s, v -> s.copy(roughness = v) }, read = { it.roughness }),
+
+    SPECULAR("БЛИКИ", "Сила отражения", 0f, 2f, 1f, update = { s, v -> s.copy(specular = v) }, read = { it.specular }),
+    HIGHLIGHT_RETENTION("БЛИКИ", "Сохранение бликов камеры", 0f, 2f, 1f, update = { s, v -> s.copy(highlightRetention = v) }, read = { it.highlightRetention }),
+    HIGHLIGHT_STRENGTH("БЛИКИ", "Яркость блика", 0f, 2f, 1f, update = { s, v -> s.copy(highlightStrength = v) }, read = { it.highlightStrength }),
+    HIGHLIGHT_SIZE("БЛИКИ", "Размер блика", 0.4f, 2f, 1f, update = { s, v -> s.copy(highlightSize = v) }, read = { it.highlightSize }),
+    HIGHLIGHT_THRESHOLD("БЛИКИ", "Порог блика", 0.5f, 1.8f, 1f, update = { s, v -> s.copy(highlightThreshold = v) }, read = { it.highlightThreshold }),
+    HIGHLIGHT_CONCENTRATION("БЛИКИ", "Концентрация блика", 0.5f, 2f, 1f, update = { s, v -> s.copy(highlightConcentration = v) }, read = { it.highlightConcentration }),
+    SATIN_GLOW("БЛИКИ", "Сатиновое свечение", 0f, 2f, 1f, update = { s, v -> s.copy(satinGlow = v) }, read = { it.satinGlow }),
+    WET_INNER_EDGE("БЛИКИ", "Влажный внутренний край", 0f, 2f, 1f, update = { s, v -> s.copy(wetInnerEdge = v) }, read = { it.wetInnerEdge }),
+
+    EDGE_REFINEMENT("КРАЯ И РОТ", "Уточнение края", 0f, 2f, 1f, update = { s, v -> s.copy(edgeRefinement = v) }, read = { it.edgeRefinement }),
+    EDGE_SOFTNESS("КРАЯ И РОТ", "Мягкость края", 0f, 1f, 0f, update = { s, v -> s.copy(edgeSoftness = v) }, read = { it.edgeSoftness }),
+    EDGE_BLUR("КРАЯ И РОТ", "Растушёвка края", 0f, 1f, 0f, update = { s, v -> s.copy(edgeBlur = v) }, read = { it.edgeBlur }),
+    INNER_COVERAGE("КРАЯ И РОТ", "Покрытие внутреннего края", 0f, 1f, 1f, update = { s, v -> s.copy(innerCoverage = v) }, read = { it.innerCoverage }),
+    CORNER_FADE("КРАЯ И РОТ", "Ослабление уголков", 0f, 2f, 1f, update = { s, v -> s.copy(cornerFade = v) }, read = { it.cornerFade }),
+    SEAM_SHADOW("КРАЯ И РОТ", "Тень между губами", 0f, 2f, 1f, update = { s, v -> s.copy(seamShadow = v) }, read = { it.seamShadow }),
+    TOOTH_PROTECTION("КРАЯ И РОТ", "Защита зубов", 0f, 2f, 1f, update = { s, v -> s.copy(toothProtection = v) }, read = { it.toothProtection }),
+
+    CAMERA_SAMPLE_SCALE("КАМЕРА", "Масштаб выборки камеры", 0.35f, 2f, 1f, update = { s, v -> s.copy(cameraSampleScale = v) }, read = { it.cameraSampleScale }),
+}

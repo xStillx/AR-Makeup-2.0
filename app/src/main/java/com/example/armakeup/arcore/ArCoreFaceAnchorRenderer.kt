@@ -107,6 +107,13 @@ internal class ArCoreFaceAnchorRenderer(
     @Volatile
     private var lipstickFinish = LipstickFinish.SATIN
 
+    @Volatile
+    private var lipstickTuning = LipstickTuning()
+
+    fun setLipstickTuning(value: LipstickTuning) {
+        lipstickTuning = value
+    }
+
     fun setLipstickFinish(value: LipstickFinish) {
         lipstickFinish = value
         Log.i(TAG, "Lipstick finish: $value")
@@ -750,6 +757,7 @@ internal class ArCoreFaceAnchorRenderer(
         GLES20.glDisable(GLES20.GL_BLEND)
         GLES20.glUseProgram(lipMeshProgram)
         val profile = ReferenceLipstickRenderProfiles.forFinish(lipstickFinish)
+        val tuning = lipstickTuning
         val pigment = when (profile.pigmentPalette) {
             LipstickPigmentPalette.PRODUCT_CLASSIC_RED_999 -> PRODUCT_PIGMENT
             LipstickPigmentPalette.SATIN_RED_B8202D -> SATIN_PIGMENT
@@ -766,24 +774,24 @@ internal class ArCoreFaceAnchorRenderer(
         GLES20.glUniform2f(GLES20.glGetUniformLocation(lipMeshProgram, "uUvTopLeft"), cameraUvCorners[4], cameraUvCorners[5])
         GLES20.glUniform2f(GLES20.glGetUniformLocation(lipMeshProgram, "uUvTopRight"), cameraUvCorners[6], cameraUvCorners[7])
         GLES20.glUniform3fv(GLES20.glGetUniformLocation(lipMeshProgram, "uPigment"), 1, pigment, 0)
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uCoverageMultiplier"), profile.coverageMultiplier)
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uLuminancePreservation"), profile.luminancePreservation)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uCoverageMultiplier"), profile.coverageMultiplier * tuning.coverage)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uLuminancePreservation"), profile.luminancePreservation * tuning.luminancePreservation)
         GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uMinimumLuminanceGain"), profile.minimumLuminanceGain)
         GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uMaximumLuminanceGain"), profile.maximumLuminanceGain)
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uRoughness"), profile.optics.roughness)
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uSpecularStrength"), profile.optics.specularStrength)
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uHighlightRetention"), profile.optics.highlightRetention)
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uMicroTextureRetention"), profile.optics.microTextureRetention)
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uWetInnerEdgeStrength"), profile.optics.wetInnerEdgeStrength)
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uSurfaceDetailRetention"), profile.optics.surfaceDetailRetention)
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uSatinGlowStrength"), profile.optics.satinGlowStrength)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uRoughness"), profile.optics.roughness * tuning.roughness)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uSpecularStrength"), profile.optics.specularStrength * tuning.specular)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uHighlightRetention"), profile.optics.highlightRetention * tuning.highlightRetention)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uMicroTextureRetention"), profile.optics.microTextureRetention * tuning.microTexture)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uWetInnerEdgeStrength"), profile.optics.wetInnerEdgeStrength * tuning.wetInnerEdge)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uSurfaceDetailRetention"), profile.optics.surfaceDetailRetention * tuning.surfaceDetail)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uSatinGlowStrength"), profile.optics.satinGlowStrength * tuning.satinGlow)
         GLES20.glUniform1f(
             GLES20.glGetUniformLocation(lipMeshProgram, "uSemanticConfidence"),
             semantics.lipConfidence,
         )
         GLES20.glUniform1f(
             GLES20.glGetUniformLocation(lipMeshProgram, "uSemanticEdgeStrength"),
-            semantics.edgeRefinementStrength,
+            semantics.edgeRefinementStrength * tuning.edgeRefinement,
         )
         GLES20.glUniform1f(
             GLES20.glGetUniformLocation(lipMeshProgram, "uFinishMode"),
@@ -796,9 +804,38 @@ internal class ArCoreFaceAnchorRenderer(
         )
         GLES20.glUniform2f(
             GLES20.glGetUniformLocation(lipMeshProgram, "uIlluminationSampleStep"),
-            ILLUMINATION_SAMPLE_RADIUS_PIXELS / viewportWidth,
-            ILLUMINATION_SAMPLE_RADIUS_PIXELS / viewportHeight,
+            ILLUMINATION_SAMPLE_RADIUS_PIXELS * tuning.cameraSampleScale / viewportWidth,
+            ILLUMINATION_SAMPLE_RADIUS_PIXELS * tuning.cameraSampleScale / viewportHeight,
         )
+
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uTuningOpacity"), tuning.opacity)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uTuningBrightness"), tuning.brightness)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uTuningContrast"), tuning.contrast)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uTuningSaturation"), tuning.saturation)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uTuningHueDegrees"), tuning.hueDegrees)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uTuningNaturalLipBlend"), tuning.naturalLipBlend)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uTuningCameraDetail"), tuning.cameraDetail)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uTuningMaterialDetail"), tuning.materialDetail)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uTuningShadowStrength"), tuning.shadowStrength)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uTuningHighlightStrength"), tuning.highlightStrength)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uTuningHighlightSize"), tuning.highlightSize)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uTuningHighlightThreshold"), tuning.highlightThreshold)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uTuningHighlightConcentration"), tuning.highlightConcentration)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uTuningEdgeSoftness"), tuning.edgeSoftness)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uTuningEdgeBlur"), tuning.edgeBlur)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uTuningInnerCoverage"), tuning.innerCoverage)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uTuningCornerFade"), tuning.cornerFade)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uTuningSeamShadow"), tuning.seamShadow)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uTuningToothProtection"), tuning.toothProtection)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uTuningCameraSampleScale"), tuning.cameraSampleScale)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uTuningLuminancePreservation"), tuning.luminancePreservation)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uTuningMicroTexture"), tuning.microTexture)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uTuningSurfaceDetail"), tuning.surfaceDetail)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uTuningRoughness"), tuning.roughness)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uTuningSpecular"), tuning.specular)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uTuningHighlightRetention"), tuning.highlightRetention)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uTuningSatinGlow"), tuning.satinGlow)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uTuningWetInnerEdge"), tuning.wetInnerEdge)
 
         GLES20.glUniform2f(GLES20.glGetUniformLocation(lipMeshProgram, "uSatinSourceTexelX"),
             satinSourceTexels[0], satinSourceTexels[1])
@@ -1222,6 +1259,34 @@ internal class ArCoreFaceAnchorRenderer(
             uniform vec2 uIlluminationSampleStep;
             uniform float uSemanticConfidence;
             uniform float uSemanticEdgeStrength;
+            uniform float uTuningOpacity;
+            uniform float uTuningBrightness;
+            uniform float uTuningContrast;
+            uniform float uTuningSaturation;
+            uniform float uTuningHueDegrees;
+            uniform float uTuningNaturalLipBlend;
+            uniform float uTuningCameraDetail;
+            uniform float uTuningMaterialDetail;
+            uniform float uTuningShadowStrength;
+            uniform float uTuningHighlightStrength;
+            uniform float uTuningHighlightSize;
+            uniform float uTuningHighlightThreshold;
+            uniform float uTuningHighlightConcentration;
+            uniform float uTuningEdgeSoftness;
+            uniform float uTuningEdgeBlur;
+            uniform float uTuningInnerCoverage;
+            uniform float uTuningCornerFade;
+            uniform float uTuningSeamShadow;
+            uniform float uTuningToothProtection;
+            uniform float uTuningCameraSampleScale;
+            uniform float uTuningLuminancePreservation;
+            uniform float uTuningMicroTexture;
+            uniform float uTuningSurfaceDetail;
+            uniform float uTuningRoughness;
+            uniform float uTuningSpecular;
+            uniform float uTuningHighlightRetention;
+            uniform float uTuningSatinGlow;
+            uniform float uTuningWetInnerEdge;
             varying vec2 vDisplayUv;
             varying vec3 vNormal;
             varying float vCoverage;
@@ -1409,6 +1474,31 @@ internal class ArCoreFaceAnchorRenderer(
                 return 0.05 + circles * 0.95;
             }
 
+            vec3 tuneHue(vec3 color, float degrees) {
+                float angle = radians(degrees);
+                vec3 axis = normalize(vec3(0.299, 0.587, 0.114));
+                return color * cos(angle) + cross(axis, color) * sin(angle) +
+                    axis * dot(axis, color) * (1.0 - cos(angle));
+            }
+
+            vec3 applyLipTuning(vec3 material, vec3 camera) {
+                float luminance = parityLuminance(material);
+                vec3 tuned = mix(vec3(luminance), material, uTuningSaturation);
+                tuned = tuneHue(tuned, uTuningHueDegrees);
+                tuned = (tuned - vec3(0.5)) * uTuningContrast + vec3(0.5);
+                tuned *= uTuningBrightness;
+                tuned = mix(tuned, camera, uTuningNaturalLipBlend);
+                return clamp(mix(camera, tuned, uTuningOpacity), 0.0, 1.0);
+            }
+
+            float tuneCoverage(float coverage) {
+                float softened = smoothstep(0.08, 0.92, coverage);
+                float tuned = mix(coverage, softened, uTuningEdgeSoftness);
+                tuned = pow(max(tuned, 0.0001), mix(1.0, 0.45, uTuningEdgeBlur));
+                float innerBand = smoothstep(0.62, 1.0, vLipUv.x);
+                return clamp(tuned * mix(1.0, uTuningInnerCoverage, innerBand), 0.0, 1.0);
+            }
+
             ${IosSatinLipMaterial.FRAGMENT_FUNCTION}
 
             vec4 renderMatteReference(float coverage) {
@@ -1443,7 +1533,7 @@ internal class ArCoreFaceAnchorRenderer(
                 float scenePigmentLuminance = pigmentLuminance * exposureScale;
                 float toneStrength = 0.92;
                 float pigmentStrength = 0.90;
-                float detailStrength = 0.92;
+                float detailStrength = 0.92 * uTuningMaterialDetail;
                 float targetLuminance = mix(
                     baseLuminance,
                     scenePigmentLuminance,
@@ -1469,7 +1559,7 @@ internal class ArCoreFaceAnchorRenderer(
                 float matteHighlightStrength = mix(0.65, 0.35, brightScene);
                 detailExponent =
                     clamp(shadowDetail, -0.14, 0.0) *
-                        detailStrength * matteShadowStrength +
+                        detailStrength * matteShadowStrength * uTuningShadowStrength +
                     clamp(highlightDetail, 0.0, 0.09) *
                         detailStrength * matteHighlightStrength;
                 float detail = exp2(detailExponent);
@@ -1484,7 +1574,7 @@ internal class ArCoreFaceAnchorRenderer(
                     1.0
                 );
                 float cornerFade =
-                    1.0 - smoothstep(0.72, 1.0, cornerPosition) * 0.30;
+                    1.0 - smoothstep(0.72, 1.0, cornerPosition) * 0.30 * uTuningCornerFade;
                 return vec4(mix(base, pigment, coverage * cornerFade), 1.0);
             }
 
@@ -1526,11 +1616,13 @@ internal class ArCoreFaceAnchorRenderer(
                 const vec3 luminanceWeights = vec3(0.2126, 0.7152, 0.0722);
                 vec3 cameraLinear = cameraLinearAt(vDisplayUv);
                 float coverage = clamp(vCoverage * uCoverageMultiplier, 0.0, 1.0);
-                coverage = semanticRefinedCoverage(coverage);
+                coverage = tuneCoverage(semanticRefinedCoverage(coverage));
+                vec3 cameraSrgb = cameraSrgbAt(vDisplayUv);
                 float cameraLuminance = max(dot(cameraLinear, luminanceWeights), 0.0001);
 
                 if (uFinishMode > 1.5) {
-                    gl_FragColor = renderIosSatin(coverage);
+                    vec4 satin = renderIosSatin(coverage);
+                    gl_FragColor = vec4(applyLipTuning(satin.rgb, cameraSrgb), 1.0);
                     return;
                 }
 
@@ -1539,7 +1631,8 @@ internal class ArCoreFaceAnchorRenderer(
                 bool usesIosParityFinish =
                     (uFinishMode > -0.5 && uFinishMode < 0.5);
                 if (usesIosParityFinish) {
-                    gl_FragColor = renderMatteReference(coverage);
+                    vec4 matte = renderMatteReference(coverage);
+                    gl_FragColor = vec4(applyLipTuning(matte.rgb, cameraSrgb), 1.0);
                     return;
                 }
 
@@ -1577,7 +1670,7 @@ internal class ArCoreFaceAnchorRenderer(
                 float positiveCameraDetail = max(
                     cameraLuminance - neighborhoodLuminance,
                     0.0
-                );
+                ) * uTuningCameraDetail;
                 float surfaceLuminance = mix(
                     neighborhoodLuminance,
                     cameraLuminance,
@@ -1703,7 +1796,8 @@ internal class ArCoreFaceAnchorRenderer(
                     adaptiveGloss
                 );
 
-                float textureDetail = cameraLuminance - neighborhoodLuminance;
+                float textureDetail = (cameraLuminance - neighborhoodLuminance) *
+                    uTuningCameraDetail * uTuningMaterialDetail;
                 float textureCorrection = textureDetail * uMicroTextureRetention *
                     coverage * 0.055;
                 float satinDiffuseGlow = satinGlow * coverage * sceneLightLevel *
@@ -1715,7 +1809,8 @@ internal class ArCoreFaceAnchorRenderer(
                 );
                 pigmented += chromaDirection * textureCorrection;
                 pigmented += specularColor;
-                gl_FragColor = vec4(linearToSrgb(max(pigmented, vec3(0.0))), 1.0);
+                vec3 materialSrgb = linearToSrgb(max(pigmented, vec3(0.0)));
+                gl_FragColor = vec4(applyLipTuning(materialSrgb, cameraSrgb), 1.0);
             }
         """
         const val POINT_VERTEX_SHADER = """

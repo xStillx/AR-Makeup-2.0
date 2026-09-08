@@ -31,4 +31,11 @@
     <string name="timeline_label">СИНХРОНИЗАЦИЯ КАДРА</string>
     <string name="timeline_async">Async 60 Гц</string>
     <string name="timeline_same_frame">Sync кадр</string>
+    <string name="tuning_title">Параметры</string>
+    <string name="tuning_copy">Копия</string>
+    <string name="tuning_reset">Сброс</string>
+    <string name="tuning_collapse">Свернуть</string>
+    <string name="tuning_expand">Развернуть</string>
+    <string name="tuning_copied">Параметры скопированы</string>
+    <string name="finish_group">МАТЕРИАЛ</string>
 </resources>

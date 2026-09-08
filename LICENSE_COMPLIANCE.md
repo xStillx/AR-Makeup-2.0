@@ -1,6 +1,6 @@
 # AR Makeup — лицензии и коммерческий release gate
 
-Актуально на 2026-09-02. Это инженерный реестр, не юридическое заключение. Перед коммерческим релизом нужен review профильного юриста в целевых юрисдикциях.
+Актуально на 2026-09-08. Это инженерный реестр, не юридическое заключение. Перед коммерческим релизом нужен review профильного юриста в целевых юрисдикциях.
 
 Обновлять до добавления или замены dependency, SDK, модели, weights, датасета, разметки, шрифта, изображения, текстуры, бренда или другого внешнего asset.
 
@@ -105,6 +105,12 @@
 - Android SDK Terms: https://developer.android.com/studio/terms
 - JUnit license: https://github.com/junit-team/junit4/blob/main/LICENSE-junit.txt
 
+
+## Banuba beauty-ios — только внешний reference
+
+Публичный `Banuba/beauty-ios` исследован на commit `79e41745638c46788e4faba95dd68114a3f3094a`; корневой sample code опубликован под MIT. Сам Banuba Face AR SDK, client token, бинарные библиотеки и генерируемые SDK masks `LIPS`/`LIPS_SHINING` регулируются отдельной коммерческой лицензией и в проект не добавлены. Новых dependency, моделей, shaders, textures и assets из Banuba в текущем checkpoint нет.
+
+Разрешённый следующий шаг — самостоятельно реализовать общий принцип camera-value color transfer в собственном GLSL на существующем ARCore/MediaPipe pipeline. При буквальном или существенном переносе MIT-кода потребуется сохранить copyright/license notice; предпочтителен самостоятельный эквивалент стандартного HSV-преобразования с документированием provenance.
 
 ## Происхождение переноса сатина — 2026-09-04
 

@@ -13,49 +13,6 @@
         android:layout_height="match_parent"
         android:importantForAccessibility="no" />
 
-    <com.google.android.material.card.MaterialCardView
-        android:id="@+id/status_card"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_gravity="top"
-        android:layout_marginStart="16dp"
-        android:layout_marginTop="16dp"
-        android:layout_marginEnd="16dp"
-        app:cardBackgroundColor="@color/glass_900"
-        app:cardCornerRadius="20dp"
-        app:cardElevation="0dp"
-        app:strokeColor="@color/glass_border"
-        app:strokeWidth="1dp">
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:paddingStart="18dp"
-            android:paddingTop="14dp"
-            android:paddingEnd="18dp"
-            android:paddingBottom="14dp">
-
-            <TextView
-                android:id="@+id/status_title"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="@string/status_preparing"
-                android:textColor="@color/text_primary_on_dark"
-                android:textSize="17sp"
-                android:textStyle="bold" />
-
-            <TextView
-                android:id="@+id/status_metrics"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="3dp"
-                android:text="@string/metrics_initial"
-                android:textColor="@color/text_secondary_on_dark"
-                android:textSize="13sp" />
-        </LinearLayout>
-    </com.google.android.material.card.MaterialCardView>
-
     <LinearLayout
         android:id="@+id/permission_panel"
         android:layout_width="300dp"
@@ -69,6 +26,7 @@
         tools:visibility="visible">
 
         <TextView
+            android:id="@+id/permission_title"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:gravity="center"
@@ -78,6 +36,7 @@
             android:textStyle="bold" />
 
         <TextView
+            android:id="@+id/permission_message"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="10dp"
@@ -103,11 +62,11 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_gravity="bottom"
-        android:layout_marginStart="16dp"
-        android:layout_marginEnd="16dp"
-        android:layout_marginBottom="16dp"
+        android:layout_marginStart="10dp"
+        android:layout_marginEnd="10dp"
+        android:layout_marginBottom="10dp"
         app:cardBackgroundColor="@color/glass_900"
-        app:cardCornerRadius="20dp"
+        app:cardCornerRadius="18dp"
         app:cardElevation="0dp"
         app:strokeColor="@color/glass_border"
         app:strokeWidth="1dp">
@@ -115,142 +74,128 @@
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:padding="18dp">
+            android:orientation="vertical">
 
-            <TextView
+            <LinearLayout
                 android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:letterSpacing="0.1"
-                android:text="@string/phase_label"
-                android:textColor="@color/rose_300"
-                android:textSize="11sp"
-                android:textStyle="bold" />
+                android:layout_height="52dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingStart="14dp"
+                android:paddingEnd="8dp">
 
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="6dp"
-                android:text="@string/phase_description"
-                android:textColor="@color/text_primary_on_dark"
-                android:textSize="14sp" />
-
-            <com.google.android.material.button.MaterialButtonToggleGroup
-                android:id="@+id/finish_toggle_group"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="12dp"
-                app:checkedButton="@id/finish_satin"
-                app:selectionRequired="true"
-                app:singleSelection="true">
-
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/finish_matte"
-                    style="@style/Widget.Material3.Button.OutlinedButton"
+                <TextView
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:minHeight="40dp"
-                    android:minWidth="0dp"
-                    android:paddingStart="4dp"
-                    android:paddingEnd="4dp"
-                    android:text="@string/finish_matte"
-                    android:textColor="@color/finish_button_text"
-                    android:textSize="12sp"
-                    android:textAllCaps="false" />
+                    android:text="@string/tuning_title"
+                    android:textColor="@color/text_primary_on_dark"
+                    android:textSize="16sp"
+                    android:textStyle="bold" />
 
                 <com.google.android.material.button.MaterialButton
-                    android:id="@+id/finish_satin"
-                    style="@style/Widget.Material3.Button.OutlinedButton"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:minHeight="40dp"
+                    android:id="@+id/copy_tuning"
+                    style="@style/Widget.Material3.Button.TextButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="40dp"
                     android:minWidth="0dp"
-                    android:paddingStart="4dp"
-                    android:paddingEnd="4dp"
-                    android:text="@string/finish_satin"
-                    android:textColor="@color/finish_button_text"
-                    android:textSize="12sp"
-                    android:textAllCaps="false" />
-
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/finish_gloss"
-                    style="@style/Widget.Material3.Button.OutlinedButton"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:minHeight="40dp"
-                    android:minWidth="0dp"
-                    android:paddingStart="4dp"
-                    android:paddingEnd="4dp"
-                    android:text="@string/finish_gloss"
-                    android:textColor="@color/finish_button_text"
-                    android:textSize="12sp"
-                    android:textAllCaps="false" />
-
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/finish_tracking_test"
-                    style="@style/Widget.Material3.Button.OutlinedButton"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:minHeight="40dp"
-                    android:minWidth="0dp"
-                    android:paddingStart="4dp"
-                    android:paddingEnd="4dp"
-                    android:text="@string/finish_tracking_test"
-                    android:textColor="@color/finish_button_text"
-                    android:textSize="12sp"
+                    android:text="@string/tuning_copy"
                     android:textAllCaps="false"
-                    android:visibility="visible" />
-            </com.google.android.material.button.MaterialButtonToggleGroup>
-
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="12dp"
-                android:letterSpacing="0.1"
-                android:text="@string/timeline_label"
-                android:textColor="@color/rose_300"
-                android:textSize="11sp"
-                android:textStyle="bold" />
-
-            <com.google.android.material.button.MaterialButtonToggleGroup
-                android:id="@+id/timeline_toggle_group"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="6dp"
-                app:checkedButton="@id/timeline_same_frame"
-                app:selectionRequired="true"
-                app:singleSelection="true">
+                    android:textColor="@color/rose_300" />
 
                 <com.google.android.material.button.MaterialButton
-                    android:id="@+id/timeline_async"
-                    style="@style/Widget.Material3.Button.OutlinedButton"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:minHeight="40dp"
+                    android:id="@+id/reset_tuning"
+                    style="@style/Widget.Material3.Button.TextButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="40dp"
                     android:minWidth="0dp"
-                    android:text="@string/timeline_async"
+                    android:text="@string/tuning_reset"
                     android:textAllCaps="false"
-                    android:textColor="@color/finish_button_text"
-                    android:textSize="12sp" />
+                    android:textColor="@color/rose_300" />
 
                 <com.google.android.material.button.MaterialButton
-                    android:id="@+id/timeline_same_frame"
-                    style="@style/Widget.Material3.Button.OutlinedButton"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:minHeight="40dp"
+                    android:id="@+id/toggle_tuning"
+                    style="@style/Widget.Material3.Button.TextButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="40dp"
                     android:minWidth="0dp"
-                    android:text="@string/timeline_same_frame"
+                    android:text="@string/tuning_collapse"
                     android:textAllCaps="false"
-                    android:textColor="@color/finish_button_text"
-                    android:textSize="12sp" />
-            </com.google.android.material.button.MaterialButtonToggleGroup>
+                    android:textColor="@color/rose_300" />
+            </LinearLayout>
+
+            <ScrollView
+                android:id="@+id/tuning_scroll"
+                android:layout_width="match_parent"
+                android:layout_height="180dp"
+                android:clipToPadding="false"
+                android:fadeScrollbars="false"
+                android:paddingStart="14dp"
+                android:paddingEnd="14dp"
+                android:paddingBottom="16dp">
+
+                <LinearLayout
+                    android:id="@+id/tuning_container"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical">
+
+                    <TextView
+                        style="@style/LipTuningSection"
+                        android:text="@string/finish_group" />
+
+                    <com.google.android.material.button.MaterialButtonToggleGroup
+                        android:id="@+id/finish_toggle_group"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="5dp"
+                        app:checkedButton="@id/finish_satin"
+                        app:selectionRequired="true"
+                        app:singleSelection="true">
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/finish_matte"
+                            style="@style/LipTuningToggle"
+                            android:text="@string/finish_matte" />
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/finish_satin"
+                            style="@style/LipTuningToggle"
+                            android:text="@string/finish_satin" />
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/finish_gloss"
+                            style="@style/LipTuningToggle"
+                            android:text="@string/finish_gloss" />
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/finish_tracking_test"
+                            style="@style/LipTuningToggle"
+                            android:text="@string/finish_tracking_test" />
+                    </com.google.android.material.button.MaterialButtonToggleGroup>
+
+                    <TextView
+                        style="@style/LipTuningSection"
+                        android:text="@string/timeline_label" />
+
+                    <com.google.android.material.button.MaterialButtonToggleGroup
+                        android:id="@+id/timeline_toggle_group"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="5dp"
+                        app:checkedButton="@id/timeline_same_frame"
+                        app:selectionRequired="true"
+                        app:singleSelection="true">
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/timeline_async"
+                            style="@style/LipTuningToggle"
+                            android:text="@string/timeline_async" />
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/timeline_same_frame"
+                            style="@style/LipTuningToggle"
+                            android:text="@string/timeline_same_frame" />
+                    </com.google.android.material.button.MaterialButtonToggleGroup>
+
+                </LinearLayout>
+            </ScrollView>
         </LinearLayout>
     </com.google.android.material.card.MaterialCardView>
 

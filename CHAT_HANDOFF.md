@@ -1,7 +1,16 @@
 # ARMakeup — handoff текущей задачи
 
-Актуально на 2026-09-04. Архитектура и ограничения — PROJECT_CONTEXT.md, дальнейший план — FULL_FACE_ROADMAP.md, лицензии — LICENSE_COMPLIANCE.md.
+Актуально на 2026-09-08. Архитектура и ограничения — PROJECT_CONTEXT.md, дальнейший план — FULL_FACE_ROADMAP.md, лицензии — LICENSE_COMPLIANCE.md.
 
+## Активно: интерактивная настройка материала — 2026-09-08
+
+Верхняя status/metrics карточка удалена. Нижняя сворачиваемая панель содержит finish, Async/Sync и 30 runtime-параметров в группах `ОБЩЕЕ`, `ЦВЕТ`, `ФАКТУРА`, `БЛИКИ`, `КРАЯ И РОТ`, `КАМЕРА`. Значения применяются сразу immutable snapshot-ом `LipstickTuning`, сохраняются и сбрасываются раздельно для каждого finish. Для SATIN дефолтом утверждён экспорт пользователя: opacity .96, brightness .90, contrast 1.03, saturation .86, naturalLip .08, surfaceDetail 1, roughness .90, highlightStrength .65, highlightSize 1.30, edgeBlur .05, innerCoverage .38; остальные перечисленные пользователем значения 1 либо 0 сохранены в `defaultsFor(SATIN)`. Matte/gloss имеют нейтральные defaults. Раскрытая прокрутка 180 dp не перекрывает губы на SM-G990B.
+
+Параметры подключены к общей композитной цепочке и релевантным веткам matte/satin/gloss. Coverage-based `Мягкость/Растушёвка` — управляемый текущий feather, не финальный iOS-подобный separable alpha blur. Tracking/Sync/mesh geometry не менялись.
+
+Следующая согласованная задача: camera-value color transfer по принципу публичного Banuba beauty-ios для всех вариантов помады. Banuba SDK/модели/сегментационные masks не подключать; использовать текущие exact Sync camera pixels и MediaPipe coverage. В этом checkpoint transfer ещё отсутствует.
+
+`:app:assembleDebug` успешен, unit-тесты не запускались. Debug установлен и запущен на R5CRC3SPVNE; FACE TRACKING, Sync age=0 и компиляция GLSL подтверждены, LipFrameTrace=S. Smoke одного slider update + reset прошёл без runtime-ошибок. Пользовательская визуальная настройка ещё впереди. Рабочее дерево содержит незакоммиченные изменения; commit/push не запрошены.
 ## Активно: устранение полоски между губами — 2026-09-04
 
 Пользователь разрешил начать исправление полоски после checkpoint 3700c9f. Первый candidate устраняет подтверждённое двойное ослабление покрытия на стороне губы. После установки пользователь поручил «Оставь пока так и закоммить». Это сохранённый рабочий вариант, а не подтверждение полного исчезновения полоски и проверки всех mouth/teeth случаев.

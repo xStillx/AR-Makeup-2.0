@@ -82,8 +82,8 @@ internal object IosSatinLipMaterial {
 
             vec4 renderIosSatin(float coverage) {
                 vec3 base = cameraSrgbAt(vDisplayUv);
-                vec2 dx = uSatinSourceTexelX * 5.0;
-                vec2 dy = uSatinSourceTexelY * 5.0;
+                vec2 dx = uSatinSourceTexelX * 5.0 * uTuningCameraSampleScale;
+                vec2 dy = uSatinSourceTexelY * 5.0 * uTuningCameraSampleScale;
                 vec3 blurred = base * 4.0;
                 blurred += cameraSrgbAt(vDisplayUv + dx);
                 blurred += cameraSrgbAt(vDisplayUv - dx);
@@ -94,8 +94,10 @@ internal object IosSatinLipMaterial {
                 blurred += cameraSrgbAt(vDisplayUv + dx - dy);
                 blurred += cameraSrgbAt(vDisplayUv - dx + dy);
                 blurred /= 12.0;
-                vec2 hx = uSatinSourceTexelX * 12.0;
-                vec2 hy = uSatinSourceTexelY * 8.0;
+                vec2 hx = uSatinSourceTexelX * 12.0 * uTuningCameraSampleScale *
+                    uTuningHighlightSize;
+                vec2 hy = uSatinSourceTexelY * 8.0 * uTuningCameraSampleScale *
+                    uTuningHighlightSize;
                 vec3 highlightSurround = (
                     cameraSrgbAt(vDisplayUv + hx) + cameraSrgbAt(vDisplayUv - hx) +
                     cameraSrgbAt(vDisplayUv + hy) + cameraSrgbAt(vDisplayUv - hy)
@@ -108,12 +110,16 @@ internal object IosSatinLipMaterial {
                 // No global low-light multiplier until an equivalent light estimate is available.
                 float combinedLighting = clamp(mix(1.0, localLighting, 0.25), 0.45, 1.0);
                 float brightScene = smoothstep(0.78, 1.0, combinedLighting);
-                float logDetail = log2(max(baseLuminance, 0.04)) -
-                    log2(max(blurredLuminance, 0.04));
+                float logDetail = (log2(max(baseLuminance, 0.04)) -
+                    log2(max(blurredLuminance, 0.04))) * uTuningCameraDetail *
+                    uTuningSurfaceDetail;
                 // Metal satin detailStrength * creamy.detailResponse.
-                float detailStrength = 1.7 * 0.92 * mix(1.0, 0.45, brightScene);
-                float detailExponent = clamp(min(logDetail, 0.0), -0.14, 0.0) * detailStrength * 1.30 +
-                    clamp(max(logDetail, 0.0), 0.0, 0.10) * detailStrength * 0.92;
+                float detailStrength = 1.7 * 0.92 * mix(1.0, 0.45, brightScene) *
+                    uTuningMaterialDetail;
+                float detailExponent = clamp(min(logDetail, 0.0), -0.14, 0.0) * detailStrength * 1.30 *
+                    uTuningShadowStrength +
+                    clamp(max(logDetail, 0.0), 0.0, 0.10) * detailStrength * 0.92 *
+                    uTuningMicroTexture;
                 float cornerPosition = clamp(abs(vSatinUv.x - 0.5) * 2.0, 0.0, 1.0);
                 float cornerRegion = smoothstep(0.62, 0.96, cornerPosition);
                 float innerSeamRegion = 1.0 - smoothstep(0.018, 0.085, abs(vSatinUv.y - 0.50));
@@ -121,38 +127,52 @@ internal object IosSatinLipMaterial {
                 float openMouth = uSatinApertureVisibility;
                 float apertureClosure = 1.0 - openMouth;
                 float seamShadow = 1.0 - innerSeamRegion * smoothstep(0.30, 0.56, openMouth) *
-                    (0.020 + localShadow * 0.08);
+                    (0.020 + localShadow * 0.08 * uTuningShadowStrength) * uTuningSeamShadow;
                 vec3 pigment = clamp(uPigment * exp2(detailExponent) * seamShadow, 0.0, 1.0);
                 float maximum = max(base.r, max(base.g, base.b));
                 float minimum = min(base.r, min(base.g, base.b));
                 float saturation = maximum > 0.001 ? (maximum - minimum) / maximum : 0.0;
-                float toothGuard = smoothstep(0.64, 0.82, baseLuminance) *
+                float toothGuard = clamp(smoothstep(0.64, 0.82, baseLuminance) *
                     (1.0 - smoothstep(0.16, 0.30, saturation)) *
-                    smoothstep(0.24, 0.46, openMouth) * innerSeamRegion;
+                    smoothstep(0.24, 0.46, openMouth) * innerSeamRegion *
+                    uTuningToothProtection, 0.0, 1.0);
 
                 float surroundLuminance = max(parityLuminance(highlightSurround), 0.04);
-                float relativeHighlight = smoothstep(0.035, 0.22,
+                float relativeHighlight = smoothstep(0.035 * uTuningHighlightThreshold,
+                    0.22 * uTuningHighlightThreshold,
                     log2(max(baseLuminance, 0.04) / surroundLuminance));
                 float highlightBrightness = smoothstep(0.18, 0.68, baseLuminance);
                 float highlightDifference = max(baseLuminance - surroundLuminance, 0.0);
-                float naturalHighlight = pow(clamp(relativeHighlight * highlightBrightness, 0.0, 1.0), 1.15);
+                float naturalHighlight = pow(clamp(relativeHighlight * highlightBrightness, 0.0, 1.0),
+                    1.15 * uTuningHighlightConcentration / max(uTuningRoughness, 0.35));
                 // Metal satin highlightStrength * creamy.highlightResponse; high density.
                 float highlightAmount = min(naturalHighlight * (0.07 + highlightDifference * 0.90) *
-                    (1.16 * 1.32), 0.48);
-                highlightAmount *= (1.0 - cornerRegion * 0.82) *
+                    (1.16 * 1.32) * uTuningHighlightStrength * uTuningSpecular *
+                    uTuningHighlightRetention * uTuningSatinGlow,
+                    0.48 * uTuningHighlightStrength * uTuningSpecular * uTuningSatinGlow);
+                highlightAmount *= (1.0 - clamp(cornerRegion * 0.82 *
+                    uTuningCornerFade, 0.0, 1.0)) *
                     (1.0 - innerSeamRegion * mix(0.74, 0.92, apertureClosure)) *
                     (1.0 - toothGuard * 0.96);
-                pigment = mix(pigment, vec3(1.0), highlightAmount);
+                highlightAmount *= 1.0 + (uTuningWetInnerEdge - 1.0) * innerSeamRegion *
+                    openMouth * 0.22;
+                pigment = mix(pigment, vec3(1.0), clamp(highlightAmount, 0.0, 0.96));
                 pigment = mix(pigment, base * (1.0 - localShadow * 0.05), toothGuard * 0.94);
 
                 float pigmentLuminance = parityLuminance(pigment);
+                float luminanceDelta = (uTuningLuminancePreservation - 1.0) *
+                    (baseLuminance - pigmentLuminance) * 0.60;
+                pigment = parityColorWithLuminance(pigment, clamp(
+                    pigmentLuminance + luminanceDelta, 0.0, 1.0));
+                pigmentLuminance = parityLuminance(pigment);
                 float capturedCornerLuminance = min(baseLuminance, blurredLuminance);
                 float cornerShadowEvidence = smoothstep(0.025, 0.18,
                     pigmentLuminance - capturedCornerLuminance);
                 float retainedCornerLuminance = max(capturedCornerLuminance, pigmentLuminance * 0.58);
                 pigment = parityColorWithLuminance(pigment, mix(pigmentLuminance, retainedCornerLuminance,
                     smoothstep(0.86, 1.0, cornerPosition) * cornerShadowEvidence * 0.76));
-                float cornerOpacity = 1.0 - smoothstep(0.82, 0.98, cornerPosition) * 0.12;
+                float cornerOpacity = 1.0 - smoothstep(0.82, 0.98, cornerPosition) *
+                    0.12 * uTuningCornerFade;
                 // High-density compensationAlpha/outputCoverage = 0.92. SceneKit opacity = 0.99.
                 // Compensate the local average only, preserving the captured fine relief.
                 vec3 correctiveColor = clamp((pigment - blurred * 0.08) / 0.92, 0.0, 1.0);
