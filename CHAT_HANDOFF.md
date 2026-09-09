@@ -1,6 +1,12 @@
 # ARMakeup — handoff текущей задачи
 
-Актуально на 2026-09-08. Архитектура и ограничения — PROJECT_CONTEXT.md, дальнейший план — FULL_FACE_ROADMAP.md, лицензии — LICENSE_COMPLIANCE.md.
+Актуально на 2026-09-09. Архитектура и ограничения — PROJECT_CONTEXT.md, дальнейший план — FULL_FACE_ROADMAP.md, лицензии — LICENSE_COMPLIANCE.md.
+
+## Активно: L'Oréal Paris Infaillible Laque Resistance 515 Brown Espresso — 2026-09-09
+
+Утверждён конечный вариант L'Oréal Paris Infaillible Laque Resistance 515 Brown Espresso: GLOSS, основной цвет RGB 100/50/41 (`#643229`), `contrast=1.05`, `hue=0.6`, `camera_value_transfer=0.82`, `specular=0.15`; остальные значения приведены в полном блоке PROJECT_CONTEXT.md и `LIPSTICK_PRESETS.md`. Финальный versioned preference key защищает preset от прежних GLOSS candidates и не затрагивает SATIN. Предыдущая база RGB 105/26/7 и замер на губах RGB 84/35/30 сохранены только как история сравнения. Фото в Git не копировать.
+
+Для первого отображения следующей новой помады принято стартовать с точного RGB, `pigment_brightness/brightness/contrast/saturation=1`, `hue=0` и адаптивного `camera_value_transfer`: 0.80–0.82 для pigment value ≤0.45, около 0.90 для 0.45–0.65, 1.00 для более светлого цвета. Для плотного GLOSS: opacity 1, naturalLip 0, specular 0.15. Это эвристика первого device candidate; автоматизация в коде не реализована, финальные значения остаются per-product.
 
 ## Активно: интерактивная настройка материала — 2026-09-08
 

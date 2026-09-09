@@ -63,10 +63,10 @@ internal enum class LipstickFinish {
 /**
  * Reference source-sRGB pigments used by product finishes.
  *
- * Pigment identity remains independent from finish optics. Matte and gloss keep the classic 999
- * calibration reference, while satin uses the separately requested B8202D calibration colour.
- * These labels are internal visual references, not claims that the values are official brand
- * colour specifications.
+ * Pigment identity remains independent from finish optics. Matte keeps the classic 999 calibration
+ * reference, satin uses B8202D, and the active gloss target uses the user-provided Brown Espresso
+ * 515 colour sample. These labels are internal visual references, not claims that the values are
+ * official brand colour specifications.
  */
 internal object ReferenceLipstickPigments {
     const val PRODUCT_CLASSIC_RED_999_SRGB_HEX = 0x9E2620
@@ -86,6 +86,15 @@ internal object ReferenceLipstickPigments {
     const val SATIN_RED_B8202D_RED_SRGB = SATIN_RED_B8202D_RED_8BIT / 255f
     const val SATIN_RED_B8202D_GREEN_SRGB = SATIN_RED_B8202D_GREEN_8BIT / 255f
     const val SATIN_RED_B8202D_BLUE_SRGB = SATIN_RED_B8202D_BLUE_8BIT / 255f
+
+    const val GLOSS_BROWN_ESPRESSO_515_SRGB_HEX = 0x643229
+    const val GLOSS_BROWN_ESPRESSO_515_RED_8BIT = 100
+    const val GLOSS_BROWN_ESPRESSO_515_GREEN_8BIT = 50
+    const val GLOSS_BROWN_ESPRESSO_515_BLUE_8BIT = 41
+
+    const val GLOSS_BROWN_ESPRESSO_515_RED_SRGB = GLOSS_BROWN_ESPRESSO_515_RED_8BIT / 255f
+    const val GLOSS_BROWN_ESPRESSO_515_GREEN_SRGB = GLOSS_BROWN_ESPRESSO_515_GREEN_8BIT / 255f
+    const val GLOSS_BROWN_ESPRESSO_515_BLUE_SRGB = GLOSS_BROWN_ESPRESSO_515_BLUE_8BIT / 255f
 }
 
 /**

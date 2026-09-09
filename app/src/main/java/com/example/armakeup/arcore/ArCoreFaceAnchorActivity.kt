@@ -52,7 +52,7 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
     private var renderSchedulerRunning = false
     private var lastRenderRequestNs = 0L
     private var resumed = false
-    private var selectedFinish = LipstickFinish.SATIN
+    private var selectedFinish = LipstickFinish.GLOSS
     private var tuning = LipstickTuning.defaultsFor(selectedFinish)
     private var tuningExpanded = true
     private var updatingTuningControls = false
@@ -93,6 +93,7 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
 
         tuning = restoreTuning(selectedFinish)
         renderer.setLipstickTuning(tuning)
+        renderer.setLipstickFinish(selectedFinish)
         createTuningControls()
         bindPanelActions()
 
@@ -289,7 +290,12 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
     private fun preferenceKey(
         finish: LipstickFinish,
         parameter: LipstickTuningParameter,
-    ): String = "${finish.name}_${parameter.name}"
+    ): String = "${tuningProfileKey(finish)}_${parameter.name}"
+
+    private fun tuningProfileKey(finish: LipstickFinish): String = when (finish) {
+        LipstickFinish.GLOSS -> "GLOSS_LOREAL_BROWN_ESPRESSO_515_FINAL_643229"
+        else -> finish.name
+    }
 
     private fun startSessionIfPossible() {
         if (!resumed) return

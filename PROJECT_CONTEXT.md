@@ -1,6 +1,63 @@
 # AR Makeup — актуальный контекст проекта
 
-Актуально на 2026-09-08. Этот файл хранит только текущее состояние и долгоживущие решения. Итоги отклонённых экспериментов сохранены кратко; локальные снимки не входят в Git.
+Актуально на 2026-09-09. Этот файл хранит только текущее состояние и долгоживущие решения. Итоги отклонённых экспериментов сохранены кратко; локальные снимки не входят в Git.
+
+## Активно: L'Oréal Paris Infaillible Laque Resistance 515 Brown Espresso — 2026-09-09
+
+Завершена настройка плотной глянцевой помады L'Oréal Paris Infaillible Laque Resistance 515 Brown Espresso. Пользователь утвердил основным цветом замер свотча на руке RGB 100/50/41 (`#643229`) и передал конечный набор runtime-параметров.
+
+Конечный GLOSS preset использует RGB 100/50/41 (`#643229`). Предыдущий результат на губах при pigment RGB 105/26/7 (`#691A07`) давал замер RGB 84/35/30 (`#54231E`); это сохранено только как контрольная история, а не текущая база.
+
+```text
+finish=GLOSS
+opacity=1.00
+coverage=1.00
+natural_lip=0.00
+pigment_red=100
+pigment_green=50
+pigment_blue=41
+pigment_brightness=1.00
+brightness=1.00
+contrast=1.05
+saturation=1.00
+hue=0.6
+luminance=1.00
+camera_value_transfer=0.82
+camera_detail=1.00
+material_detail=1.00
+shadow=1.00
+micro_texture=1.00
+surface_detail=1.00
+roughness=1.00
+specular=0.15
+highlight_retention=1.00
+highlight_strength=1.00
+highlight_size=1.00
+highlight_threshold=1.00
+highlight_concentration=1.00
+satin_glow=1.00
+wet_inner_edge=1.00
+edge_refinement=1.00
+edge_softness=0.00
+edge_blur=0.00
+inner_coverage=1.00
+corner_fade=1.00
+seam_shadow=1.00
+tooth_protection=1.00
+camera_sample_scale=1.00
+```
+
+Launcher стартует с GLOSS для этого продукта. Финальный preset `#643229` использует отдельный versioned preference profile, поэтому прежние GLOSS-значения и рабочие candidates не перекрывают утверждённую базу после `adb install -r`; сохранённый SATIN profile не затрагивается. Tracking, exact-pair Sync, mesh, topology и temporal filters не меняются.
+
+Полный утверждённый набор и основной цвет внесены в `LIPSTICK_PRESETS.md`. Исходные фотографии не копируются в Git.
+
+### Принятое правило первого отображения новой помады
+
+Для нового продукта сначала сохранять точный основной RGB без компенсации через `pigment_brightness` или общую `brightness`: оба параметра стартуют с 1.00, как и `contrast`/`saturation`; `hue=0`. Главная стартовая поправка — `camera_value_transfer`, потому что полный перенос при тёмном пигменте умножает camera value на малый `pigmentValue/0.85` и может чрезмерно затемнять результат. Ориентир для первого candidate: pigment HSV value до 0.45 → transfer 0.80–0.82; 0.45–0.65 → около 0.90; выше 0.65 → 1.00. Это стартовая эвристика для device A/B, а не финальная формула или замена пользовательского принятия.
+
+Для плотного лака стартовать с `opacity=1`, `natural_lip=0`; для средней плотности и тинтов отдельно увеличивать примесь натуральных губ и/или снижать opacity. Для нового GLOSS стартовый `specular=0.15`, `highlight_retention=1`, `highlight_strength=1`; остальное нейтрально. `hue=0.6` у Brown Espresso — индивидуальная коррекция, не общий default. Порядок настройки: camera-value transfer → opacity/natural lip → contrast → specular/highlight → только затем brightness/hue.
+
+Адаптивный выбор этих стартовых значений в коде пока не автоматизирован. Текущие defaults остаются явными per-product наборами; не менять принятую цветопередачу или её формулу без отдельной задачи и device evidence.
 
 ## Активно: интерактивная настройка материала — 2026-09-08
 
@@ -20,6 +77,7 @@
 Связанные документы:
 
 - `AGENTS.md` — обязательные правила работы в репозитории;
+- `LIPSTICK_PRESETS.md` — реестр утверждённых конечных вариантов параметров помады;
 - `FULL_FACE_ROADMAP.md` — только будущий план;
 - `CHAT_HANDOFF.md` — короткая оперативная передача контекста;
 - `IOS_REFERENCE_CONTEXT.md` — исследование iOS-reference, различия материалов/масок и новые требования;
