@@ -10,45 +10,45 @@
 - Финиш: `SATIN`
 - Оттенок: Dior Rouge Dior Satin 999
 - Базовый цвет: `#B8202D` (`RGB 184, 32, 45`)
-- Зафиксировано в checkpoint: `4eca18a`
+- Зафиксировано в checkpoint `[Makeup] Finalize Dior 999 satin preset`; заменяет вариант из `4eca18a`
 
 ```text
 finish=SATIN
+opacity=0.69
+coverage=1.00
+natural_lip=0.00
 pigment_red=184
 pigment_green=32
 pigment_blue=45
 pigment_brightness=0.90
-opacity=0.69
-coverage=1.00
-natural_lip=0.50
 brightness=1.00
-contrast=1.37
-saturation=1.57
+contrast=1.00
+saturation=2.00
 hue=-0.9
-luminance=1.00
+luminance=0.90
 camera_value_transfer=1.00
-camera_detail=1.00
-material_detail=1.00
-shadow=1.00
-micro_texture=1.00
-surface_detail=1.00
-roughness=0.90
-specular=1.00
-highlight_retention=1.00
-highlight_strength=0.65
-highlight_size=1.30
-highlight_threshold=1.00
-highlight_concentration=1.00
-satin_glow=1.00
-wet_inner_edge=1.00
+camera_detail=0.00
+material_detail=0.00
+shadow=0.00
+micro_texture=0.00
+surface_detail=0.00
+roughness=0.35
+specular=0.00
+highlight_retention=0.00
+highlight_strength=0.00
+highlight_size=0.40
+highlight_threshold=0.50
+highlight_concentration=0.50
+satin_glow=0.00
+wet_inner_edge=0.00
 edge_refinement=2.00
-edge_softness=0.00
-edge_blur=0.05
+edge_softness=1.00
+edge_blur=1.00
 inner_coverage=1.00
 corner_fade=2.00
-seam_shadow=1.97
+seam_shadow=1.95
 tooth_protection=2.00
-camera_sample_scale=1.91
+camera_sample_scale=0.35
 ```
 
 `pigment_brightness` изменяет исходный цвет до camera-value transfer, фактуры и бликов. `brightness` — это «Яркость материала», применяемая к уже рассчитанному материалу.

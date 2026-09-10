@@ -52,7 +52,7 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
     private var renderSchedulerRunning = false
     private var lastRenderRequestNs = 0L
     private var resumed = false
-    private var selectedFinish = LipstickFinish.GLOSS
+    private var selectedFinish = LipstickFinish.MATTE
     private var tuning = LipstickTuning.defaultsFor(selectedFinish)
     private var tuningExpanded = true
     private var updatingTuningControls = false
@@ -293,6 +293,8 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
     ): String = "${tuningProfileKey(finish)}_${parameter.name}"
 
     private fun tuningProfileKey(finish: LipstickFinish): String = when (finish) {
+        LipstickFinish.MATTE -> "MATTE_START_RULES_CLASSIC_RED_9E2620"
+        LipstickFinish.SATIN -> "SATIN_DIOR_999_FINAL_B8202D_FEATHER_V2"
         LipstickFinish.GLOSS -> "GLOSS_LOREAL_BROWN_ESPRESSO_515_FINAL_643229"
         else -> finish.name
     }

@@ -53,7 +53,11 @@ internal class ArCoreFaceAnchorRenderer(
     private var lipMeshProgram = 0
     private var pairedBackgroundProgram = 0
     private var pairedLipMeshProgram = 0
+    private var lipBlurProgram = 0
+    private var lipCompositeProgram = 0
+    private var pairedLipCompositeProgram = 0
     private val pairedCameraFrames = PairedCameraFrameStore()
+    private val lipBlurFrames = LipBlurFrameStore()
     private var pendingPair: CameraPair? = null
     private var presentedPair: CameraPair? = null
     private var presentedObservation: ArCoreMediaPipeLipTracker.Observation? = null
@@ -63,6 +67,9 @@ internal class ArCoreFaceAnchorRenderer(
     private var cameraTextureBoundSession: Session? = null
 
     private val transformedCameraUvs = directFloatBuffer(8)
+    private val framebufferUvs = directFloatBuffer(BUFFERED_CAMERA_UVS)
+    private val lipBlurStep = FloatArray(2)
+    private val lipBlurScissor = IntArray(4)
     private val lipAnchorVertex = directFloatBuffer(3)
     private val stableLipAnchorLocal = FloatArray(3)
     private var hasStableLipAnchor = false
@@ -171,6 +178,7 @@ internal class ArCoreFaceAnchorRenderer(
 
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
         pairedCameraFrames.onContextCreated()
+        lipBlurFrames.onContextCreated()
         invalidateSameFrameState()
         cameraTextureBoundSession = null
         configuredDisplayRotation = -1
@@ -185,6 +193,13 @@ internal class ArCoreFaceAnchorRenderer(
         )
         pairedLipMeshProgram = createProgram(
             LIP_MESH_VERTEX_SHADER, bufferedCameraShader(LIP_MESH_FRAGMENT_SHADER),
+        )
+        lipBlurProgram = createProgram(BACKGROUND_VERTEX_SHADER, LIP_BLUR_FRAGMENT_SHADER)
+        lipCompositeProgram = createProgram(
+            LIP_COMPOSITE_VERTEX_SHADER, LIP_COMPOSITE_FRAGMENT_SHADER,
+        )
+        pairedLipCompositeProgram = createProgram(
+            LIP_COMPOSITE_VERTEX_SHADER, bufferedCameraShader(LIP_COMPOSITE_FRAGMENT_SHADER),
         )
         checkGlError("surface creation")
     }
@@ -750,6 +765,169 @@ internal class ArCoreFaceAnchorRenderer(
         semantics: LipSemanticState,
         bufferedCameraTextureId: Int? = null,
     ) {
+        if (lipstickFinish == LipstickFinish.TRACKING_TEST) {
+            drawLipMeshPass(semantics, bufferedCameraTextureId, encodeBlurMaterial = false)
+            return
+        }
+        drawBlurredLipMesh(semantics, bufferedCameraTextureId)
+    }
+
+    private fun drawBlurredLipMesh(
+        semantics: LipSemanticState,
+        bufferedCameraTextureId: Int?,
+    ) {
+        lipBlurFrames.ensureSize(viewportWidth, viewportHeight)
+        GLES20.glViewport(0, 0, viewportWidth, viewportHeight)
+        GLES20.glClearColor(SIGNED_COLOR_ZERO, SIGNED_COLOR_ZERO, SIGNED_COLOR_ZERO, 0f)
+        updateLipBlurRegion()
+        GLES20.glEnable(GLES20.GL_SCISSOR_TEST)
+        GLES20.glScissor(
+            lipBlurScissor[0],
+            lipBlurScissor[1],
+            lipBlurScissor[2],
+            lipBlurScissor[3],
+        )
+
+        lipBlurFrames.bindSource()
+        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+        drawLipMeshPass(semantics, bufferedCameraTextureId, encodeBlurMaterial = true)
+
+        lipBlurFrames.bindIntermediate()
+        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+        drawLipBlurPass(lipBlurFrames.sourceTextureId, lipBlurStep[0], 0f)
+
+        lipBlurFrames.bindSource()
+        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+        drawLipBlurPass(lipBlurFrames.intermediateTextureId, 0f, lipBlurStep[1])
+
+        GLES20.glDisable(GLES20.GL_SCISSOR_TEST)
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+        GLES20.glViewport(0, 0, viewportWidth, viewportHeight)
+        drawLipComposite(lipBlurFrames.sourceTextureId, bufferedCameraTextureId)
+        GLES20.glClearColor(0f, 0f, 0f, 1f)
+    }
+
+    private fun updateLipBlurRegion() {
+        var minX = Float.POSITIVE_INFINITY
+        var maxX = Float.NEGATIVE_INFINITY
+        var minY = Float.POSITIVE_INFINITY
+        var maxY = Float.NEGATIVE_INFINITY
+        for (index in outerContourPoints.indices step 2) {
+            minX = minOf(minX, outerContourPoints[index])
+            maxX = maxOf(maxX, outerContourPoints[index])
+            minY = minOf(minY, outerContourPoints[index + 1])
+            maxY = maxOf(maxY, outerContourPoints[index + 1])
+        }
+        val spatialBlurScale = BASE_SPATIAL_BLUR_SCALE +
+            lipstickTuning.edgeBlur.coerceIn(0f, 1f) * ADDITIONAL_SPATIAL_BLUR_SCALE
+        lipBlurStep[0] = ((maxX - minX) / IOS_BLUR_REFERENCE_WIDTH * spatialBlurScale)
+            .coerceIn(0.5f / viewportWidth, 2f / viewportWidth)
+        lipBlurStep[1] = ((maxY - minY) / IOS_BLUR_REFERENCE_HEIGHT * spatialBlurScale)
+            .coerceIn(0.5f / viewportHeight, 2f / viewportHeight)
+        val margin = (
+            maxOf(
+                lipBlurStep[0] * viewportWidth,
+                lipBlurStep[1] * viewportHeight,
+            ) * 6f + 3f
+            ).roundToInt()
+        val left = ((minX * viewportWidth).roundToInt() - margin).coerceIn(0, viewportWidth - 1)
+        val right = ((maxX * viewportWidth).roundToInt() + margin).coerceIn(left + 1, viewportWidth)
+        val bottom = (((1f - maxY) * viewportHeight).roundToInt() - margin)
+            .coerceIn(0, viewportHeight - 1)
+        val top = (((1f - minY) * viewportHeight).roundToInt() + margin)
+            .coerceIn(bottom + 1, viewportHeight)
+        lipBlurScissor[0] = left
+        lipBlurScissor[1] = bottom
+        lipBlurScissor[2] = right - left
+        lipBlurScissor[3] = top - bottom
+    }
+
+    private fun drawLipBlurPass(textureId: Int, stepX: Float, stepY: Float) {
+        GLES20.glDisable(GLES20.GL_DEPTH_TEST)
+        GLES20.glDisable(GLES20.GL_BLEND)
+        GLES20.glUseProgram(lipBlurProgram)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textureId)
+        GLES20.glUniform1i(GLES20.glGetUniformLocation(lipBlurProgram, "uSource"), 0)
+        GLES20.glUniform2f(
+            GLES20.glGetUniformLocation(lipBlurProgram, "uTexelStep"),
+            stepX,
+            stepY,
+        )
+        FULLSCREEN_QUAD.position(0)
+        val position = GLES20.glGetAttribLocation(lipBlurProgram, "aPosition")
+        GLES20.glEnableVertexAttribArray(position)
+        GLES20.glVertexAttribPointer(position, 2, GLES20.GL_FLOAT, false, 0, FULLSCREEN_QUAD)
+        framebufferUvs.position(0)
+        val texCoord = GLES20.glGetAttribLocation(lipBlurProgram, "aTexCoord")
+        GLES20.glEnableVertexAttribArray(texCoord)
+        GLES20.glVertexAttribPointer(texCoord, 2, GLES20.GL_FLOAT, false, 0, framebufferUvs)
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+        GLES20.glDisableVertexAttribArray(position)
+        GLES20.glDisableVertexAttribArray(texCoord)
+    }
+
+    private fun drawLipComposite(
+        blurredTextureId: Int,
+        bufferedCameraTextureId: Int?,
+    ) {
+        val program = if (bufferedCameraTextureId != null) {
+            pairedLipCompositeProgram
+        } else {
+            lipCompositeProgram
+        }
+        GLES20.glDisable(GLES20.GL_DEPTH_TEST)
+        GLES20.glDisable(GLES20.GL_BLEND)
+        GLES20.glUseProgram(program)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES20.glBindTexture(
+            if (bufferedCameraTextureId != null) GLES20.GL_TEXTURE_2D else GLES11Ext.GL_TEXTURE_EXTERNAL_OES,
+            bufferedCameraTextureId ?: cameraTextureId,
+        )
+        GLES20.glUniform1i(GLES20.glGetUniformLocation(program, "uCamera"), 0)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, blurredTextureId)
+        GLES20.glUniform1i(GLES20.glGetUniformLocation(program, "uBlurredLip"), 1)
+        GLES20.glUniform2f(GLES20.glGetUniformLocation(program, "uUvBottomLeft"), cameraUvCorners[0], cameraUvCorners[1])
+        GLES20.glUniform2f(GLES20.glGetUniformLocation(program, "uUvBottomRight"), cameraUvCorners[2], cameraUvCorners[3])
+        GLES20.glUniform2f(GLES20.glGetUniformLocation(program, "uUvTopLeft"), cameraUvCorners[4], cameraUvCorners[5])
+        GLES20.glUniform2f(GLES20.glGetUniformLocation(program, "uUvTopRight"), cameraUvCorners[6], cameraUvCorners[7])
+        GLES20.glUniform1f(
+            GLES20.glGetUniformLocation(program, "uOuterFeatherFraction"),
+            BASE_OUTER_FEATHER_FRACTION +
+                lipstickTuning.edgeBlur.coerceIn(0f, 1f) * ADDITIONAL_OUTER_FEATHER_FRACTION,
+        )
+
+        val strideBytes = LipMeshTessellator.VERTEX_COMPONENT_COUNT * Float.SIZE_BYTES
+        val position = GLES20.glGetAttribLocation(program, "aPosition")
+        tessellatedLipVertices.position(0)
+        GLES20.glEnableVertexAttribArray(position)
+        GLES20.glVertexAttribPointer(
+            position, 2, GLES20.GL_FLOAT, false, strideBytes, tessellatedLipVertices,
+        )
+        val lipUv = GLES20.glGetAttribLocation(program, "aLipUv")
+        tessellatedLipVertices.position(6)
+        GLES20.glEnableVertexAttribArray(lipUv)
+        GLES20.glVertexAttribPointer(
+            lipUv, 2, GLES20.GL_FLOAT, false, strideBytes, tessellatedLipVertices,
+        )
+        tessellatedLipIndices.position(0)
+        GLES20.glDrawElements(
+            GLES20.GL_TRIANGLES,
+            lipTessellator.indexCount,
+            GLES20.GL_UNSIGNED_SHORT,
+            tessellatedLipIndices,
+        )
+        GLES20.glDisableVertexAttribArray(position)
+        GLES20.glDisableVertexAttribArray(lipUv)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+    }
+
+    private fun drawLipMeshPass(
+        semantics: LipSemanticState,
+        bufferedCameraTextureId: Int?,
+        encodeBlurMaterial: Boolean,
+    ) {
         val lipMeshProgram = if (bufferedCameraTextureId != null) pairedLipMeshProgram else this.lipMeshProgram
         GLES20.glDisable(GLES20.GL_DEPTH_TEST)
         GLES20.glDisable(GLES20.GL_BLEND)
@@ -778,6 +956,10 @@ internal class ArCoreFaceAnchorRenderer(
             bufferedCameraTextureId ?: cameraTextureId,
         )
         GLES20.glUniform1i(GLES20.glGetUniformLocation(lipMeshProgram, "uCamera"), 0)
+        GLES20.glUniform1f(
+            GLES20.glGetUniformLocation(lipMeshProgram, "uEncodeBlurMaterial"),
+            if (encodeBlurMaterial) 1f else 0f,
+        )
         GLES20.glUniform2f(GLES20.glGetUniformLocation(lipMeshProgram, "uUvBottomLeft"), cameraUvCorners[0], cameraUvCorners[1])
         GLES20.glUniform2f(GLES20.glGetUniformLocation(lipMeshProgram, "uUvBottomRight"), cameraUvCorners[2], cameraUvCorners[3])
         GLES20.glUniform2f(GLES20.glGetUniformLocation(lipMeshProgram, "uUvTopLeft"), cameraUvCorners[4], cameraUvCorners[5])
@@ -1170,6 +1352,13 @@ internal class ArCoreFaceAnchorRenderer(
         const val MAX_PAIR_AGE_NS = 500_000_000L
         const val DRAW_DIAGNOSTIC_POINTS = false
         const val ILLUMINATION_SAMPLE_RADIUS_PIXELS = 14f
+        const val IOS_BLUR_REFERENCE_WIDTH = 224f
+        const val IOS_BLUR_REFERENCE_HEIGHT = 112f
+        const val SIGNED_COLOR_ZERO = 128f / 255f
+        const val BASE_SPATIAL_BLUR_SCALE = 1.50f
+        const val ADDITIONAL_SPATIAL_BLUR_SCALE = 1.00f
+        const val BASE_OUTER_FEATHER_FRACTION = 0.25f
+        const val ADDITIONAL_OUTER_FEATHER_FRACTION = 0.20f
 
         val BUFFERED_CAMERA_UVS = floatArrayOf(0f, 0f, 1f, 0f, 0f, 1f, 1f, 1f)
 
@@ -1264,6 +1453,7 @@ internal class ArCoreFaceAnchorRenderer(
             uniform vec2 uIlluminationSampleStep;
             uniform float uSemanticConfidence;
             uniform float uSemanticEdgeStrength;
+            uniform float uEncodeBlurMaterial;
             uniform float uTuningOpacity;
             uniform float uTuningBrightness;
             uniform float uTuningContrast;
@@ -1550,10 +1740,22 @@ internal class ArCoreFaceAnchorRenderer(
                 return clamp(mix(camera, tuned, uTuningOpacity), 0.0, 1.0);
             }
 
+            vec4 blurMaterialOutput(vec3 composited, vec3 camera, float coverage) {
+                if (uEncodeBlurMaterial < 0.5) {
+                    return vec4(composited, 1.0);
+                }
+                float alpha = clamp(coverage * uTuningOpacity, 0.0, 1.0);
+                if (alpha < 0.002) {
+                    return vec4(vec3(0.5019608), 0.0);
+                }
+                vec3 delta = clamp((composited - camera) / alpha, -1.0, 1.0);
+                return vec4(delta * 0.4980392 + 0.5019608, alpha);
+            }
+
             float tuneCoverage(float coverage) {
                 float softened = smoothstep(0.08, 0.92, coverage);
                 float tuned = mix(coverage, softened, uTuningEdgeSoftness);
-                tuned = pow(max(tuned, 0.0001), mix(1.0, 0.45, uTuningEdgeBlur));
+                tuned = pow(max(tuned, 0.0001), mix(1.0, 1.80, uTuningEdgeBlur));
                 float innerBand = smoothstep(0.62, 1.0, vLipUv.x);
                 return clamp(tuned * mix(1.0, uTuningInnerCoverage, innerBand), 0.0, 1.0);
             }
@@ -1682,7 +1884,8 @@ internal class ArCoreFaceAnchorRenderer(
 
                 if (uFinishMode > 1.5) {
                     vec4 satin = renderIosSatin(coverage);
-                    gl_FragColor = vec4(applyLipTuning(satin.rgb, cameraSrgb), 1.0);
+                    vec3 composited = applyLipTuning(satin.rgb, cameraSrgb);
+                    gl_FragColor = blurMaterialOutput(composited, cameraSrgb, coverage);
                     return;
                 }
 
@@ -1692,7 +1895,8 @@ internal class ArCoreFaceAnchorRenderer(
                     (uFinishMode > -0.5 && uFinishMode < 0.5);
                 if (usesIosParityFinish) {
                     vec4 matte = renderMatteReference(coverage);
-                    gl_FragColor = vec4(applyLipTuning(matte.rgb, cameraSrgb), 1.0);
+                    vec3 composited = applyLipTuning(matte.rgb, cameraSrgb);
+                    gl_FragColor = blurMaterialOutput(composited, cameraSrgb, coverage);
                     return;
                 }
 
@@ -1870,9 +2074,118 @@ internal class ArCoreFaceAnchorRenderer(
                 pigmented += chromaDirection * textureCorrection;
                 pigmented += specularColor;
                 vec3 materialSrgb = linearToSrgb(max(pigmented, vec3(0.0)));
-                gl_FragColor = vec4(applyLipTuning(materialSrgb, cameraSrgb), 1.0);
+                vec3 composited = applyLipTuning(materialSrgb, cameraSrgb);
+                gl_FragColor = blurMaterialOutput(composited, cameraSrgb, coverage);
             }
         """
+        const val LIP_BLUR_FRAGMENT_SHADER = """
+            precision mediump float;
+            uniform sampler2D uSource;
+            uniform vec2 uTexelStep;
+            varying vec2 vTexCoord;
+
+            void retainStronger(vec4 candidate, inout vec3 color, inout float alpha) {
+                if (candidate.a > alpha) {
+                    color = candidate.rgb;
+                    alpha = candidate.a;
+                }
+            }
+
+            void main() {
+                vec4 candidate = texture2D(uSource, vTexCoord - uTexelStep * 6.0);
+                vec3 retainedColor = candidate.rgb;
+                float retainedAlpha = candidate.a;
+                float blurredAlpha = candidate.a * 0.00735029;
+
+                candidate = texture2D(uSource, vTexCoord - uTexelStep * 5.0);
+                blurredAlpha += candidate.a * 0.01909834;
+                retainStronger(candidate, retainedColor, retainedAlpha);
+                candidate = texture2D(uSource, vTexCoord - uTexelStep * 4.0);
+                blurredAlpha += candidate.a * 0.04171460;
+                retainStronger(candidate, retainedColor, retainedAlpha);
+                candidate = texture2D(uSource, vTexCoord - uTexelStep * 3.0);
+                blurredAlpha += candidate.a * 0.07659181;
+                retainStronger(candidate, retainedColor, retainedAlpha);
+                candidate = texture2D(uSource, vTexCoord - uTexelStep * 2.0);
+                blurredAlpha += candidate.a * 0.11821653;
+                retainStronger(candidate, retainedColor, retainedAlpha);
+                candidate = texture2D(uSource, vTexCoord - uTexelStep);
+                blurredAlpha += candidate.a * 0.15338247;
+                retainStronger(candidate, retainedColor, retainedAlpha);
+                candidate = texture2D(uSource, vTexCoord);
+                blurredAlpha += candidate.a * 0.16729190;
+                retainStronger(candidate, retainedColor, retainedAlpha);
+                candidate = texture2D(uSource, vTexCoord + uTexelStep);
+                blurredAlpha += candidate.a * 0.15338247;
+                retainStronger(candidate, retainedColor, retainedAlpha);
+                candidate = texture2D(uSource, vTexCoord + uTexelStep * 2.0);
+                blurredAlpha += candidate.a * 0.11821653;
+                retainStronger(candidate, retainedColor, retainedAlpha);
+                candidate = texture2D(uSource, vTexCoord + uTexelStep * 3.0);
+                blurredAlpha += candidate.a * 0.07659181;
+                retainStronger(candidate, retainedColor, retainedAlpha);
+                candidate = texture2D(uSource, vTexCoord + uTexelStep * 4.0);
+                blurredAlpha += candidate.a * 0.04171460;
+                retainStronger(candidate, retainedColor, retainedAlpha);
+                candidate = texture2D(uSource, vTexCoord + uTexelStep * 5.0);
+                blurredAlpha += candidate.a * 0.01909834;
+                retainStronger(candidate, retainedColor, retainedAlpha);
+                candidate = texture2D(uSource, vTexCoord + uTexelStep * 6.0);
+                blurredAlpha += candidate.a * 0.00735029;
+                retainStronger(candidate, retainedColor, retainedAlpha);
+
+                gl_FragColor = vec4(retainedColor, clamp(blurredAlpha, 0.0, 1.0));
+            }
+        """
+
+        const val LIP_COMPOSITE_VERTEX_SHADER = """
+            attribute vec2 aPosition;
+            attribute vec2 aLipUv;
+            varying vec2 vDisplayUv;
+            varying vec2 vFramebufferUv;
+            varying float vOuterDistance;
+            void main() {
+                gl_Position = vec4(aPosition, 0.0, 1.0);
+                vDisplayUv = vec2(aPosition.x * 0.5 + 0.5, 0.5 - aPosition.y * 0.5);
+                vFramebufferUv = aPosition * 0.5 + 0.5;
+                vOuterDistance = aLipUv.x;
+            }
+        """
+
+        const val LIP_COMPOSITE_FRAGMENT_SHADER = """
+            #extension GL_OES_EGL_image_external : require
+            precision mediump float;
+            uniform samplerExternalOES uCamera;
+            uniform sampler2D uBlurredLip;
+            uniform vec2 uUvBottomLeft;
+            uniform vec2 uUvBottomRight;
+            uniform vec2 uUvTopLeft;
+            uniform vec2 uUvTopRight;
+            uniform float uOuterFeatherFraction;
+            varying vec2 vDisplayUv;
+            varying vec2 vFramebufferUv;
+            varying float vOuterDistance;
+
+            vec2 compositeCameraUv(vec2 displayUv) {
+                vec2 top = mix(uUvTopLeft, uUvTopRight, displayUv.x);
+                vec2 bottom = mix(uUvBottomLeft, uUvBottomRight, displayUv.x);
+                return mix(top, bottom, displayUv.y);
+            }
+
+            void main() {
+                vec3 camera = texture2D(uCamera, compositeCameraUv(vDisplayUv)).rgb;
+                vec4 blurredLip = texture2D(uBlurredLip, vFramebufferUv);
+                vec3 materialDelta = (blurredLip.rgb - 0.5019608) / 0.4980392;
+                float outerFeather = smoothstep(
+                    0.0,
+                    uOuterFeatherFraction,
+                    clamp(vOuterDistance, 0.0, 1.0)
+                );
+                vec3 composited = camera + materialDelta * blurredLip.a * outerFeather;
+                gl_FragColor = vec4(clamp(composited, 0.0, 1.0), 1.0);
+            }
+        """
+
         const val POINT_VERTEX_SHADER = """
             uniform mat4 uMvp;
             uniform float uPointSize;

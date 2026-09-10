@@ -44,42 +44,53 @@ internal data class LipstickTuning(
 ) {
     companion object {
         fun defaultsFor(finish: LipstickFinish): LipstickTuning = when (finish) {
+            LipstickFinish.MATTE -> LipstickTuning(
+                cameraValueTransfer = startingCameraValueTransfer(
+                    ReferenceLipstickPigments.PRODUCT_CLASSIC_RED_999_RED_SRGB,
+                    ReferenceLipstickPigments.PRODUCT_CLASSIC_RED_999_GREEN_SRGB,
+                    ReferenceLipstickPigments.PRODUCT_CLASSIC_RED_999_BLUE_SRGB,
+                ),
+            )
             LipstickFinish.SATIN -> LipstickTuning(
                 opacity = 0.69f,
                 coverage = 1.00f,
-                naturalLipBlend = 0.50f,
+                naturalLipBlend = 0.00f,
                 pigmentRed = ReferenceLipstickPigments.SATIN_RED_B8202D_RED_SRGB,
                 pigmentGreen = ReferenceLipstickPigments.SATIN_RED_B8202D_GREEN_SRGB,
                 pigmentBlue = ReferenceLipstickPigments.SATIN_RED_B8202D_BLUE_SRGB,
                 pigmentBrightness = 0.90f,
                 brightness = 1.00f,
-                contrast = 1.37f,
-                saturation = 1.57f,
+                contrast = 1.00f,
+                saturation = 2.00f,
                 hueDegrees = -0.9f,
-                luminancePreservation = 1.00f,
-                cameraValueTransfer = 1.00f,
-                cameraDetail = 1.00f,
-                materialDetail = 1.00f,
-                shadowStrength = 1.00f,
-                microTexture = 1.00f,
-                surfaceDetail = 1.00f,
-                roughness = 0.90f,
-                specular = 1.00f,
-                highlightRetention = 1.00f,
-                highlightStrength = 0.65f,
-                highlightSize = 1.30f,
-                highlightThreshold = 1.00f,
-                highlightConcentration = 1.00f,
-                satinGlow = 1.00f,
-                wetInnerEdge = 1.00f,
+                luminancePreservation = 0.90f,
+                cameraValueTransfer = startingCameraValueTransfer(
+                    ReferenceLipstickPigments.SATIN_RED_B8202D_RED_SRGB,
+                    ReferenceLipstickPigments.SATIN_RED_B8202D_GREEN_SRGB,
+                    ReferenceLipstickPigments.SATIN_RED_B8202D_BLUE_SRGB,
+                ),
+                cameraDetail = 0.00f,
+                materialDetail = 0.00f,
+                shadowStrength = 0.00f,
+                microTexture = 0.00f,
+                surfaceDetail = 0.00f,
+                roughness = 0.35f,
+                specular = 0.00f,
+                highlightRetention = 0.00f,
+                highlightStrength = 0.00f,
+                highlightSize = 0.40f,
+                highlightThreshold = 0.50f,
+                highlightConcentration = 0.50f,
+                satinGlow = 0.00f,
+                wetInnerEdge = 0.00f,
                 edgeRefinement = 2.00f,
-                edgeSoftness = 0.00f,
-                edgeBlur = 0.05f,
+                edgeSoftness = 1.00f,
+                edgeBlur = 1.00f,
                 innerCoverage = 1.00f,
                 cornerFade = 2.00f,
-                seamShadow = 1.97f,
+                seamShadow = 1.95f,
                 toothProtection = 2.00f,
-                cameraSampleScale = 1.91f,
+                cameraSampleScale = 0.35f,
             )
             LipstickFinish.GLOSS -> LipstickTuning(
                 opacity = 1.00f,
@@ -94,7 +105,11 @@ internal data class LipstickTuning(
                 saturation = 1.00f,
                 hueDegrees = 0.6f,
                 luminancePreservation = 1.00f,
-                cameraValueTransfer = 0.82f,
+                cameraValueTransfer = startingCameraValueTransfer(
+                    ReferenceLipstickPigments.GLOSS_BROWN_ESPRESSO_515_RED_SRGB,
+                    ReferenceLipstickPigments.GLOSS_BROWN_ESPRESSO_515_GREEN_SRGB,
+                    ReferenceLipstickPigments.GLOSS_BROWN_ESPRESSO_515_BLUE_SRGB,
+                ),
                 cameraDetail = 1.00f,
                 materialDetail = 1.00f,
                 shadowStrength = 1.00f,
@@ -120,6 +135,14 @@ internal data class LipstickTuning(
             )
             else -> LipstickTuning()
         }
+
+        /** Initial camera-value transfer derived from the source-sRGB pigment's HSV value. */
+        private fun startingCameraValueTransfer(red: Float, green: Float, blue: Float): Float =
+            when (maxOf(red, green, blue)) {
+                in 0f..0.45f -> 0.82f
+                in 0.45f..0.65f -> 0.90f
+                else -> 1.00f
+            }
     }
 }
 

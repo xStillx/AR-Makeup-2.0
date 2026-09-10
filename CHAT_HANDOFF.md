@@ -1,6 +1,13 @@
 # ARMakeup — handoff текущей задачи
 
-Актуально на 2026-09-09. Архитектура и ограничения — PROJECT_CONTEXT.md, дальнейший план — FULL_FACE_ROADMAP.md, лицензии — LICENSE_COMPLIANCE.md.
+Актуально на 2026-09-10. Архитектура и ограничения — PROJECT_CONTEXT.md, дальнейший план — FULL_FACE_ROADMAP.md, лицензии — LICENSE_COMPLIANCE.md.
+
+## Принято: адаптивные стартовые правила для всех помад — 2026-09-10
+
+
+Стартовый `camera_value_transfer` теперь вычисляется для всех product finish по HSV value source pigment: ≤0.45 → 0.82; 0.45–0.65 → 0.90; >0.65 → 1.00. Результат для текущих цветов: MATTE `#9E2620`=0.90, SATIN Dior `#B8202D`=1.00, GLOSS Brown Espresso `#643229`=0.82. Индивидуальные финальные параметры SATIN/GLOSS не сброшены; TRACKING_TEST исключён. Launcher пока стартует с MATTE и отдельным preference key.
+
+`:app:assembleDebug` успешен без unit-тестов. Debug установлен и запущен на SM-G990B/R5CRC3SPVNE; открыт MATTE baseline, ожидается визуальная оценка пользователя.
 
 ## Активно: L'Oréal Paris Infaillible Laque Resistance 515 Brown Espresso — 2026-09-09
 
@@ -8,11 +15,23 @@
 
 Для первого отображения следующей новой помады принято стартовать с точного RGB, `pigment_brightness/brightness/contrast/saturation=1`, `hue=0` и адаптивного `camera_value_transfer`: 0.80–0.82 для pigment value ≤0.45, около 0.90 для 0.45–0.65, 1.00 для более светлого цвета. Для плотного GLOSS: opacity 1, naturalLip 0, specular 0.15. Это эвристика первого device candidate; автоматизация в коде не реализована, финальные значения остаются per-product.
 
-## Активно: интерактивная настройка материала — 2026-09-08
+## Принято: конечный SATIN Dior 999 — 2026-09-10
 
-Верхняя status/metrics карточка удалена. Нижняя сворачиваемая панель содержит finish, Async/Sync и 35 runtime-параметров в группах ОБЩЕЕ, ЦВЕТ, ФАКТУРА, БЛИКИ, КРАЯ И РОТ, КАМЕРА. Значения применяются сразу immutable snapshot-ом LipstickTuning, сохраняются и сбрасываются раздельно для каждого finish. Новый основной SATIN default: opacity .69, naturalLip .50, brightness 1, contrast 1.37, saturation 1.57, hue -.9, roughness .90, highlightStrength .65, highlightSize 1.30, edgeRefinement 2, edgeBlur .05, innerCoverage 1, cornerFade 2, seamShadow 1.97, toothProtection 2, cameraSampleScale 1.91; остальные указанные пользователем поля равны 1. Базовый цвет #B8202D/RGB 184-32-45, выбранный pigmentBrightness .90. Matte/gloss имеют нейтральные defaults.
+Пользователь объявил конечным новый основной Dior Rouge Dior Satin 999: #B8202D, pigmentBrightness .90, opacity .69, naturalLip 0, contrast 1, saturation 2, hue -.9, luminance .90; camera/material detail, shadow, micro/surface detail, specular/highlights, satin glow и wet edge 0; roughness .35; highlightSize .40; threshold/concentration .50; edgeRefinement 2, edgeSoftness/edgeBlur 1, innerCoverage 1, cornerFade 2, seamShadow 1.95, toothProtection 2, cameraSampleScale .35. Полный порядок полей хранится в LIPSTICK_PRESETS.md. Новый versioned preference key исключает старые SATIN candidates. Checkpoint: `[Makeup] Finalize Dior 999 satin preset`.
 
-Параметры подключены к общей композитной цепочке и релевантным веткам matte/satin/gloss. Coverage-based `Мягкость/Растушёвка` — управляемый текущий feather, не финальный iOS-подобный separable alpha blur. Tracking/Sync/mesh geometry не менялись.
+## Реализовано: общий GPU alpha blur — 2026-09-10
+
+MATTE/SATIN/GLOSS используют два separable 13-tap GPU-прохода с iOS Gaussian weights. Material pass сохраняет signed color delta относительно exact-pair camera и alpha; blur меняет только alpha, а RGB переносится от strongest-alpha texel. Финальный pass ограничен существующей lip mesh, поэтому отверстие рта/зубы не получают blur. После незаметного 10% gate текущая база использует outer feather 25% и blur scale 1.5×. Ползунок Растушёвка края 0–1 расширяет radius до 2.5× и gate до 45%, одновременно усиливая спад исходной coverage. Внутренний край не ослабляется. Наружный expanded carrier iOS пока не перенесён.
+
+Два RGBA8 FBO переиспользуются, blur ограничен scissor ROI губ. CPU readback, модели/assets, tracking geometry/topology, timestamps, exact-pair Sync и temporal filters не менялись. TRACKING_TEST остаётся прямым. edge_softness формирует coverage, edge_blur дополнительно управляет реальным radius и outer feather.
+
+:app:assembleDebug проходит; unit-тесты не запускались. APK установлен и открыт на SM-G990B. Пользователь завершил визуальную настройку SATIN; отдельный benchmark blur и проверка MATTE/GLOSS остаются открытыми.
+
+## Интерактивная настройка материала — 2026-09-08
+
+Верхняя status/metrics карточка удалена. Нижняя сворачиваемая панель содержит finish, Async/Sync и 35 runtime-параметров. Новый основной SATIN default от 2026-09-10: #B8202D, pigmentBrightness .90, opacity .69, naturalLip 0, contrast 1, saturation 2, hue -.9, luminance .90; camera/material detail, shadow, micro/surface detail, specular/highlights, satin glow и wet edge равны 0; roughness .35; highlightSize .40; highlightThreshold/concentration .50; edgeRefinement 2, edgeSoftness/edgeBlur 1, innerCoverage 1, cornerFade 2, seamShadow 1.95, toothProtection 2, cameraSampleScale .35. Новый versioned preference key не допускает override старыми сохранёнными SATIN-настройками.
+
+Параметры подключены к общей композитной цепочке и релевантным веткам matte/satin/gloss. `Мягкость` формирует исходную маску; `Растушёвка` также управляет реальным separable blur и outer feather. Tracking/Sync/mesh geometry не менялись.
 
 Добавлены RGB 0–255 и Яркость пигмента 0.50–1.20 для изменения базового цвета всех трёх product finish. Прежняя Яркость теперь подписана Яркость материала. TRACKING_TEST сохраняет диагностический magenta.
 
@@ -27,14 +46,14 @@ Camera-value color transfer реализован для MATTE, SATIN и GLOSS в
 - В общем ARCore shader удалён дополнительный innerGuard, снижавший alpha до нуля на внутреннем краю. Его mouthTeethExclusionConfidence был containment score landmarks, а не независимой пиксельной маской зубов. Неиспользуемые uniforms удалены; tracking-контракт сохранён.
 - Координаты, индексы, normals, UV, точные Sync-пары, temporal filters и цветовые формулы matte/satin/gloss не изменены. Новых проходов, моделей, assets и camera readback нет.
 - Отверстие рта по-прежнему исключается геометрически; fill triangles и расширение внутрь отверстия пока не добавлены. Сначала проверяется устранение искусственной прозрачной полосы. Если останется именно геометрический зазор, отдельно локализовать его по визуальному результату; не заполнять весь рот автоматически. При неверном inner contour защита геометрией не гарантирует отсутствие окрашивания зубов — это обязательная часть device acceptance.
-- Небольшое размытие внешнего края и дальнейшее выравнивание сатина с iOS остаются следующими задачами. Они сейчас не реализуются.
+- Усиленный blur и outer feather позднее реализованы и приняты как часть конечного SATIN Dior 999; MATTE/GLOSS и performance остаются отдельными проверками.
 - :app:assembleDebug прошёл; unit-тесты не добавлялись и не запускались. Debug установлен и запущен на Samsung SM-G990B (R5CRC3SPVNE); runtime подтвердил FACE TRACKING, SYNC pair, age=0 и anchor=0.0 px. LipFrameTrace=S. В начале запуска в логе есть CAMERA_DISABLED, затем камера восстановилась и получен FACE TRACKING; ошибок shader/link и FATAL EXCEPTION в проверенном логе не обнаружено. В одном status-окне render 49 FPS / MP 15.2 FPS, camera lag 118 ms — это smoke-наблюдение, не performance acceptance. На запрос проверки полоски и зубов при смыкании/открытии/повороте на сатине и глянце пользователь ответил «Оставь пока так и закоммить». Текущие изменения фиксируются отдельным checkpoint после 3700c9f; актуальный hash см. git log. Дополнительных изменений и проверок не выполнять без новой задачи; push не запрошен.
 
 ## Предыдущий этап: изучение iOS и фиксация требований — 2026-09-04
 
 Полный разбор предоставленного iOS-reference сохранён в [IOS_REFERENCE_CONTEXT.md](IOS_REFERENCE_CONTEXT.md): карта всех 12 Swift-компонентов, камера/трекинг, matte/satin/gloss, каталог, цветовая цепочка, маски/blur, смыкание, fallback, румяна, build/assets и отдельный неиспользуемый ML-прототип.
 
-Последняя оценка пользователя: после linear compositing сатин стал чуть ближе к iOS, но результат всё ещё не тот и не принят. Сравнивается Dior Rouge Dior Satin 999 / #B8202D / high / creamy; iOS-скриншота нет.
+На этом историческом этапе после linear compositing сатин стал чуть ближе к iOS, но ещё не был принят. Эту оценку заменяет конечный SATIN Dior 999 от 2026-09-10 в начале файла.
 
 Требования следующей реализации:
 

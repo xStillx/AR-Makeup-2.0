@@ -149,7 +149,7 @@
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="5dp"
-                        app:checkedButton="@id/finish_gloss"
+                        app:checkedButton="@id/finish_matte"
                         app:selectionRequired="true"
                         app:singleSelection="true">
 
