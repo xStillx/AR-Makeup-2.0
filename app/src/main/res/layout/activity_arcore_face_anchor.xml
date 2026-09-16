@@ -142,6 +142,30 @@
 
                     <TextView
                         style="@style/LipTuningSection"
+                        android:text="@string/color_rendering_mode_group" />
+
+                    <com.google.android.material.button.MaterialButtonToggleGroup
+                        android:id="@+id/color_rendering_mode_toggle_group"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="5dp"
+                        app:checkedButton="@id/color_rendering_mode_ios"
+                        app:selectionRequired="true"
+                        app:singleSelection="true">
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/color_rendering_mode_ios"
+                            style="@style/LipTuningToggle"
+                            android:text="@string/color_rendering_mode_ios" />
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/color_rendering_mode_unified"
+                            style="@style/LipTuningToggle"
+                            android:text="@string/color_rendering_mode_unified" />
+                    </com.google.android.material.button.MaterialButtonToggleGroup>
+
+                    <TextView
+                        style="@style/LipTuningSection"
                         android:text="@string/finish_group" />
 
                     <com.google.android.material.button.MaterialButtonToggleGroup

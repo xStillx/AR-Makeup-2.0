@@ -9,8 +9,8 @@ import android.util.Log
 import com.example.armakeup.makeup.LipLandmarkTopology
 import com.example.armakeup.makeup.LipMeshTessellator
 import com.example.armakeup.makeup.ReferenceMatteLipstickProfile
+import com.example.armakeup.makeup.LipColorRenderingMode
 import com.example.armakeup.makeup.LipstickFinish
-import com.example.armakeup.makeup.ReferenceLipstickRenderProfiles
 import com.example.armakeup.tracking.CanonicalFaceTransform
 import com.example.armakeup.tracking.FillCenterTransform
 import com.example.armakeup.tracking.NormalizedImageTransform
@@ -84,7 +84,7 @@ internal class ArCoreFaceAnchorRenderer(
     private val lipVisibilityGate = HeadDownLipVisibilityGate()
     private val lipContourRefiner = LipContourTemporalRefiner()
     private val lipTessellator = LipMeshTessellator(featherInnerBoundary = false)
-    private val satinUvs = directFloatBuffer(IosSatinLipMaterial.textureCoordinates(lipTessellator))
+    private val satinUvs = directFloatBuffer(IosLipMaterial.textureCoordinates(lipTessellator))
     private val satinSourceTexels = FloatArray(4)
     private val lipFrameDiagnostics = LipFrameDiagnostics()
     private val mediaPipeOnlyOuterContourPoints =
@@ -115,6 +115,9 @@ internal class ArCoreFaceAnchorRenderer(
     @Volatile
     private var lipstickTuning = LipstickTuning()
 
+    @Volatile
+    private var colorRenderingMode = LipColorRenderingMode.IOS_REFERENCE
+
     fun setLipstickTuning(value: LipstickTuning) {
         lipstickTuning = value
     }
@@ -122,6 +125,11 @@ internal class ArCoreFaceAnchorRenderer(
     fun setLipstickFinish(value: LipstickFinish) {
         lipstickFinish = value
         Log.i(TAG, "Lipstick finish: $value")
+    }
+
+    fun setColorRenderingMode(value: LipColorRenderingMode) {
+        colorRenderingMode = value
+        Log.i(TAG, "Lip color rendering mode: $value")
     }
 
     private var statusWindowStartNs = 0L
@@ -411,10 +419,13 @@ internal class ArCoreFaceAnchorRenderer(
         val by = cameraUvCorners[1] - cameraUvCorners[5]
         val determinant = ax * by - bx * ay
         if (kotlin.math.abs(determinant) > 1e-6f && dimensions[0] > 0 && dimensions[1] > 0) {
-            satinSourceTexels[0] = by / determinant / dimensions[0]
-            satinSourceTexels[1] = -ay / determinant / dimensions[0]
-            satinSourceTexels[2] = -bx / determinant / dimensions[1]
-            satinSourceTexels[3] = ax / determinant / dimensions[1]
+            // iOS material samples a BGRA image with a 512-pixel long edge.
+            // Equivalent source distances, without a new camera stream or CPU resize.
+            val sourceScale = maxOf(dimensions[0], dimensions[1]) / 512f
+            satinSourceTexels[0] = by / determinant / dimensions[0] * sourceScale
+            satinSourceTexels[1] = -ay / determinant / dimensions[0] * sourceScale
+            satinSourceTexels[2] = -bx / determinant / dimensions[1] * sourceScale
+            satinSourceTexels[3] = ax / determinant / dimensions[1] * sourceScale
         } else {
             satinSourceTexels[0] = 1f / viewportWidth
             satinSourceTexels[1] = 0f
@@ -632,11 +643,16 @@ internal class ArCoreFaceAnchorRenderer(
             lastLipMetricsTimestampNs = faceObservation.sensorTimestampNs
         }
 
+        val openInnerCarrierBlend = openInnerCarrierBlend(lips.mouthOpenness)
         val tessellated = lipTessellator.tessellate(
             outerContour = outerContourPoints,
             innerContour = innerContourPoints,
             upperProfile = ReferenceMatteLipstickProfile.upper,
             lowerProfile = ReferenceMatteLipstickProfile.lower,
+            outerCarrierExpansion = OUTER_LIP_CARRIER_EXPANSION,
+            innerSeamExpansion = CLOSED_INNER_SEAM_EXPANSION +
+                (OPEN_INNER_EDGE_EXPANSION - CLOSED_INNER_SEAM_EXPANSION) * openInnerCarrierBlend,
+            innerCarrierFeather = openInnerCarrierBlend,
         )
         if (Log.isLoggable(LIP_FRAME_TRACE_TAG, Log.DEBUG)) {
             val frameTrace = lipFrameDiagnostics.capture(
@@ -807,6 +823,11 @@ internal class ArCoreFaceAnchorRenderer(
         GLES20.glClearColor(0f, 0f, 0f, 1f)
     }
 
+    private fun openInnerCarrierBlend(mouthOpenness: Float): Float {
+        val transition = ((mouthOpenness - INNER_SEAM_CLOSED_START) /
+            (INNER_SEAM_OPEN_END - INNER_SEAM_CLOSED_START)).coerceIn(0f, 1f)
+        return transition * transition * (3f - 2f * transition)
+    }
     private fun updateLipBlurRegion() {
         var minX = Float.POSITIVE_INFINITY
         var maxX = Float.NEGATIVE_INFINITY
@@ -932,8 +953,8 @@ internal class ArCoreFaceAnchorRenderer(
         GLES20.glDisable(GLES20.GL_DEPTH_TEST)
         GLES20.glDisable(GLES20.GL_BLEND)
         GLES20.glUseProgram(lipMeshProgram)
-        val profile = ReferenceLipstickRenderProfiles.forFinish(lipstickFinish)
         val tuning = lipstickTuning
+        val parameters = IosLipMaterial.parameters(lipstickFinish, tuning.productTexture)
         val pigmentBrightness = tuning.pigmentBrightness
         val pigmentRed = if (lipstickFinish == LipstickFinish.TRACKING_TEST) {
             TRACKING_PIGMENT[0]
@@ -970,17 +991,17 @@ internal class ArCoreFaceAnchorRenderer(
             pigmentGreen,
             pigmentBlue,
         )
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uCoverageMultiplier"), profile.coverageMultiplier * tuning.coverage)
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uLuminancePreservation"), profile.luminancePreservation * tuning.luminancePreservation)
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uMinimumLuminanceGain"), profile.minimumLuminanceGain)
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uMaximumLuminanceGain"), profile.maximumLuminanceGain)
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uRoughness"), profile.optics.roughness * tuning.roughness)
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uSpecularStrength"), profile.optics.specularStrength * tuning.specular)
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uHighlightRetention"), profile.optics.highlightRetention * tuning.highlightRetention)
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uMicroTextureRetention"), profile.optics.microTextureRetention * tuning.microTexture)
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uWetInnerEdgeStrength"), profile.optics.wetInnerEdgeStrength * tuning.wetInnerEdge)
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uSurfaceDetailRetention"), profile.optics.surfaceDetailRetention * tuning.surfaceDetail)
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uSatinGlowStrength"), profile.optics.satinGlowStrength * tuning.satinGlow)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uCoverageMultiplier"),
+            (if (lipstickFinish == LipstickFinish.TRACKING_TEST) 4f else 2f) * tuning.coverage)
+        GLES20.glUniform1f(
+            GLES20.glGetUniformLocation(lipMeshProgram, "uColorRenderingMode"),
+            if (colorRenderingMode == LipColorRenderingMode.UNIFIED) 1f else 0f,
+        )
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uIosDetailStrength"), parameters.detailStrength)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uIosHighlightStrength"), parameters.highlightStrength)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uIosHighlightMaximum"), parameters.highlightMaximum)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uIosHighlightConcentration"), parameters.highlightConcentration)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uIosCoreCoverage"), tuning.productDensity.pigmentCoverage)
         GLES20.glUniform1f(
             GLES20.glGetUniformLocation(lipMeshProgram, "uSemanticConfidence"),
             semantics.lipConfidence,
@@ -1005,6 +1026,7 @@ internal class ArCoreFaceAnchorRenderer(
         )
 
         GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uTuningOpacity"), tuning.opacity)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uTuningPigmentOpacity"), tuning.pigmentOpacity)
         GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uTuningBrightness"), tuning.brightness)
         GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uTuningContrast"), tuning.contrast)
         GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uTuningSaturation"), tuning.saturation)
@@ -1057,7 +1079,6 @@ internal class ArCoreFaceAnchorRenderer(
         satinUvs.position(0)
         GLES20.glEnableVertexAttribArray(satinUv)
         GLES20.glVertexAttribPointer(satinUv, 2, GLES20.GL_FLOAT, false, 0, satinUvs)
-
         val strideBytes = LipMeshTessellator.VERTEX_COMPONENT_COUNT * Float.SIZE_BYTES
         val position = GLES20.glGetAttribLocation(lipMeshProgram, "aPosition")
         tessellatedLipVertices.position(0)
@@ -1065,17 +1086,6 @@ internal class ArCoreFaceAnchorRenderer(
         GLES20.glVertexAttribPointer(
             position,
             2,
-            GLES20.GL_FLOAT,
-            false,
-            strideBytes,
-            tessellatedLipVertices,
-        )
-        val normal = GLES20.glGetAttribLocation(lipMeshProgram, "aNormal")
-        tessellatedLipVertices.position(2)
-        GLES20.glEnableVertexAttribArray(normal)
-        GLES20.glVertexAttribPointer(
-            normal,
-            3,
             GLES20.GL_FLOAT,
             false,
             strideBytes,
@@ -1111,7 +1121,6 @@ internal class ArCoreFaceAnchorRenderer(
             tessellatedLipIndices,
         )
         GLES20.glDisableVertexAttribArray(position)
-        GLES20.glDisableVertexAttribArray(normal)
         GLES20.glDisableVertexAttribArray(lipUv)
         GLES20.glDisableVertexAttribArray(satinUv)
         GLES20.glDisableVertexAttribArray(coverage)
@@ -1359,6 +1368,11 @@ internal class ArCoreFaceAnchorRenderer(
         const val ADDITIONAL_SPATIAL_BLUR_SCALE = 1.00f
         const val BASE_OUTER_FEATHER_FRACTION = 0.25f
         const val ADDITIONAL_OUTER_FEATHER_FRACTION = 0.20f
+        const val OUTER_LIP_CARRIER_EXPANSION = 0.18f
+        const val CLOSED_INNER_SEAM_EXPANSION = 0.14f
+        const val OPEN_INNER_EDGE_EXPANSION = 0.10f
+        const val INNER_SEAM_CLOSED_START = 0.035f
+        const val INNER_SEAM_OPEN_END = 0.12f
 
         val BUFFERED_CAMERA_UVS = floatArrayOf(0f, 0f, 1f, 0f, 0f, 1f, 1f, 1f)
 
@@ -1407,19 +1421,16 @@ internal class ArCoreFaceAnchorRenderer(
 
         const val LIP_MESH_VERTEX_SHADER = """
             attribute vec2 aPosition;
-            attribute vec3 aNormal;
             attribute float aCoverage;
             attribute vec2 aLipUv;
             attribute vec2 aSatinUv;
             varying vec2 vDisplayUv;
-            varying vec3 vNormal;
             varying float vCoverage;
             varying vec2 vLipUv;
             varying vec2 vSatinUv;
             void main() {
                 gl_Position = vec4(aPosition, 0.0, 1.0);
                 vDisplayUv = vec2(aPosition.x * 0.5 + 0.5, 0.5 - aPosition.y * 0.5);
-                vNormal = aNormal;
                 vCoverage = aCoverage;
                 vLipUv = aLipUv;
                 vSatinUv = aSatinUv;
@@ -1436,17 +1447,13 @@ internal class ArCoreFaceAnchorRenderer(
             uniform vec2 uUvTopRight;
             uniform vec3 uPigment;
             uniform float uCoverageMultiplier;
-            uniform float uLuminancePreservation;
-            uniform float uMinimumLuminanceGain;
-            uniform float uMaximumLuminanceGain;
-            uniform float uRoughness;
-            uniform float uSpecularStrength;
-            uniform float uHighlightRetention;
-            uniform float uMicroTextureRetention;
-            uniform float uWetInnerEdgeStrength;
-            uniform float uSurfaceDetailRetention;
-            uniform float uSatinGlowStrength;
             uniform float uFinishMode;
+            uniform float uColorRenderingMode;
+            uniform float uIosDetailStrength;
+            uniform float uIosHighlightStrength;
+            uniform float uIosHighlightMaximum;
+            uniform float uIosHighlightConcentration;
+            uniform float uIosCoreCoverage;
             uniform vec2 uSatinSourceTexelX;
             uniform vec2 uSatinSourceTexelY;
             uniform float uSatinApertureVisibility;
@@ -1455,6 +1462,7 @@ internal class ArCoreFaceAnchorRenderer(
             uniform float uSemanticEdgeStrength;
             uniform float uEncodeBlurMaterial;
             uniform float uTuningOpacity;
+            uniform float uTuningPigmentOpacity;
             uniform float uTuningBrightness;
             uniform float uTuningContrast;
             uniform float uTuningSaturation;
@@ -1484,7 +1492,6 @@ internal class ArCoreFaceAnchorRenderer(
             uniform float uTuningSatinGlow;
             uniform float uTuningWetInnerEdge;
             varying vec2 vDisplayUv;
-            varying vec3 vNormal;
             varying float vCoverage;
             varying vec2 vLipUv;
             varying vec2 vSatinUv;
@@ -1493,19 +1500,6 @@ internal class ArCoreFaceAnchorRenderer(
                 vec2 top = mix(uUvTopLeft, uUvTopRight, displayUv.x);
                 vec2 bottom = mix(uUvBottomLeft, uUvBottomRight, displayUv.x);
                 return mix(top, bottom, displayUv.y);
-            }
-
-            vec3 srgbToLinear(vec3 value) {
-                return pow(max(value, vec3(0.0)), vec3(2.2));
-            }
-
-            vec3 linearToSrgb(vec3 value) {
-                return pow(max(value, vec3(0.0)), vec3(0.45454545));
-            }
-
-            vec3 cameraLinearAt(vec2 displayUv) {
-                vec2 uv = cameraUv(clamp(displayUv, vec2(0.0), vec2(1.0)));
-                return srgbToLinear(texture2D(uCamera, uv).rgb);
             }
 
             vec3 cameraSrgbAt(vec2 displayUv) {
@@ -1580,149 +1574,6 @@ internal class ArCoreFaceAnchorRenderer(
                 return mix(pigment, transferred, clamp(uTuningCameraValueTransfer, 0.0, 1.0));
             }
 
-            float stableHighlightHash(vec2 cell) {
-                return fract(sin(dot(cell, vec2(127.1, 311.7))) * 43758.5453);
-            }
-
-            float satinHighlightBreakup(vec2 lipUv) {
-                vec2 orientedUv = vec2(lipUv.y, lipUv.x);
-
-                vec2 segmentPosition = orientedUv * vec2(13.0, 5.5);
-                vec2 segmentCell = floor(segmentPosition);
-                vec2 segmentLocal = fract(segmentPosition);
-                float segmentSeed = stableHighlightHash(segmentCell);
-                float segmentCenter = 0.32 +
-                    0.36 * stableHighlightHash(segmentCell + vec2(4.0, 9.0));
-                float segmentHalfHeight = 0.07 + 0.06 * segmentSeed;
-                float brokenStrip = 1.0 - smoothstep(
-                    segmentHalfHeight,
-                    segmentHalfHeight + 0.09,
-                    abs(segmentLocal.y - segmentCenter)
-                );
-                float segmentEnd = 0.54 + 0.34 *
-                    stableHighlightHash(segmentCell + vec2(8.0, 2.0));
-                brokenStrip *= smoothstep(0.06, 0.18, segmentLocal.x) *
-                    (1.0 - smoothstep(
-                        segmentEnd,
-                        min(segmentEnd + 0.14, 1.0),
-                        segmentLocal.x
-                    ));
-                brokenStrip *= smoothstep(0.34, 0.68, segmentSeed);
-
-                vec2 dotPosition = orientedUv * vec2(19.0, 8.0);
-                vec2 dotCell = floor(dotPosition);
-                vec2 dotLocal = fract(dotPosition);
-                float dotSeed =
-                    stableHighlightHash(dotCell + vec2(17.0, 3.0));
-                vec2 dotCenter = vec2(
-                    0.20 + 0.60 *
-                        stableHighlightHash(dotCell + vec2(1.0, 7.0)),
-                    0.20 + 0.60 *
-                        stableHighlightHash(dotCell + vec2(6.0, 1.0))
-                );
-                float dotRadius = 0.11 + 0.10 * dotSeed;
-                float highlightDot = 1.0 - smoothstep(
-                    dotRadius,
-                    dotRadius + 0.09,
-                    length((dotLocal - dotCenter) * vec2(0.82, 1.22))
-                );
-                highlightDot *= smoothstep(0.28, 0.62, dotSeed);
-
-                vec2 speckPosition = orientedUv * vec2(31.0, 12.0);
-                vec2 speckCell = floor(speckPosition);
-                vec2 speckLocal = fract(speckPosition);
-                float speckSeed =
-                    stableHighlightHash(speckCell + vec2(23.0, 19.0));
-                vec2 speckCenter = vec2(
-                    stableHighlightHash(speckCell + vec2(2.0, 5.0)),
-                    stableHighlightHash(speckCell + vec2(9.0, 4.0))
-                );
-                float speck = 1.0 - smoothstep(
-                    0.075,
-                    0.15,
-                    length(speckLocal - speckCenter)
-                );
-                speck *= smoothstep(0.58, 0.82, speckSeed);
-
-                float breakup = clamp(
-                    brokenStrip * 0.82 +
-                        highlightDot * 0.95 +
-                        speck * 0.42,
-                    0.0,
-                    1.0
-                );
-                return 0.12 + breakup * 0.88;
-            }
-
-            float glossCircleLayer(
-                vec2 lipUv,
-                vec2 gridScale,
-                vec2 seedOffset,
-                float radius,
-                float feather,
-                float densityThreshold
-            ) {
-                vec2 orientedUv = vec2(lipUv.y, lipUv.x);
-                vec2 position = orientedUv * gridScale;
-                vec2 cell = floor(position);
-                vec2 local = fract(position);
-                float seed = stableHighlightHash(cell + seedOffset);
-                vec2 center = vec2(
-                    0.36 + 0.28 * stableHighlightHash(
-                        cell + seedOffset.yx + vec2(3.0, 7.0)
-                    ),
-                    0.36 + 0.28 * stableHighlightHash(
-                        cell + seedOffset + vec2(8.0, 2.0)
-                    )
-                );
-                float softCircle = 1.0 - smoothstep(
-                    radius,
-                    radius + feather,
-                    length(local - center)
-                );
-                float enabled = smoothstep(
-                    densityThreshold,
-                    min(densityThreshold + 0.22, 1.0),
-                    seed
-                );
-                return softCircle * enabled;
-            }
-
-            float glossHighlightBreakup(vec2 lipUv) {
-                float largeCircles = glossCircleLayer(
-                    lipUv,
-                    vec2(12.0, 5.0),
-                    vec2(5.0, 13.0),
-                    0.22,
-                    0.14,
-                    0.44
-                );
-                float mediumCircles = glossCircleLayer(
-                    lipUv,
-                    vec2(18.0, 7.0),
-                    vec2(17.0, 3.0),
-                    0.18,
-                    0.15,
-                    0.32
-                );
-                float smallCircles = glossCircleLayer(
-                    lipUv,
-                    vec2(27.0, 10.0),
-                    vec2(23.0, 19.0),
-                    0.12,
-                    0.13,
-                    0.50
-                );
-                float circles = clamp(
-                    largeCircles * 0.85 +
-                        mediumCircles * 0.90 +
-                        smallCircles * 0.55,
-                    0.0,
-                    1.0
-                );
-                return 0.05 + circles * 0.95;
-            }
-
             vec3 tuneHue(vec3 color, float degrees) {
                 float angle = radians(degrees);
                 vec3 axis = normalize(vec3(0.299, 0.587, 0.114));
@@ -1760,86 +1611,8 @@ internal class ArCoreFaceAnchorRenderer(
                 return clamp(tuned * mix(1.0, uTuningInnerCoverage, innerBand), 0.0, 1.0);
             }
 
-            ${IosSatinLipMaterial.FRAGMENT_FUNCTION}
-
-            vec4 renderMatteReference(float coverage) {
-                vec3 base = cameraSrgbAt(vDisplayUv);
-                vec2 detailRadius = uIlluminationSampleStep / 7.0;
-                vec3 blurred = base * 4.0;
-                blurred += cameraSrgbAt(vDisplayUv + vec2(detailRadius.x, 0.0));
-                blurred += cameraSrgbAt(vDisplayUv - vec2(detailRadius.x, 0.0));
-                blurred += cameraSrgbAt(vDisplayUv + vec2(0.0, detailRadius.y));
-                blurred += cameraSrgbAt(vDisplayUv - vec2(0.0, detailRadius.y));
-                blurred += cameraSrgbAt(vDisplayUv + detailRadius);
-                blurred += cameraSrgbAt(vDisplayUv - detailRadius);
-                blurred += cameraSrgbAt(
-                    vDisplayUv + vec2(detailRadius.x, -detailRadius.y)
-                );
-                blurred += cameraSrgbAt(
-                    vDisplayUv + vec2(-detailRadius.x, detailRadius.y)
-                );
-                blurred /= 12.0;
-
-                float baseLuminance = parityLuminance(base);
-                float blurredLuminance = max(parityLuminance(blurred), 0.055);
-                vec3 valueTransferredPigment = cameraValuePigment(base, uPigment);
-                float pigmentLuminance = parityLuminance(valueTransferredPigment);
-                float localLighting = smoothstep(0.10, 0.55, blurredLuminance);
-                float sceneLighting = smoothstep(0.08, 0.72, blurredLuminance);
-                float combinedLighting = clamp(
-                    mix(sceneLighting, localLighting, 0.25),
-                    0.45,
-                    1.0
-                );
-                float exposureScale = pow(combinedLighting, 0.55);
-                float scenePigmentLuminance = pigmentLuminance * exposureScale;
-                float toneStrength = 0.92;
-                float pigmentStrength = 0.90;
-                float detailStrength = 0.92 * uTuningMaterialDetail;
-                float targetLuminance = mix(
-                    baseLuminance,
-                    scenePigmentLuminance,
-                    toneStrength
-                );
-                vec3 tonedPigment = parityColorWithLuminance(
-                    valueTransferredPigment,
-                    targetLuminance
-                );
-                float tonedLuminance = parityLuminance(tonedPigment);
-                vec3 saturatedPigment = clamp(
-                    mix(vec3(tonedLuminance), tonedPigment, 1.0),
-                    vec3(0.0),
-                    vec3(1.0)
-                );
-                float logDetail = log2(max(baseLuminance, 0.04)) -
-                    log2(max(blurredLuminance, 0.04));
-                float brightScene = smoothstep(0.78, 1.0, combinedLighting);
-                float detailExponent;
-                float shadowDetail = min(logDetail, 0.0);
-                float highlightDetail = max(logDetail, 0.0);
-                float matteShadowStrength = mix(1.15, 0.72, brightScene);
-                float matteHighlightStrength = mix(0.65, 0.35, brightScene);
-                detailExponent =
-                    clamp(shadowDetail, -0.14, 0.0) *
-                        detailStrength * matteShadowStrength * uTuningShadowStrength +
-                    clamp(highlightDetail, 0.0, 0.09) *
-                        detailStrength * matteHighlightStrength;
-                float detail = exp2(detailExponent);
-                float shadow = 1.0 -
-                    (1.0 - smoothstep(0.08, 0.26, blurredLuminance)) * 0.025;
-                vec3 pigment = mix(base, saturatedPigment, pigmentStrength);
-                pigment = clamp(pigment * detail * shadow, 0.0, 1.0);
-
-                float cornerPosition = clamp(
-                    abs(vLipUv.y - 0.5) * 2.0,
-                    0.0,
-                    1.0
-                );
-                float cornerFade =
-                    1.0 - smoothstep(0.72, 1.0, cornerPosition) * 0.30 * uTuningCornerFade;
-                return vec4(mix(base, pigment, coverage * cornerFade), 1.0);
-            }
-
+            ${IosLipMaterial.FRAGMENT_FUNCTION}
+            ${UnifiedLipMaterial.FRAGMENT_FUNCTION}
 
             float semanticRefinedCoverage(float rawCoverage) {
                 vec2 edgeStep = uIlluminationSampleStep / 7.0;
@@ -1875,207 +1648,17 @@ internal class ArCoreFaceAnchorRenderer(
             }
 
             void main() {
-                const vec3 luminanceWeights = vec3(0.2126, 0.7152, 0.0722);
-                vec3 cameraLinear = cameraLinearAt(vDisplayUv);
+                vec3 camera = cameraSrgbAt(vDisplayUv);
                 float coverage = clamp(vCoverage * uCoverageMultiplier, 0.0, 1.0);
                 coverage = tuneCoverage(semanticRefinedCoverage(coverage));
-                vec3 cameraSrgb = cameraSrgbAt(vDisplayUv);
-                float cameraLuminance = max(dot(cameraLinear, luminanceWeights), 0.0001);
-
-                if (uFinishMode > 1.5) {
-                    vec4 satin = renderIosSatin(coverage);
-                    vec3 composited = applyLipTuning(satin.rgb, cameraSrgb);
-                    gl_FragColor = blurMaterialOutput(composited, cameraSrgb, coverage);
+                if (uFinishMode < -0.5) {
+                    gl_FragColor = vec4(applyLipTuning(mix(camera, uPigment, coverage), camera), 1.0);
                     return;
                 }
-
-                // Preserve the existing matte reference response.
-                // Gloss remains on the richer Android camera-conditioned path.
-                bool usesIosParityFinish =
-                    (uFinishMode > -0.5 && uFinishMode < 0.5);
-                if (usesIosParityFinish) {
-                    vec4 matte = renderMatteReference(coverage);
-                    vec3 composited = applyLipTuning(matte.rgb, cameraSrgb);
-                    gl_FragColor = blurMaterialOutput(composited, cameraSrgb, coverage);
-                    return;
-                }
-
-                vec3 cameraLeft = cameraLinearAt(
-                    vDisplayUv - vec2(uIlluminationSampleStep.x, 0.0)
-                );
-                vec3 cameraRight = cameraLinearAt(
-                    vDisplayUv + vec2(uIlluminationSampleStep.x, 0.0)
-                );
-                vec3 cameraBottom = cameraLinearAt(
-                    vDisplayUv - vec2(0.0, uIlluminationSampleStep.y)
-                );
-                vec3 cameraTop = cameraLinearAt(
-                    vDisplayUv + vec2(0.0, uIlluminationSampleStep.y)
-                );
-                float luminanceLeft = dot(cameraLeft, luminanceWeights);
-                float luminanceRight = dot(cameraRight, luminanceWeights);
-                float luminanceBottom = dot(cameraBottom, luminanceWeights);
-                float luminanceTop = dot(cameraTop, luminanceWeights);
-                vec3 neighborhoodLinear = 0.25 * (
-                    cameraLeft + cameraRight + cameraBottom + cameraTop
-                );
-                float neighborhoodLuminance = max(
-                    dot(neighborhoodLinear, luminanceWeights),
-                    0.0001
-                );
-                vec2 illuminationGradient = clamp(
-                    vec2(luminanceRight - luminanceLeft, luminanceTop - luminanceBottom) * 4.5,
-                    vec2(-0.7),
-                    vec2(0.7)
-                );
-                vec3 lightDirection = normalize(vec3(illuminationGradient, 0.86));
-                vec3 halfDirection = normalize(lightDirection + vec3(0.0, 0.0, 1.0));
-
-                float positiveCameraDetail = max(
-                    cameraLuminance - neighborhoodLuminance,
-                    0.0
-                ) * uTuningCameraDetail;
-                float surfaceLuminance = mix(
-                    neighborhoodLuminance,
-                    cameraLuminance,
-                    uSurfaceDetailRetention
-                );
-                float suppressedHighlight = positiveCameraDetail *
-                    (1.0 - uHighlightRetention) * coverage;
-                float materialLuminance = max(surfaceLuminance - suppressedHighlight, 0.0001);
-                vec3 pigmentLinear = srgbToLinear(cameraValuePigment(cameraSrgb, uPigment));
-                float pigmentLuminance = max(dot(pigmentLinear, luminanceWeights), 0.0001);
-                float luminanceGain = clamp(
-                    materialLuminance / pigmentLuminance,
-                    uMinimumLuminanceGain,
-                    uMaximumLuminanceGain
-                );
-                vec3 luminancePreservingPigment =
-                    pigmentLinear * luminanceGain;
-                vec3 renderedPigment = mix(
-                    pigmentLinear,
-                    luminancePreservingPigment,
-                    uLuminancePreservation
-                );
-                vec3 pigmented = mix(cameraLinear, renderedPigment, coverage);
-
-                vec3 lipNormal = normalize(vNormal);
-                float roughness = clamp(uRoughness, 0.08, 1.0);
-                float specularPower = mix(112.0, 9.0, roughness * roughness);
-                float normalLobe = pow(
-                    max(dot(lipNormal, halfDirection), 0.0),
-                    specularPower
-                );
-                float nativeHighlight = smoothstep(0.006, 0.075, positiveCameraDetail);
-                float illuminationConfidence = smoothstep(
-                    0.008,
-                    0.11,
-                    length(illuminationGradient)
-                );
-                float cameraAnchoredLobe = normalLobe * mix(
-                    0.18,
-                    1.0,
-                    max(nativeHighlight, illuminationConfidence)
-                );
-                float arcCenter = sin(3.14159265 * clamp(vLipUv.y, 0.0, 1.0));
-                float innerEdge = smoothstep(0.56, 0.88, vLipUv.x) *
-                    (1.0 - smoothstep(0.93, 1.0, vLipUv.x)) * arcCenter;
-                float legacyWetEdgeGain = 1.0 + uWetInnerEdgeStrength * innerEdge * 2.2;
-                float retainedNativeSpecular = positiveCameraDetail *
-                    uHighlightRetention * 0.55;
-                float legacySpecular = uSpecularStrength * coverage *
-                    legacyWetEdgeGain * (0.045 * cameraAnchoredLobe + retainedNativeSpecular);
-
-                float adaptiveGloss = smoothstep(0.12, 0.32, uWetInnerEdgeStrength);
-                float sceneLightLevel = smoothstep(0.015, 0.45, neighborhoodLuminance);
-                float lightingEvidence = max(
-                    nativeHighlight,
-                    max(illuminationConfidence, sceneLightLevel * 0.42)
-                );
-                float directionalContrast = smoothstep(
-                    0.04,
-                    0.55,
-                    length(illuminationGradient)
-                );
-                float highlightArcCenter = clamp(
-                    0.5 + illuminationGradient.x * 0.38,
-                    0.16,
-                    0.84
-                );
-                float highlightArcHalfWidth = mix(0.32, 0.14, directionalContrast);
-                float highlightArcDistance = abs(vLipUv.y - highlightArcCenter);
-                float localizedArcHighlight = 1.0 - smoothstep(
-                    highlightArcHalfWidth * 0.62,
-                    highlightArcHalfWidth,
-                    highlightArcDistance
-                );
-                float glossBreakup = glossHighlightBreakup(vLipUv);
-                float adaptiveFilmGain = 1.0 +
-                    uWetInnerEdgeStrength * sceneLightLevel * 0.35;
-                float adaptiveSpecular = uSpecularStrength * coverage *
-                    adaptiveFilmGain * 0.105 * normalLobe * lightingEvidence *
-                    localizedArcHighlight;
-                adaptiveSpecular += uSpecularStrength * coverage * 0.080 *
-                    lightingEvidence * glossBreakup *
-                    (0.40 + 0.60 * normalLobe);
-                vec3 illuminationTint = clamp(
-                    neighborhoodLinear / neighborhoodLuminance,
-                    vec3(0.72),
-                    vec3(1.28)
-                );
-                float satinGlow = clamp(uSatinGlowStrength, 0.0, 1.0);
-                float satinBroadLobe = pow(
-                    max(dot(lipNormal, halfDirection), 0.0),
-                    4.0
-                );
-                float satinLightResponse = mix(
-                    0.42,
-                    1.0,
-                    max(sceneLightLevel, illuminationConfidence)
-                );
-                float satinSpecular = uSpecularStrength * coverage * 0.060 *
-                    satinBroadLobe * satinLightResponse;
-                vec3 satinNativeHighlightColor = min(
-                    max(cameraLinear - neighborhoodLinear, vec3(0.0)),
-                    vec3(0.12)
-                ) * uHighlightRetention * uSpecularStrength * coverage * 0.34;
-                vec3 nativeSpecularColor = min(
-                    max(cameraLinear - neighborhoodLinear, vec3(0.0)),
-                    vec3(0.22)
-                ) * uHighlightRetention * uSpecularStrength * coverage * 0.72;
-                nativeSpecularColor *= mix(0.42, 1.0, glossBreakup);
-                vec3 legacySpecularColor = vec3(1.0, 0.94, 0.92) * legacySpecular;
-                vec3 adaptiveSpecularColor =
-                    illuminationTint * adaptiveSpecular + nativeSpecularColor;
-                vec3 satinSpecularColor =
-                    illuminationTint * satinSpecular + satinNativeHighlightColor;
-                vec3 baseSpecularColor = mix(
-                    legacySpecularColor,
-                    satinSpecularColor,
-                    satinGlow
-                );
-                vec3 specularColor = mix(
-                    baseSpecularColor,
-                    adaptiveSpecularColor,
-                    adaptiveGloss
-                );
-
-                float textureDetail = (cameraLuminance - neighborhoodLuminance) *
-                    uTuningCameraDetail * uTuningMaterialDetail;
-                float textureCorrection = textureDetail * uMicroTextureRetention *
-                    coverage * 0.055;
-                float satinDiffuseGlow = satinGlow * coverage * sceneLightLevel *
-                    (0.022 + 0.032 * satinBroadLobe);
-                pigmented *= 1.0 + satinDiffuseGlow;
-                vec3 chromaDirection = pigmented / max(
-                    dot(pigmented, luminanceWeights),
-                    0.0001
-                );
-                pigmented += chromaDirection * textureCorrection;
-                pigmented += specularColor;
-                vec3 materialSrgb = linearToSrgb(max(pigmented, vec3(0.0)));
-                vec3 composited = applyLipTuning(materialSrgb, cameraSrgb);
-                gl_FragColor = blurMaterialOutput(composited, cameraSrgb, coverage);
+                vec4 material = uColorRenderingMode > 0.5 ?
+                    renderUnifiedLip(coverage) : renderIosLip(coverage);
+                vec3 composited = applyLipTuning(material.rgb, camera);
+                gl_FragColor = blurMaterialOutput(composited, camera, material.a);
             }
         """
         const val LIP_BLUR_FRAGMENT_SHADER = """
@@ -2092,10 +1675,14 @@ internal class ArCoreFaceAnchorRenderer(
             }
 
             void main() {
+                // Keep material detail/specular at the same pixel through both passes.
+                // Neighbor RGB is only needed to extend color into transparent texels.
+                vec4 center = texture2D(uSource, vTexCoord);
                 vec4 candidate = texture2D(uSource, vTexCoord - uTexelStep * 6.0);
-                vec3 retainedColor = candidate.rgb;
-                float retainedAlpha = candidate.a;
+                vec3 retainedColor = center.rgb;
+                float retainedAlpha = center.a;
                 float blurredAlpha = candidate.a * 0.00735029;
+                retainStronger(candidate, retainedColor, retainedAlpha);
 
                 candidate = texture2D(uSource, vTexCoord - uTexelStep * 5.0);
                 blurredAlpha += candidate.a * 0.01909834;
@@ -2112,7 +1699,7 @@ internal class ArCoreFaceAnchorRenderer(
                 candidate = texture2D(uSource, vTexCoord - uTexelStep);
                 blurredAlpha += candidate.a * 0.15338247;
                 retainStronger(candidate, retainedColor, retainedAlpha);
-                candidate = texture2D(uSource, vTexCoord);
+                candidate = center;
                 blurredAlpha += candidate.a * 0.16729190;
                 retainStronger(candidate, retainedColor, retainedAlpha);
                 candidate = texture2D(uSource, vTexCoord + uTexelStep);
@@ -2134,7 +1721,8 @@ internal class ArCoreFaceAnchorRenderer(
                 blurredAlpha += candidate.a * 0.00735029;
                 retainStronger(candidate, retainedColor, retainedAlpha);
 
-                gl_FragColor = vec4(retainedColor, clamp(blurredAlpha, 0.0, 1.0));
+                vec3 materialColor = center.a >= 0.002 ? center.rgb : retainedColor;
+                gl_FragColor = vec4(materialColor, clamp(blurredAlpha, 0.0, 1.0));
             }
         """
 

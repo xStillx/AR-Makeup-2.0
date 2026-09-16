@@ -28,7 +28,10 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import com.example.armakeup.R
 import com.example.armakeup.databinding.ActivityArcoreFaceAnchorBinding
+import com.example.armakeup.makeup.LipColorRenderingMode
 import com.example.armakeup.makeup.LipstickFinish
+import com.example.armakeup.makeup.LipstickDensity
+import com.example.armakeup.makeup.LipstickTexture
 import com.google.ar.core.ArCoreApk
 import com.google.ar.core.Config
 import com.google.ar.core.Session
@@ -52,8 +55,9 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
     private var renderSchedulerRunning = false
     private var lastRenderRequestNs = 0L
     private var resumed = false
+    private var selectedColorRenderingMode = LipColorRenderingMode.IOS_REFERENCE
     private var selectedFinish = LipstickFinish.MATTE
-    private var tuning = LipstickTuning.defaultsFor(selectedFinish)
+    private var tuning = LipstickTuning.defaultsFor(selectedColorRenderingMode, selectedFinish)
     private var tuningExpanded = true
     private var updatingTuningControls = false
     private val tuningControls = mutableListOf<TuningControl>()
@@ -91,11 +95,37 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
         surfaceView.setRenderer(renderer)
         surfaceView.renderMode = GLSurfaceView.RENDERMODE_WHEN_DIRTY
 
-        tuning = restoreTuning(selectedFinish)
+        selectedColorRenderingMode = restoreColorRenderingMode()
+        binding.colorRenderingModeToggleGroup.check(
+            if (selectedColorRenderingMode == LipColorRenderingMode.IOS_REFERENCE) {
+                R.id.color_rendering_mode_ios
+            } else {
+                R.id.color_rendering_mode_unified
+            },
+        )
+        tuning = restoreTuning(selectedColorRenderingMode, selectedFinish)
+        renderer.setColorRenderingMode(selectedColorRenderingMode)
         renderer.setLipstickTuning(tuning)
         renderer.setLipstickFinish(selectedFinish)
         createTuningControls()
         bindPanelActions()
+
+        binding.colorRenderingModeToggleGroup.addOnButtonCheckedListener { _, checkedId, isChecked ->
+            if (!isChecked) return@addOnButtonCheckedListener
+            val renderingMode = if (checkedId == R.id.color_rendering_mode_unified) {
+                LipColorRenderingMode.UNIFIED
+            } else {
+                LipColorRenderingMode.IOS_REFERENCE
+            }
+            if (renderingMode == selectedColorRenderingMode) return@addOnButtonCheckedListener
+            saveTuning()
+            selectedColorRenderingMode = renderingMode
+            saveColorRenderingMode()
+            tuning = restoreTuning(selectedColorRenderingMode, selectedFinish)
+            renderer.setColorRenderingMode(selectedColorRenderingMode)
+            renderer.setLipstickTuning(tuning)
+            updateTuningControls()
+        }
 
         binding.finishToggleGroup.addOnButtonCheckedListener { _, checkedId, isChecked ->
             if (!isChecked) return@addOnButtonCheckedListener
@@ -108,7 +138,7 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
             if (finish == selectedFinish) return@addOnButtonCheckedListener
             saveTuning()
             selectedFinish = finish
-            tuning = restoreTuning(selectedFinish)
+            tuning = restoreTuning(selectedColorRenderingMode, selectedFinish)
             renderer.setLipstickTuning(tuning)
             renderer.setLipstickFinish(finish)
             updateTuningControls()
@@ -160,18 +190,19 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
             )
         }
         binding.resetTuning.setOnClickListener {
-            tuning = LipstickTuning.defaultsFor(selectedFinish)
+            tuning = LipstickTuning.defaultsFor(selectedColorRenderingMode, selectedFinish)
             renderer.setLipstickTuning(tuning)
             updateTuningControls()
             saveTuning()
         }
         binding.copyTuning.setOnClickListener {
             val text = buildString {
+                appendLine("rendering_mode=${selectedColorRenderingMode.name}")
                 appendLine("finish=${selectedFinish.name}")
                 LipstickTuningParameter.values().forEach { parameter ->
                     append(parameter.name.lowercase(Locale.US))
                     append('=')
-                    appendLine(formatValue(parameter, parameter.read(tuning)))
+                    appendLine(formatExportValue(parameter, parameter.read(tuning)))
                 }
             }.trimEnd()
             val clipboard = getSystemService(ClipboardManager::class.java)
@@ -206,9 +237,9 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
                 textSize = 12f
             }
             header.addView(label, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-            header.addView(value, LinearLayout.LayoutParams(dp(58), ViewGroup.LayoutParams.WRAP_CONTENT))
+            header.addView(value, LinearLayout.LayoutParams(dp(if (parameter.discrete) 96 else 58), ViewGroup.LayoutParams.WRAP_CONTENT))
             val seekBar = SeekBar(this).apply {
-                max = SLIDER_STEPS
+                max = sliderStepsFor(parameter)
                 progress = progressFor(parameter, parameter.read(tuning))
                 setPadding(0, 0, 0, 0)
             }
@@ -256,23 +287,38 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
         updatingTuningControls = false
     }
 
+    private fun sliderStepsFor(parameter: LipstickTuningParameter): Int =
+        if (parameter.discrete) 2 else SLIDER_STEPS
+
     private fun progressFor(parameter: LipstickTuningParameter, value: Float): Int =
-        (((value - parameter.minimum) / (parameter.maximum - parameter.minimum)) * SLIDER_STEPS)
+        (((value - parameter.minimum) / (parameter.maximum - parameter.minimum)) * sliderStepsFor(parameter))
             .roundToInt()
-            .coerceIn(0, SLIDER_STEPS)
+            .coerceIn(0, sliderStepsFor(parameter))
 
     private fun valueFor(parameter: LipstickTuningParameter, progress: Int): Float =
-        parameter.minimum + (parameter.maximum - parameter.minimum) * progress / SLIDER_STEPS
+        parameter.minimum + (parameter.maximum - parameter.minimum) * progress / sliderStepsFor(parameter)
 
-    private fun formatValue(parameter: LipstickTuningParameter, value: Float): String =
-        String.format(Locale.US, "%.${parameter.decimals}f", value)
+    private fun formatValue(parameter: LipstickTuningParameter, value: Float): String = when (parameter) {
+        LipstickTuningParameter.PRODUCT_DENSITY -> LipstickDensity.values()[value.roundToInt().coerceIn(0, 2)].displayName
+        LipstickTuningParameter.PRODUCT_TEXTURE -> LipstickTexture.values()[value.roundToInt().coerceIn(0, 2)].displayName
+        else -> String.format(Locale.US, "%.${parameter.decimals}f", value)
+    }
 
-    private fun restoreTuning(finish: LipstickFinish): LipstickTuning {
+    private fun formatExportValue(parameter: LipstickTuningParameter, value: Float): String = when (parameter) {
+        LipstickTuningParameter.PRODUCT_DENSITY -> LipstickDensity.values()[value.roundToInt().coerceIn(0, 2)].name
+        LipstickTuningParameter.PRODUCT_TEXTURE -> LipstickTexture.values()[value.roundToInt().coerceIn(0, 2)].name
+        else -> formatValue(parameter, value)
+    }
+
+    private fun restoreTuning(
+        renderingMode: LipColorRenderingMode,
+        finish: LipstickFinish,
+    ): LipstickTuning {
         val preferences = getSharedPreferences(TUNING_PREFERENCES, Context.MODE_PRIVATE)
-        val defaults = LipstickTuning.defaultsFor(finish)
+        val defaults = LipstickTuning.defaultsFor(renderingMode, finish)
         return LipstickTuningParameter.values().fold(defaults) { state, parameter ->
             val defaultValue = parameter.read(defaults)
-            val storedValue = preferences.getFloat(preferenceKey(finish, parameter), defaultValue)
+            val storedValue = preferences.getFloat(preferenceKey(renderingMode, finish, parameter), defaultValue)
                 .coerceIn(parameter.minimum, parameter.maximum)
             parameter.update(state, storedValue)
         }
@@ -281,22 +327,48 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
     private fun saveTuning() {
         getSharedPreferences(TUNING_PREFERENCES, Context.MODE_PRIVATE).edit().apply {
             LipstickTuningParameter.values().forEach { parameter ->
-                putFloat(preferenceKey(selectedFinish, parameter), parameter.read(tuning))
+                putFloat(preferenceKey(selectedColorRenderingMode, selectedFinish, parameter), parameter.read(tuning))
             }
             apply()
         }
     }
 
     private fun preferenceKey(
+        renderingMode: LipColorRenderingMode,
         finish: LipstickFinish,
         parameter: LipstickTuningParameter,
-    ): String = "${tuningProfileKey(finish)}_${parameter.name}"
+    ): String = "${tuningProfileKey(renderingMode, finish)}_${parameter.name}"
 
-    private fun tuningProfileKey(finish: LipstickFinish): String = when (finish) {
-        LipstickFinish.MATTE -> "MATTE_START_RULES_CLASSIC_RED_9E2620"
-        LipstickFinish.SATIN -> "SATIN_DIOR_999_FINAL_B8202D_FEATHER_V2"
-        LipstickFinish.GLOSS -> "GLOSS_LOREAL_BROWN_ESPRESSO_515_FINAL_643229"
-        else -> finish.name
+    private fun tuningProfileKey(
+        renderingMode: LipColorRenderingMode,
+        finish: LipstickFinish,
+    ): String = when (renderingMode) {
+        LipColorRenderingMode.IOS_REFERENCE -> when (finish) {
+            LipstickFinish.MATTE -> "IOS_MATERIAL_MATTE_SATIN_BASE_9E2620_V1"
+            LipstickFinish.SATIN -> "IOS_MATERIAL_SATIN_C2050E_V3"
+            LipstickFinish.GLOSS -> "IOS_MATERIAL_GLOSS_SATIN_BASE_643229_V1"
+            else -> finish.name
+        }
+        LipColorRenderingMode.UNIFIED -> when (finish) {
+            LipstickFinish.MATTE -> "UNIFIED_MATERIAL_MATTE_SATIN_BASE_9E2620_V1"
+            LipstickFinish.SATIN -> "UNIFIED_MATERIAL_SATIN_V5"
+            LipstickFinish.GLOSS -> "UNIFIED_MATERIAL_GLOSS_SATIN_BASE_643229_V1"
+            else -> finish.name
+        }
+    }
+
+    private fun restoreColorRenderingMode(): LipColorRenderingMode {
+        val stored = getSharedPreferences(TUNING_PREFERENCES, Context.MODE_PRIVATE)
+            .getString(COLOR_RENDERING_MODE_KEY, null)
+        return runCatching { LipColorRenderingMode.valueOf(stored.orEmpty()) }
+            .getOrDefault(LipColorRenderingMode.IOS_REFERENCE)
+    }
+
+    private fun saveColorRenderingMode() {
+        getSharedPreferences(TUNING_PREFERENCES, Context.MODE_PRIVATE)
+            .edit()
+            .putString(COLOR_RENDERING_MODE_KEY, selectedColorRenderingMode.name)
+            .apply()
     }
 
     private fun startSessionIfPossible() {
@@ -435,5 +507,6 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
         const val TARGET_RENDER_INTERVAL_NS = 1_000_000_000L / 60L
         const val SLIDER_STEPS = 1_000
         const val TUNING_PREFERENCES = "lipstick_tuning_v2"
+        const val COLOR_RENDERING_MODE_KEY = "color_rendering_mode"
     }
 }

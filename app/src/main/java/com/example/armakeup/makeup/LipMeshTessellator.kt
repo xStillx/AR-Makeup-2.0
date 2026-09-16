@@ -38,26 +38,70 @@ internal class LipMeshTessellator(
         innerContour: FloatArray,
         upperProfile: LipstickCoverageProfile,
         lowerProfile: LipstickCoverageProfile,
+        outerCarrierExpansion: Float = 0f,
+        innerSeamExpansion: Float = 0f,
+        innerCarrierFeather: Float = 0f,
     ): FloatArray {
         require(outerContour.size == CONTOUR_POINT_COUNT * POINT_SIZE)
         require(innerContour.size == CONTOUR_POINT_COUNT * POINT_SIZE)
+        require(outerCarrierExpansion in 0f..MAX_BOUNDARY_EXPANSION)
+        require(innerSeamExpansion in 0f..MAX_BOUNDARY_EXPANSION)
+        require(innerCarrierFeather in 0f..1f)
+
+        val upperOuterArc = sampleArc(outerContour, UPPER_ARC_INDICES)
+        val upperInnerArc = sampleArc(innerContour, UPPER_ARC_INDICES)
+        val lowerOuterArc = sampleArc(outerContour, LOWER_ARC_INDICES)
+        val lowerInnerArc = sampleArc(innerContour, LOWER_ARC_INDICES)
+        expandBoundaries(upperOuterArc, upperInnerArc, outerCarrierExpansion, innerSeamExpansion)
+        expandBoundaries(lowerOuterArc, lowerInnerArc, outerCarrierExpansion, innerSeamExpansion)
 
         val output = FloatArray(vertexCount * VERTEX_COMPONENT_COUNT)
         writeLip(
             output = output,
             vertexOffset = 0,
-            outerArc = sampleArc(outerContour, UPPER_ARC_INDICES),
-            innerArc = sampleArc(innerContour, UPPER_ARC_INDICES),
+            outerArc = upperOuterArc,
+            innerArc = upperInnerArc,
             profile = upperProfile,
+            outerExpansion = outerCarrierExpansion,
+            innerExpansion = innerSeamExpansion,
+            innerCarrierFeather = innerCarrierFeather,
         )
         writeLip(
             output = output,
             vertexOffset = verticesPerLip,
-            outerArc = sampleArc(outerContour, LOWER_ARC_INDICES),
-            innerArc = sampleArc(innerContour, LOWER_ARC_INDICES),
+            outerArc = lowerOuterArc,
+            innerArc = lowerInnerArc,
             profile = lowerProfile,
+            outerExpansion = outerCarrierExpansion,
+            innerExpansion = innerSeamExpansion,
+            innerCarrierFeather = innerCarrierFeather,
         )
         return output
+    }
+
+    /**
+     * Adds a feathered carrier outside the measured vermilion border and a small lip-side overlap
+     * at the mouth seam. Both displacements follow the local outer-to-inner direction and vanish at
+     * the corners, so MediaPipe topology, point order and mouth aperture remain unchanged.
+     */
+    private fun expandBoundaries(
+        outerArc: FloatArray,
+        innerArc: FloatArray,
+        outerExpansion: Float,
+        innerExpansion: Float,
+    ) {
+        if (outerExpansion <= 0f && innerExpansion <= 0f) return
+        repeat(samplesPerLip) { sampleIndex ->
+            val point = sampleIndex * POINT_SIZE
+            val acrossX = innerArc[point] - outerArc[point]
+            val acrossY = innerArc[point + 1] - outerArc[point + 1]
+            val arc = sampleIndex.toFloat() / (samplesPerLip - 1)
+            val centerWeight = sin(PI.toFloat() * arc).coerceAtLeast(0f).pow(ARC_BULGE_POWER)
+            outerArc[point] -= acrossX * outerExpansion * centerWeight
+            outerArc[point + 1] -= acrossY * outerExpansion * centerWeight
+            innerArc[point] += acrossX * innerExpansion * centerWeight
+            innerArc[point + 1] += acrossY * innerExpansion * centerWeight
+        }
     }
 
     private fun writeLip(
@@ -66,8 +110,16 @@ internal class LipMeshTessellator(
         outerArc: FloatArray,
         innerArc: FloatArray,
         profile: LipstickCoverageProfile,
+        outerExpansion: Float,
+        innerExpansion: Float,
+        innerCarrierFeather: Float,
     ) {
-        val coverage = coverageRings(profile)
+        val coverage = coverageRings(
+            profile = profile,
+            outerExpansion = outerExpansion,
+            innerExpansion = innerExpansion,
+            innerCarrierFeather = innerCarrierFeather,
+        )
         writeSurfacePositions(outerArc, innerArc)
         for (sampleIndex in 0 until samplesPerLip) {
             RING_FRACTIONS.forEachIndexed { ringIndex, fraction ->
@@ -223,18 +275,38 @@ internal class LipMeshTessellator(
         output[outputIndex + 1] = source[sourceIndex + 1]
     }
 
-    private fun coverageRings(profile: LipstickCoverageProfile): FloatArray {
+    private fun coverageRings(
+        profile: LipstickCoverageProfile,
+        outerExpansion: Float,
+        innerExpansion: Float,
+        innerCarrierFeather: Float,
+    ): FloatArray {
         val edge = profile.edgeCoverage / MAX_ALPHA
         val mid = 1f - (1f - edge) * (1f - profile.midCoverage / MAX_ALPHA)
         val core = profile.effectiveCoreCoverage
-        // A symmetric fade exposes the natural lip colour on both sides of the mouth seam.
-        // Preserve the outer feather, but carry core coverage to the inner contour when requested.
-        // This changes coverage only: positions, normals, UVs and the open-mouth topology stay put.
-        return if (featherInnerBoundary) {
+        // Preserve the outer feather and keep full coverage through the measured inner contour.
+        val coverage = if (featherInnerBoundary) {
             floatArrayOf(0f, edge, mid, core, core, mid, edge, 0f)
         } else {
             floatArrayOf(0f, edge, mid, core, core, core, core, core)
         }
+        if (innerExpansion <= 0f || innerCarrierFeather <= 0f) return coverage
+
+        // The original inner landmark lies inside the expanded strip. Keep the first part of the
+        // carrier opaque, then fade only its extra mouth-side tail to avoid painting teeth/cavity.
+        val originalInnerFraction =
+            (1f + outerExpansion) / (1f + outerExpansion + innerExpansion)
+        val fadeStart = originalInnerFraction +
+            (1f - originalInnerFraction) * INNER_CARRIER_SOLID_FRACTION
+        RING_FRACTIONS.forEachIndexed { ringIndex, fraction ->
+            if (fraction <= fadeStart) return@forEachIndexed
+            val fadeProgress = ((fraction - fadeStart) / (1f - fadeStart)).coerceIn(0f, 1f)
+            val smoothProgress = fadeProgress * fadeProgress * (3f - 2f * fadeProgress)
+            val featherCoverage = 1f - smoothProgress
+            val carrierScale = 1f + (featherCoverage - 1f) * innerCarrierFeather
+            coverage[ringIndex] *= carrierScale
+        }
+        return coverage
     }
 
     private fun buildIndices(): ShortArray {
@@ -282,6 +354,8 @@ internal class LipMeshTessellator(
         private const val MAX_ALPHA = 255f
         private const val SURFACE_BULGE_SCALE = 0.72f
         private const val ARC_BULGE_POWER = 0.65f
+        private const val MAX_BOUNDARY_EXPANSION = 0.35f
+        private const val INNER_CARRIER_SOLID_FRACTION = 0.40f
         private const val MIN_NORMAL_LENGTH = 1e-7f
         private val UPPER_ARC_INDICES = intArrayOf(0, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10)
         private val LOWER_ARC_INDICES = intArrayOf(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10)

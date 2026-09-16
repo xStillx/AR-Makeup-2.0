@@ -37,5 +37,8 @@
     <string name="tuning_collapse">Свернуть</string>
     <string name="tuning_expand">Развернуть</string>
     <string name="tuning_copied">Параметры скопированы</string>
+    <string name="color_rendering_mode_group">ЦВЕТООТОБРАЖЕНИЕ</string>
+    <string name="color_rendering_mode_ios">Как на iOS</string>
+    <string name="color_rendering_mode_unified">Единая формула</string>
     <string name="finish_group">МАТЕРИАЛ</string>
 </resources>
