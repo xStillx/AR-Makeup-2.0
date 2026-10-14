@@ -4,12 +4,26 @@
 
 Значения в этом реестре не следует заменять результатами временных экспериментов. Новый или изменённый вариант фиксируется здесь после явного выбора пользователя.
 
+## Плотность выбранного оттенка — 2026-10-14
+
+По команде пользователя всем33 оттенкам в `LipstickColorCatalog` назначен `density` из исходного списка. В UNIFIED выбор оттенка или изменение «Плотности продукта» устанавливает стартовую «Интенсивность цвета» (`pigment_opacity`):
+
+- `LOW` →0.30 (13 оттенков);
+- `MEDIUM` →0.65 (10 оттенков);
+- `HIGH` →1.00 (10 оттенков).
+
+Это стартовые коэффициенты смешивания пигмента, не измеренные физические проценты непрозрачности. GUERLAIN775 и309 →LOW; Guerlain131/518/06 и OK Beauty Safari/Valkyrie →MEDIUM; Dior999 →HIGH. Полный список хранится в каталоге, HEX не изменяются. Цвет и density общие для MATTE/SATIN/GLOSS, остальные параметры — принятая база ниже и отдельные ручные настройки материала. Общая opacity остаётся1, coverage1.98; силу бликов коэффициент density не умножает.
+
+В IOS_REFERENCE применяется тот же product density, но начальный `pigment_opacity`=1.00: действующие iOS-коэффициенты0.54/0.78/0.92 и low-density-gloss обработка уже находятся в этой формуле. Дополнительное уменьшение0.30/0.65 там не накладывается автоматически. В обоих режимах ручная «Интенсивность цвета» может переопределить стартовую величину; она сохраняется между финишами внутри режима. Следующий выбор оттенка заново применяет его density; «Сброс» возвращает стартовую интенсивность текущей density, сохраняя цвет. Теперь выбор оттенка также применяет его texture и поддерживаемый finish из каталога; ручной выбор финиша/текстуры остаётся доступным и сохраняется. По явному решению пользователя для OIL/TINT сохраняется текущий финиш; автоматического соответствия GLOSS/MATTE и отдельных формул нет. В IOS_REFERENCE texture уже влияет на материал; в UNIFIED пока сохраняется как параметр без отдельного shader response.
+
 ## Основные профили финишей
 
-- Статус: утверждённые основные параметры для `UNIFIED` и `IOS_REFERENCE`.
-- Профили хранения: `*_SATIN_C2050E_V3`/`UNIFIED_MATERIAL_SATIN_V5`, `*_MATTE_SATIN_BASE_9E2620_V1`, `*_GLOSS_SATIN_BASE_643229_V1`.
-- Правило: MATTE, SATIN и GLOSS используют одну принятую сатиновую базу покрытия, цветопередачи, детализации и краёв. Цвет остаётся отдельным для продукта. MATTE отключает отражение; GLOSS сохраняет прежний liquid-блик.
-- Числовые блоки ниже одинаковы для обоих режимов; для iOS-варианта меняется только `rendering_mode=IOS_REFERENCE`, сама формула рендера остаётся отдельной.
+- Статус: общая база финишей по команде пользователя от 2026-10-14, на основе последнего ручного MATTE-блока.
+- Профили хранения: `${rendering_mode}_MATERIAL_${finish}_COMMON_9E1F23_V1`; прежние сохранённые профили не удалены, но больше не перекрывают новую базу.
+- Правило: MATTE, SATIN и GLOSS используют одинаковые цвет `#9E1F23` (RGB158/31/35), HIGH/MOUSSE, покрытие, цветопередачу, фактуру, настройки формы бликов и края. Различаются только оптические силы: у MATTE отражения/блики/свечение выключены; в UNIFIED более слабый SATIN и более сильный GLOSS сохраняются существующим finish response рендера. IOS_REFERENCE сохраняет собственные оптические формулы.
+- Блоки ниже относятся к `UNIFIED`: `matte_light_transfer`/`matte_soft_light`=1 работают у всех трёх финишей. Исторические ключи `matte_*` сохранены; в UI это «Плавная светотень» и «Мягкое высветление».
+- В `IOS_REFERENCE` общая база и цвет те же, но `rendering_mode=IOS_REFERENCE`, `matte_light_transfer=0.00`, `matte_soft_light=0.00`: эти Android-световые добавки в отдельную iOS-формулу не перенесены и controls скрыты. Остальные настройки совпадают с соответствующим блоком ниже. Формулы двух режимов не объединены.
+- Исторические конечные Dior/Brown Espresso ниже остаются без изменений и не становятся красными продуктами из-за новой общей базы.
 
 ### GLOSS
 
@@ -17,15 +31,15 @@
 rendering_mode=UNIFIED
 finish=GLOSS
 product_density=HIGH
-product_texture=LIQUID
+product_texture=MOUSSE
 opacity=1.00
 pigment_opacity=1.00
 coverage=1.98
 natural_lip=0.00
-pigment_red=100
-pigment_green=50
-pigment_blue=41
-pigment_brightness=0.85
+pigment_red=158
+pigment_green=31
+pigment_blue=35
+pigment_brightness=0.98
 brightness=1.00
 contrast=1.00
 saturation=1.00
@@ -33,6 +47,8 @@ hue=0.0
 luminance=1.00
 camera_value_transfer=0.20
 camera_detail=0.20
+matte_light_transfer=1.00
+matte_soft_light=1.00
 material_detail=1.00
 shadow=1.00
 micro_texture=1.00
@@ -41,9 +57,9 @@ roughness=1.00
 specular=1.00
 highlight_retention=1.00
 highlight_strength=1.00
-highlight_size=1.00
-highlight_threshold=1.00
-highlight_concentration=1.00
+highlight_size=1.20
+highlight_threshold=1.15
+highlight_concentration=1.25
 satin_glow=1.00
 wet_inner_edge=1.00
 edge_refinement=1.00
@@ -53,7 +69,7 @@ inner_coverage=1.00
 corner_fade=1.00
 seam_shadow=1.00
 tooth_protection=0.00
-camera_sample_scale=1.00
+camera_sample_scale=1.15
 ```
 
 ### SATIN
@@ -62,15 +78,15 @@ camera_sample_scale=1.00
 rendering_mode=UNIFIED
 finish=SATIN
 product_density=HIGH
-product_texture=CREAMY
+product_texture=MOUSSE
 opacity=1.00
 pigment_opacity=1.00
 coverage=1.98
 natural_lip=0.00
-pigment_red=194
-pigment_green=5
-pigment_blue=14
-pigment_brightness=0.85
+pigment_red=158
+pigment_green=31
+pigment_blue=35
+pigment_brightness=0.98
 brightness=1.00
 contrast=1.00
 saturation=1.00
@@ -78,6 +94,8 @@ hue=0.0
 luminance=1.00
 camera_value_transfer=0.20
 camera_detail=0.20
+matte_light_transfer=1.00
+matte_soft_light=1.00
 material_detail=1.00
 shadow=1.00
 micro_texture=1.00
@@ -113,9 +131,9 @@ pigment_opacity=1.00
 coverage=1.98
 natural_lip=0.00
 pigment_red=158
-pigment_green=38
-pigment_blue=32
-pigment_brightness=0.85
+pigment_green=31
+pigment_blue=35
+pigment_brightness=0.98
 brightness=1.00
 contrast=1.00
 saturation=1.00
@@ -123,6 +141,8 @@ hue=0.0
 luminance=1.00
 camera_value_transfer=0.20
 camera_detail=0.20
+matte_light_transfer=1.00
+matte_soft_light=1.00
 material_detail=1.00
 shadow=1.00
 micro_texture=1.00

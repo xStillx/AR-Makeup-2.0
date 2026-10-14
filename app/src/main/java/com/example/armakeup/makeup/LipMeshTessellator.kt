@@ -41,12 +41,14 @@ internal class LipMeshTessellator(
         outerCarrierExpansion: Float = 0f,
         innerSeamExpansion: Float = 0f,
         innerCarrierFeather: Float = 0f,
+        cornerCarrierExpansion: Float = 0f,
     ): FloatArray {
         require(outerContour.size == CONTOUR_POINT_COUNT * POINT_SIZE)
         require(innerContour.size == CONTOUR_POINT_COUNT * POINT_SIZE)
         require(outerCarrierExpansion in 0f..MAX_BOUNDARY_EXPANSION)
         require(innerSeamExpansion in 0f..MAX_BOUNDARY_EXPANSION)
         require(innerCarrierFeather in 0f..1f)
+        require(cornerCarrierExpansion in 0f..MAX_CORNER_CARRIER_EXPANSION)
 
         val upperOuterArc = sampleArc(outerContour, UPPER_ARC_INDICES)
         val upperInnerArc = sampleArc(innerContour, UPPER_ARC_INDICES)
@@ -54,6 +56,8 @@ internal class LipMeshTessellator(
         val lowerInnerArc = sampleArc(innerContour, LOWER_ARC_INDICES)
         expandBoundaries(upperOuterArc, upperInnerArc, outerCarrierExpansion, innerSeamExpansion)
         expandBoundaries(lowerOuterArc, lowerInnerArc, outerCarrierExpansion, innerSeamExpansion)
+        expandCornerCarriers(upperOuterArc, cornerCarrierExpansion)
+        expandCornerCarriers(lowerOuterArc, cornerCarrierExpansion)
 
         val output = FloatArray(vertexCount * VERTEX_COMPONENT_COUNT)
         writeLip(
@@ -101,6 +105,31 @@ internal class LipMeshTessellator(
             outerArc[point + 1] -= acrossY * outerExpansion * centerWeight
             innerArc[point] += acrossX * innerExpansion * centerWeight
             innerArc[point + 1] += acrossY * innerExpansion * centerWeight
+        }
+    }
+
+    /**
+     * The thickness-based carrier vanishes at both corners. Add a small outer-only extension
+     * along the measured mouth axis, fading before the lip body. Inner arcs remain untouched,
+     * including their shared endpoints: this must not shrink or fill the mouth aperture.
+     * Expansion is a fraction of the corner-to-corner vector, not a fixed screen-pixel offset.
+     */
+    private fun expandCornerCarriers(outerArc: FloatArray, expansion: Float) {
+        if (expansion <= 0f) return
+        val lastPoint = (samplesPerLip - 1) * POINT_SIZE
+        val mouthAxisX = outerArc[lastPoint] - outerArc[0]
+        val mouthAxisY = outerArc[lastPoint + 1] - outerArc[1]
+        repeat(samplesPerLip) { sampleIndex ->
+            val arc = sampleIndex.toFloat() / (samplesPerLip - 1)
+            val cornerDistance = minOf(arc, 1f - arc)
+            if (cornerDistance >= CORNER_CARRIER_ARC_FRACTION) return@repeat
+            val progress = cornerDistance / CORNER_CARRIER_ARC_FRACTION
+            val weight = 1f - progress * progress * (3f - 2f * progress)
+            val direction = if (arc < 0.5f) -1f else 1f
+            val displacement = expansion * weight * direction
+            val point = sampleIndex * POINT_SIZE
+            outerArc[point] += mouthAxisX * displacement
+            outerArc[point + 1] += mouthAxisY * displacement
         }
     }
 
@@ -355,6 +384,9 @@ internal class LipMeshTessellator(
         private const val SURFACE_BULGE_SCALE = 0.72f
         private const val ARC_BULGE_POWER = 0.65f
         private const val MAX_BOUNDARY_EXPANSION = 0.35f
+        private const val MAX_CORNER_CARRIER_EXPANSION = 0.02f
+        // Keep the local composite feather's arc support in sync with this value.
+        private const val CORNER_CARRIER_ARC_FRACTION = 0.12f
         private const val INNER_CARRIER_SOLID_FRACTION = 0.40f
         private const val MIN_NORMAL_LENGTH = 1e-7f
         private val UPPER_ARC_INDICES = intArrayOf(0, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10)

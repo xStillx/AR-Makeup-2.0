@@ -4,10 +4,12 @@ import com.example.armakeup.makeup.LipColorRenderingMode
 import com.example.armakeup.makeup.LipstickFinish
 import com.example.armakeup.makeup.LipstickDensity
 import com.example.armakeup.makeup.LipstickTexture
+import com.example.armakeup.makeup.LipstickColor
+import com.example.armakeup.makeup.LipColorSwatch
 import com.example.armakeup.makeup.ReferenceLipstickPigments
 import kotlin.math.roundToInt
 
-/** Neutral overrides around the iOS material; old final presets stay archived separately. */
+/** Runtime material tuning with shared finish calibration; old product presets stay archived. */
 internal data class LipstickTuning(
     val productDensity: LipstickDensity = LipstickDensity.HIGH,
     val productTexture: LipstickTexture = LipstickTexture.CREAMY,
@@ -26,6 +28,8 @@ internal data class LipstickTuning(
     val luminancePreservation: Float = 1f,
     val cameraValueTransfer: Float = 0f,
     val cameraDetail: Float = 1f,
+    val matteLightTransfer: Float = 0f,
+    val matteSoftLight: Float = 0f,
     val materialDetail: Float = 1f,
     val shadowStrength: Float = 1f,
     val microTexture: Float = 1f,
@@ -48,6 +52,28 @@ internal data class LipstickTuning(
     val toothProtection: Float = 1f,
     val cameraSampleScale: Float = 1f,
 ) {
+    fun withPigment(color: LipstickColor): LipstickTuning = copy(
+        pigmentRed = color.red,
+        pigmentGreen = color.green,
+        pigmentBlue = color.blue,
+    )
+
+    /** Density chooses an initial pigment intensity, not an extra multiplier over manual tuning. */
+    fun withProductDensity(density: LipstickDensity, renderingMode: LipColorRenderingMode): LipstickTuning = copy(
+        productDensity = density,
+        pigmentOpacity = density.initialPigmentOpacity(renderingMode),
+    )
+
+    fun withProductShade(swatch: LipColorSwatch, renderingMode: LipColorRenderingMode): LipstickTuning =
+        withPigment(swatch.shade.color).withProductDensity(swatch.product.density, renderingMode)
+            .copy(productTexture = swatch.product.texture)
+
+    fun pigmentColor(): LipstickColor = LipstickColor(
+        (pigmentRed * 255f).roundToInt().coerceIn(0, 255).shl(16) or
+            (pigmentGreen * 255f).roundToInt().coerceIn(0, 255).shl(8) or
+            (pigmentBlue * 255f).roundToInt().coerceIn(0, 255),
+    )
+
     companion object {
         fun defaultsFor(
             renderingMode: LipColorRenderingMode,
@@ -59,21 +85,29 @@ internal data class LipstickTuning(
 
         fun defaultsFor(finish: LipstickFinish): LipstickTuning = finishDefaults(finish)
 
-        private fun unifiedDefaultsFor(finish: LipstickFinish): LipstickTuning = finishDefaults(finish)
+        private fun unifiedDefaultsFor(finish: LipstickFinish): LipstickTuning {
+            val defaults = finishDefaults(finish)
+            return if (finish != LipstickFinish.TRACKING_TEST) {
+                defaults.copy(matteLightTransfer = 1f, matteSoftLight = 1f)
+            } else {
+                defaults
+            }
+        }
 
         /**
-         * All production finishes share the accepted satin material base. Pigment colour and
-         * finish optics remain product-specific: matte disables reflection completely, while
-         * gloss keeps its existing liquid highlight response.
+         * All production finishes share the user's current matte calibration, including colour
+         * and product metadata. Only reflection/glow strengths differ; highlight shape, camera
+         * detail and edge parameters stay common so switching finish does not replace the base.
          */
         private fun finishDefaults(finish: LipstickFinish): LipstickTuning {
-            val satin = LipstickTuning(
+            val shared = LipstickTuning(
+                productTexture = LipstickTexture.MOUSSE,
                 coverage = 1.98f,
                 naturalLipBlend = 0.00f,
-                pigmentRed = ReferenceLipstickPigments.SATIN_C2050E_RED_SRGB,
-                pigmentGreen = ReferenceLipstickPigments.SATIN_C2050E_GREEN_SRGB,
-                pigmentBlue = ReferenceLipstickPigments.SATIN_C2050E_BLUE_SRGB,
-                pigmentBrightness = 0.85f,
+                pigmentRed = 158f / 255f,
+                pigmentGreen = 31f / 255f,
+                pigmentBlue = 35f / 255f,
+                pigmentBrightness = 0.98f,
                 luminancePreservation = 1.00f,
                 cameraValueTransfer = 0.20f,
                 cameraDetail = 0.20f,
@@ -93,32 +127,13 @@ internal data class LipstickTuning(
             )
 
             return when (finish) {
-                LipstickFinish.SATIN -> satin
-                LipstickFinish.MATTE -> satin.copy(
-                    productTexture = LipstickTexture.MOUSSE,
-                    pigmentRed = ReferenceLipstickPigments.PRODUCT_CLASSIC_RED_999_RED_SRGB,
-                    pigmentGreen = ReferenceLipstickPigments.PRODUCT_CLASSIC_RED_999_GREEN_SRGB,
-                    pigmentBlue = ReferenceLipstickPigments.PRODUCT_CLASSIC_RED_999_BLUE_SRGB,
+                LipstickFinish.SATIN, LipstickFinish.GLOSS -> shared
+                LipstickFinish.MATTE -> shared.copy(
                     specular = 0.00f,
                     highlightRetention = 0.00f,
                     highlightStrength = 0.00f,
                     satinGlow = 0.00f,
                     wetInnerEdge = 0.00f,
-                )
-                LipstickFinish.GLOSS -> satin.copy(
-                    productTexture = LipstickTexture.LIQUID,
-                    pigmentRed = ReferenceLipstickPigments.GLOSS_BROWN_ESPRESSO_515_RED_SRGB,
-                    pigmentGreen = ReferenceLipstickPigments.GLOSS_BROWN_ESPRESSO_515_GREEN_SRGB,
-                    pigmentBlue = ReferenceLipstickPigments.GLOSS_BROWN_ESPRESSO_515_BLUE_SRGB,
-                    specular = 1.00f,
-                    highlightRetention = 1.00f,
-                    highlightStrength = 1.00f,
-                    highlightSize = 1.00f,
-                    highlightThreshold = 1.00f,
-                    highlightConcentration = 1.00f,
-                    satinGlow = 1.00f,
-                    wetInnerEdge = 1.00f,
-                    cameraSampleScale = 1.00f,
                 )
                 LipstickFinish.TRACKING_TEST -> LipstickTuning()
             }
@@ -134,6 +149,7 @@ internal enum class LipstickTuningParameter(
     val default: Float,
     val decimals: Int = 2,
     val discrete: Boolean = false,
+    val unifiedOnly: Boolean = false,
     val update: (LipstickTuning, Float) -> LipstickTuning,
     val read: (LipstickTuning) -> Float,
 ) {
@@ -161,6 +177,11 @@ internal enum class LipstickTuningParameter(
     CAMERA_VALUE_TRANSFER("ЦВЕТ", "Яркость из камеры (доп.)", 0f, 1f, 0f, update = { s, v -> s.copy(cameraValueTransfer = v) }, read = { it.cameraValueTransfer }),
 
     CAMERA_DETAIL("ФАКТУРА", "Фактура камеры", 0f, 2f, 1f, update = { s, v -> s.copy(cameraDetail = v) }, read = { it.cameraDetail }),
+    // Keep historical export keys matte_* while using the same surface light for every finish.
+    MATTE_LIGHT_TRANSFER("ФАКТУРА", "Плавная светотень", 0f, 2f, 0f, unifiedOnly = true,
+        update = { s, v -> s.copy(matteLightTransfer = v) }, read = { it.matteLightTransfer }),
+    MATTE_SOFT_LIGHT("ФАКТУРА", "Мягкое высветление", 0f, 2f, 0f, unifiedOnly = true,
+        update = { s, v -> s.copy(matteSoftLight = v) }, read = { it.matteSoftLight }),
     MATERIAL_DETAIL("ФАКТУРА", "Рельеф материала", 0f, 2f, 1f, update = { s, v -> s.copy(materialDetail = v) }, read = { it.materialDetail }),
     SHADOW("ФАКТУРА", "Тени и складки", 0f, 2f, 1f, update = { s, v -> s.copy(shadowStrength = v) }, read = { it.shadowStrength }),
     MICRO_TEXTURE("ФАКТУРА", "Микротекстура", 0f, 2f, 1f, update = { s, v -> s.copy(microTexture = v) }, read = { it.microTexture }),

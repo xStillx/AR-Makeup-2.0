@@ -2,10 +2,65 @@ package com.example.armakeup.arcore
 
 /**
  * One shared dense pigment base for every finish. Finish changes only the camera-derived
- * reflection layer: none for matte, restrained for satin and full for gloss.
+ * reflection layer: none for matte, restrained for satin and full for gloss. Every finish transfers
+ * the same soft surface illumination independently of high-frequency camera detail and opacity.
  */
 internal object UnifiedLipMaterial {
     const val FRAGMENT_FUNCTION = """
+
+            float matteLinearLuminance(vec3 linearColor) {
+                return dot(linearColor, vec3(0.2126, 0.7152, 0.0722));
+            }
+
+            float matteApertureEvidence(vec3 camera) {
+                float luminance = parityLuminance(camera);
+                float maximum = max(camera.r, max(camera.g, camera.b));
+                float minimum = min(camera.r, min(camera.g, camera.b));
+                float saturation = maximum > 0.001 ? (maximum - minimum) / maximum : 0.0;
+                float darkCavity = 1.0 - smoothstep(0.06, 0.20, luminance);
+                float neutralTeeth = smoothstep(0.64, 0.82, luminance) *
+                    (1.0 - smoothstep(0.16, 0.30, saturation));
+                return max(darkCavity, neutralTeeth);
+            }
+
+            float matteSurfaceWeight(vec3 camera) {
+                float cornerPosition = clamp(abs(vSatinUv.x - 0.5) * 2.0, 0.0, 1.0);
+                // A closed seam is a continuous painted surface. Gate its added light only
+                // for an actual opening with dark-cavity/neutral-teeth evidence in this pixel.
+                // Camera evidence also rejects false openings when a finger covers the lips.
+                float innerProtection = smoothstep(0.70, 0.88, vLipUv.x) *
+                    clamp(uSatinApertureVisibility, 0.0, 1.0) * matteApertureEvidence(camera);
+                // Outer skin/corner guards and the accepted coverage/feather are independent.
+                return smoothstep(0.16, 0.32, vLipUv.x) *
+                    (1.0 - innerProtection) *
+                    (1.0 - smoothstep(0.70, 0.98, cornerPosition));
+            }
+
+            vec3 applyMatteSurfaceLight(vec3 pigment, vec3 surface, vec3 reference, vec3 camera) {
+                float referenceLuminance = matteLinearLuminance(iosSrgbToLinear(reference));
+                float surfaceLuminance = matteLinearLuminance(iosSrgbToLinear(surface));
+                // A relative signal preserves flat fields and rejects global exposure changes.
+                // Dark scenes have too little signal to support additional surface shading.
+                float lightConfidence = smoothstep(0.006, 0.025, referenceLuminance);
+                float lightContrast = log2(max(surfaceLuminance, 0.0005) /
+                    max(referenceLuminance, 0.0005));
+                float surfaceWeight = matteSurfaceWeight(camera) * lightConfidence;
+                float lightExponent = clamp(lightContrast, -0.80, 0.70) * 0.45 *
+                    clamp(uTuningMatteLightTransfer, 0.0, 2.0) * surfaceWeight;
+                vec3 linearPigment = iosSrgbToLinear(pigment) * exp2(lightExponent);
+
+                // Broad, neutral light gently lifts/desaturates bright surface areas. It does
+                // not use the gloss/specular lobe or mix the camera's lip/skin RGB into pigment.
+                // Scale the cap with pigment energy so dark shades do not acquire a grey veil.
+                float softLightLimit = min(
+                    0.012 * clamp(uTuningMatteSoftLight, 0.0, 2.0),
+                    matteLinearLuminance(linearPigment) * 0.18
+                );
+                float softLight = softLightLimit * smoothstep(0.04, 0.70, lightContrast) *
+                    surfaceWeight;
+                linearPigment = mix(linearPigment, vec3(1.0), softLight);
+                return clamp(iosLinearToSrgb(linearPigment), 0.0, 1.0);
+            }
 
             vec4 renderUnifiedLip(float coverage) {
                 vec3 base = cameraSrgbAt(vDisplayUv);
@@ -21,6 +76,26 @@ internal object UnifiedLipMaterial {
                 blurred += cameraSrgbAt(vDisplayUv + dx - dy);
                 blurred += cameraSrgbAt(vDisplayUv - dx + dy);
                 blurred /= 12.0;
+
+                float matteLightingStrength = max(uTuningMatteLightTransfer, uTuningMatteSoftLight);
+                // Historical matte_* controls now describe the shared opaque surface, not optics.
+                bool matteLightingEnabled = matteLightingStrength > 0.001;
+                vec3 valueSource = base;
+                vec3 matteReference = base;
+                vec3 matteSurface = blurred;
+                if (matteLightingEnabled) {
+                    matteReference = (
+                        cameraSrgbAt(uMatteLightReferenceUvs[0]) +
+                        cameraSrgbAt(uMatteLightReferenceUvs[1]) +
+                        cameraSrgbAt(uMatteLightReferenceUvs[2]) +
+                        cameraSrgbAt(uMatteLightReferenceUvs[3])
+                    ) * 0.25;
+                    valueSource = mix(base, matteReference,
+                        matteSurfaceWeight(base) * clamp(matteLightingStrength, 0.0, 1.0));
+                    matteSurface = (blurred * 2.0 +
+                        cameraSrgbAt(vDisplayUv + uMatteLightBlurStep) +
+                        cameraSrgbAt(vDisplayUv - uMatteLightBlurStep)) * 0.25;
+                }
 
                 float baseLuminance = parityLuminance(base);
                 float blurredLuminance = max(parityLuminance(blurred), 0.055);
@@ -42,8 +117,11 @@ internal object UnifiedLipMaterial {
                 float apertureClosure = 1.0 - openMouth;
                 float seamShadow = 1.0 - innerSeamRegion * smoothstep(0.30, 0.56, openMouth) *
                     (0.020 + localShadow * 0.08 * uTuningShadowStrength) * uTuningSeamShadow;
-                vec3 opaquePigment = clamp(cameraValuePigment(base, uPigment) *
+                vec3 opaquePigment = clamp(cameraValuePigment(valueSource, uPigment) *
                     exp2(detailExponent) * seamShadow, 0.0, 1.0);
+                if (matteLightingEnabled) {
+                    opaquePigment = applyMatteSurfaceLight(opaquePigment, matteSurface, matteReference, base);
+                }
                 vec3 naturalLipColor = clamp(blurred + (base - blurred) * 0.35, 0.0, 1.0);
                 vec3 pigment = mix(naturalLipColor, opaquePigment,
                     clamp(uTuningPigmentOpacity, 0.0, 1.0));

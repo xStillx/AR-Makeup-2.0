@@ -5,16 +5,21 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.pm.PackageManager
+import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.opengl.GLSurfaceView
 import android.os.Build
 import android.os.Bundle
+import android.text.TextUtils
 import android.util.Log
 import android.view.Choreographer
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.accessibility.AccessibilityNodeInfo
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.SeekBar
 import android.widget.TextView
@@ -32,6 +37,9 @@ import com.example.armakeup.makeup.LipColorRenderingMode
 import com.example.armakeup.makeup.LipstickFinish
 import com.example.armakeup.makeup.LipstickDensity
 import com.example.armakeup.makeup.LipstickTexture
+import com.example.armakeup.makeup.LipstickColor
+import com.example.armakeup.makeup.LipstickColorCatalog
+import com.example.armakeup.makeup.LipColorSwatch
 import com.google.ar.core.ArCoreApk
 import com.google.ar.core.Config
 import com.google.ar.core.Session
@@ -61,9 +69,23 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
     private var tuningExpanded = true
     private var updatingTuningControls = false
     private val tuningControls = mutableListOf<TuningControl>()
+    private var sharedPigment: LipstickColor? = null
+    private var sharedProductDensity: LipstickDensity? = null
+    private var sharedProductTexture: LipstickTexture? = null
+    private val sharedPigmentOpacities = mutableMapOf<LipColorRenderingMode, Float>()
+    private var selectedShadeKey: String? = null
+    private val shadeControls = mutableListOf<ShadeControl>()
+
+    private data class ShadeControl(
+        val key: String,
+        val item: View,
+        val selectionRing: View,
+        val shadeLabel: TextView,
+    )
 
     private data class TuningControl(
         val parameter: LipstickTuningParameter,
+        val row: View,
         val valueView: TextView,
         val seekBar: SeekBar,
     )
@@ -103,10 +125,13 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
                 R.id.color_rendering_mode_unified
             },
         )
+        restoreSharedSelection()
+        updateFinishSelection()
         tuning = restoreTuning(selectedColorRenderingMode, selectedFinish)
         renderer.setColorRenderingMode(selectedColorRenderingMode)
         renderer.setLipstickTuning(tuning)
         renderer.setLipstickFinish(selectedFinish)
+        createShadePalette()
         createTuningControls()
         bindPanelActions()
 
@@ -142,6 +167,7 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
             renderer.setLipstickTuning(tuning)
             renderer.setLipstickFinish(finish)
             updateTuningControls()
+            saveTuning()
         }
         binding.timelineToggleGroup.addOnButtonCheckedListener { _, checkedId, isChecked ->
             if (!isChecked) return@addOnButtonCheckedListener
@@ -190,7 +216,15 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
             )
         }
         binding.resetTuning.setOnClickListener {
-            tuning = LipstickTuning.defaultsFor(selectedColorRenderingMode, selectedFinish)
+            if (selectedFinish != LipstickFinish.TRACKING_TEST) {
+                sharedProductDensity?.let {
+                    sharedPigmentOpacities[selectedColorRenderingMode] = it.initialPigmentOpacity(selectedColorRenderingMode)
+                } ?: sharedPigmentOpacities.remove(selectedColorRenderingMode)
+            }
+            tuning = withSharedSelection(
+                LipstickTuning.defaultsFor(selectedColorRenderingMode, selectedFinish),
+                selectedColorRenderingMode, selectedFinish,
+            )
             renderer.setLipstickTuning(tuning)
             updateTuningControls()
             saveTuning()
@@ -209,6 +243,181 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
             clipboard.setPrimaryClip(ClipData.newPlainText("AR Makeup lipstick tuning", text))
             Toast.makeText(this, R.string.tuning_copied, Toast.LENGTH_SHORT).show()
         }
+    }
+
+    private fun createShadePalette() {
+        LipstickColorCatalog.swatches.forEach { swatch ->
+            val item = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER_HORIZONTAL
+                setPadding(dp(6), dp(8), dp(6), dp(4))
+                isFocusable = true
+                contentDescription = getString(
+                    R.string.lip_shade_accessibility, swatch.product.name, swatch.shade.name,
+                )
+                val attributes = obtainStyledAttributes(intArrayOf(android.R.attr.selectableItemBackground))
+                background = attributes.getDrawable(0)
+                attributes.recycle()
+                accessibilityDelegate = object : View.AccessibilityDelegate() {
+                    @Suppress("DEPRECATION") // Boolean checked state supports the app's pre-API37 devices.
+                    override fun onInitializeAccessibilityNodeInfo(host: View, info: AccessibilityNodeInfo) {
+                        super.onInitializeAccessibilityNodeInfo(host, info)
+                        info.className = "android.widget.RadioButton"
+                        info.isCheckable = true
+                        info.isChecked = host.isSelected
+                    }
+                }
+                setOnClickListener { selectShade(swatch) }
+            }
+            val productLabel = TextView(this).apply {
+                text = swatch.product.name
+                textSize = 11f
+                minLines = 2
+                maxLines = 2
+                ellipsize = TextUtils.TruncateAt.END
+                includeFontPadding = false
+                gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+                setTextColor(ContextCompat.getColor(context, R.color.text_secondary_on_dark))
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            }
+            item.addView(productLabel, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { bottomMargin = dp(6) })
+
+            val circle = FrameLayout(this)
+            val color = swatch.shade.color
+            circle.addView(View(this).apply {
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    setColor(Color.rgb(color.red8Bit, color.green8Bit, color.blue8Bit))
+                    setStroke(dp(1), ContextCompat.getColor(context, R.color.glass_border))
+                }
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            }, FrameLayout.LayoutParams(dp(50), dp(50), Gravity.CENTER))
+            val ring = View(this).apply {
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    setColor(Color.TRANSPARENT)
+                    setStroke(dp(2), ContextCompat.getColor(context, R.color.rose_300))
+                }
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            }
+            circle.addView(ring, FrameLayout.LayoutParams(dp(58), dp(58), Gravity.CENTER))
+            item.addView(circle, LinearLayout.LayoutParams(dp(58), dp(58)))
+
+            val shadeLabel = TextView(this).apply {
+                text = swatch.shade.name
+                textSize = 12f
+                minLines = 2
+                maxLines = 2
+                ellipsize = TextUtils.TruncateAt.END
+                includeFontPadding = false
+                gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            }
+            item.addView(shadeLabel, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(4) })
+            binding.lipShadeContainer.addView(item, LinearLayout.LayoutParams(
+                dp(128), ViewGroup.LayoutParams.WRAP_CONTENT,
+            ))
+            shadeControls += ShadeControl(swatch.key, item, ring, shadeLabel)
+        }
+        updateShadeSelection()
+        binding.lipShadeScroll.post {
+            shadeControls.firstOrNull { it.key == selectedShadeKey }?.item?.let { selected ->
+                binding.lipShadeScroll.scrollTo(
+                    (selected.left - (binding.lipShadeScroll.width - selected.width) / 2).coerceAtLeast(0), 0,
+                )
+            }
+        }
+    }
+
+    private fun selectShade(swatch: LipColorSwatch) {
+        // Save the outgoing finish before changing shared product metadata.
+        saveTuning()
+        sharedPigment = swatch.shade.color
+        sharedProductDensity = swatch.product.density
+        sharedProductTexture = swatch.product.texture
+        LipColorRenderingMode.values().forEach { mode ->
+            sharedPigmentOpacities[mode] = swatch.product.density.initialPigmentOpacity(mode)
+        }
+        selectedShadeKey = swatch.key
+        selectedFinish = swatch.product.finish.renderingFinish ?: selectedFinish
+        // Assign state first: the button listener sees the same finish and does not restore twice.
+        updateFinishSelection()
+        if (selectedFinish != LipstickFinish.TRACKING_TEST) {
+            tuning = restoreTuning(selectedColorRenderingMode, selectedFinish)
+                .withProductShade(swatch, selectedColorRenderingMode)
+        }
+        renderer.setLipstickTuning(tuning)
+        renderer.setLipstickFinish(selectedFinish)
+        updateTuningControls()
+        updateShadeSelection()
+        saveTuning()
+    }
+
+    private fun updateFinishSelection() {
+        binding.finishToggleGroup.check(when (selectedFinish) {
+            LipstickFinish.MATTE -> R.id.finish_matte
+            LipstickFinish.SATIN -> R.id.finish_satin
+            LipstickFinish.GLOSS -> R.id.finish_gloss
+            LipstickFinish.TRACKING_TEST -> R.id.finish_tracking_test
+        })
+    }
+
+    private fun updateShadeSelection() {
+        shadeControls.forEach { control ->
+            val selected = control.key == selectedShadeKey
+            control.item.isSelected = selected
+            control.selectionRing.visibility = if (selected) View.VISIBLE else View.INVISIBLE
+            control.shadeLabel.setTextColor(ContextCompat.getColor(this,
+                if (selected) R.color.rose_300 else R.color.text_primary_on_dark,
+            ))
+        }
+    }
+
+    private fun restoreSharedSelection() {
+        val preferences = getSharedPreferences(TUNING_PREFERENCES, Context.MODE_PRIVATE)
+        val hex = preferences.getInt(SHARED_PIGMENT_HEX_KEY, -1)
+        sharedPigment = hex.takeIf { it in 0..0xFFFFFF }?.let(::LipstickColor)
+        val storedKey = preferences.getString(SELECTED_SHADE_KEY, null)
+        val selected = LipstickColorCatalog.swatches.firstOrNull {
+            it.key == storedKey && it.shade.color == sharedPigment
+        }
+        selectedShadeKey = selected?.key
+        // Existing palette selections adopt the new density rule once; no profile data is erased.
+        val storedDensity = preferences.getString(SHARED_PRODUCT_DENSITY_KEY, null)
+        sharedProductDensity = runCatching { LipstickDensity.valueOf(storedDensity.orEmpty()) }
+            .getOrNull() ?: selected?.product?.density
+        val storedTexture = preferences.getString(SHARED_PRODUCT_TEXTURE_KEY, null)
+        sharedProductTexture = runCatching { LipstickTexture.valueOf(storedTexture.orEmpty()) }
+            .getOrNull() ?: selected?.product?.texture
+        val storedFinish = preferences.getString(SELECTED_FINISH_KEY, null)
+        selectedFinish = runCatching { LipstickFinish.valueOf(storedFinish.orEmpty()) }
+            .getOrNull() ?: selected?.product?.finish?.renderingFinish ?: LipstickFinish.MATTE
+        LipColorRenderingMode.values().forEach { mode ->
+            val key = sharedPigmentOpacityKey(mode)
+            if (preferences.contains(key)) {
+                sharedPigmentOpacities[mode] = preferences.getFloat(key, 1f).coerceIn(0f, 1f)
+            } else {
+                sharedProductDensity?.let { sharedPigmentOpacities[mode] = it.initialPigmentOpacity(mode) }
+            }
+        }
+    }
+
+    private fun withSharedSelection(
+        state: LipstickTuning,
+        renderingMode: LipColorRenderingMode,
+        finish: LipstickFinish,
+    ): LipstickTuning {
+        if (finish == LipstickFinish.TRACKING_TEST) return state
+        val colored = sharedPigment?.let(state::withPigment) ?: state
+        return colored.copy(
+            productDensity = sharedProductDensity ?: colored.productDensity,
+            productTexture = sharedProductTexture ?: colored.productTexture,
+            pigmentOpacity = sharedPigmentOpacities[renderingMode] ?: colored.pigmentOpacity,
+        )
     }
 
     private fun createTuningControls() {
@@ -250,6 +459,36 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
                     val nextValue = valueFor(parameter, progress)
                     value.text = formatValue(parameter, nextValue)
                     tuning = parameter.update(tuning, nextValue)
+                    if (selectedFinish != LipstickFinish.TRACKING_TEST) {
+                        when (parameter) {
+                            LipstickTuningParameter.PRODUCT_TEXTURE -> {
+                                sharedProductTexture = tuning.productTexture
+                            }
+                            LipstickTuningParameter.PRODUCT_DENSITY -> {
+                                sharedProductDensity = tuning.productDensity
+                                LipColorRenderingMode.values().forEach { mode ->
+                                    sharedPigmentOpacities[mode] = tuning.productDensity.initialPigmentOpacity(mode)
+                                }
+                                tuning = tuning.withProductDensity(tuning.productDensity, selectedColorRenderingMode)
+                                updateTuningControls()
+                            }
+                            LipstickTuningParameter.PIGMENT_OPACITY -> {
+                                // Fine-tuning remains shared across finishes, independently in each mode.
+                                sharedPigmentOpacities[selectedColorRenderingMode] = tuning.pigmentOpacity
+                            }
+                            else -> Unit
+                        }
+                    }
+                    if (selectedFinish != LipstickFinish.TRACKING_TEST &&
+                        (parameter == LipstickTuningParameter.PIGMENT_RED ||
+                            parameter == LipstickTuningParameter.PIGMENT_GREEN ||
+                            parameter == LipstickTuningParameter.PIGMENT_BLUE)
+                    ) {
+                        // Manual RGB is another shared colour selection, not a stale catalogue shade.
+                        sharedPigment = tuning.pigmentColor()
+                        selectedShadeKey = null
+                        updateShadeSelection()
+                    }
                     renderer.setLipstickTuning(tuning)
                 }
 
@@ -265,8 +504,9 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
                 dp(30),
             ))
             binding.tuningContainer.addView(row)
-            tuningControls += TuningControl(parameter, value, seekBar)
+            tuningControls += TuningControl(parameter, row, value, seekBar)
         }
+        updateTuningControls()
     }
 
     private fun createSectionTitle(title: String) = TextView(this).apply {
@@ -280,6 +520,10 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
     private fun updateTuningControls() {
         updatingTuningControls = true
         tuningControls.forEach { control ->
+            val visible = !control.parameter.unifiedOnly ||
+                (selectedColorRenderingMode == LipColorRenderingMode.UNIFIED &&
+                    selectedFinish != LipstickFinish.TRACKING_TEST)
+            control.row.visibility = if (visible) View.VISIBLE else View.GONE
             val value = control.parameter.read(tuning)
             control.valueView.text = formatValue(control.parameter, value)
             control.seekBar.progress = progressFor(control.parameter, value)
@@ -316,22 +560,61 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
     ): LipstickTuning {
         val preferences = getSharedPreferences(TUNING_PREFERENCES, Context.MODE_PRIVATE)
         val defaults = LipstickTuning.defaultsFor(renderingMode, finish)
-        return LipstickTuningParameter.values().fold(defaults) { state, parameter ->
+        val restored = LipstickTuningParameter.values().fold(defaults) { state, parameter ->
             val defaultValue = parameter.read(defaults)
             val storedValue = preferences.getFloat(preferenceKey(renderingMode, finish, parameter), defaultValue)
                 .coerceIn(parameter.minimum, parameter.maximum)
             parameter.update(state, storedValue)
         }
+        return withSharedSelection(restored, renderingMode, finish)
     }
 
     private fun saveTuning() {
         getSharedPreferences(TUNING_PREFERENCES, Context.MODE_PRIVATE).edit().apply {
+            putString(SELECTED_FINISH_KEY, selectedFinish.name)
             LipstickTuningParameter.values().forEach { parameter ->
                 putFloat(preferenceKey(selectedColorRenderingMode, selectedFinish, parameter), parameter.read(tuning))
+            }
+            sharedPigment?.let { color ->
+                putInt(SHARED_PIGMENT_HEX_KEY, color.sourceSrgbHex)
+                putString(SELECTED_SHADE_KEY, selectedShadeKey)
+                // Synchronise source RGB; unrelated material tuning stays finish/mode-specific.
+                LipColorRenderingMode.values().forEach { mode ->
+                    LipstickFinish.values().filter { it != LipstickFinish.TRACKING_TEST }.forEach { finish ->
+                        putFloat(preferenceKey(mode, finish, LipstickTuningParameter.PIGMENT_RED), color.red8Bit.toFloat())
+                        putFloat(preferenceKey(mode, finish, LipstickTuningParameter.PIGMENT_GREEN), color.green8Bit.toFloat())
+                        putFloat(preferenceKey(mode, finish, LipstickTuningParameter.PIGMENT_BLUE), color.blue8Bit.toFloat())
+                    }
+                }
+            }
+            sharedProductDensity?.let { density ->
+                putString(SHARED_PRODUCT_DENSITY_KEY, density.name)
+                LipColorRenderingMode.values().forEach { mode ->
+                    LipstickFinish.values().filter { it != LipstickFinish.TRACKING_TEST }.forEach { finish ->
+                        putFloat(preferenceKey(mode, finish, LipstickTuningParameter.PRODUCT_DENSITY), density.ordinal.toFloat())
+                    }
+                }
+            }
+            sharedProductTexture?.let { texture ->
+                putString(SHARED_PRODUCT_TEXTURE_KEY, texture.name)
+                LipColorRenderingMode.values().forEach { mode ->
+                    LipstickFinish.values().filter { it != LipstickFinish.TRACKING_TEST }.forEach { finish ->
+                        putFloat(preferenceKey(mode, finish, LipstickTuningParameter.PRODUCT_TEXTURE), texture.ordinal.toFloat())
+                    }
+                }
+            }
+            sharedPigmentOpacities.forEach { (mode, intensity) ->
+                putFloat(sharedPigmentOpacityKey(mode), intensity)
+                LipstickFinish.values().filter { it != LipstickFinish.TRACKING_TEST }.forEach { finish ->
+                    putFloat(preferenceKey(mode, finish, LipstickTuningParameter.PIGMENT_OPACITY), intensity)
+                }
             }
             apply()
         }
     }
+
+    private fun sharedPigmentOpacityKey(mode: LipColorRenderingMode): String =
+        "${mode.name}_shared_pigment_opacity_v1"
 
     private fun preferenceKey(
         renderingMode: LipColorRenderingMode,
@@ -342,19 +625,11 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
     private fun tuningProfileKey(
         renderingMode: LipColorRenderingMode,
         finish: LipstickFinish,
-    ): String = when (renderingMode) {
-        LipColorRenderingMode.IOS_REFERENCE -> when (finish) {
-            LipstickFinish.MATTE -> "IOS_MATERIAL_MATTE_SATIN_BASE_9E2620_V1"
-            LipstickFinish.SATIN -> "IOS_MATERIAL_SATIN_C2050E_V3"
-            LipstickFinish.GLOSS -> "IOS_MATERIAL_GLOSS_SATIN_BASE_643229_V1"
-            else -> finish.name
-        }
-        LipColorRenderingMode.UNIFIED -> when (finish) {
-            LipstickFinish.MATTE -> "UNIFIED_MATERIAL_MATTE_SATIN_BASE_9E2620_V1"
-            LipstickFinish.SATIN -> "UNIFIED_MATERIAL_SATIN_V5"
-            LipstickFinish.GLOSS -> "UNIFIED_MATERIAL_GLOSS_SATIN_BASE_643229_V1"
-            else -> finish.name
-        }
+    ): String = if (finish == LipstickFinish.TRACKING_TEST) {
+        finish.name
+    } else {
+        // Adopt the explicitly requested common calibration once, without deleting old profiles.
+        "${renderingMode.name}_MATERIAL_${finish.name}_COMMON_9E1F23_V1"
     }
 
     private fun restoreColorRenderingMode(): LipColorRenderingMode {
@@ -508,5 +783,10 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
         const val SLIDER_STEPS = 1_000
         const val TUNING_PREFERENCES = "lipstick_tuning_v2"
         const val COLOR_RENDERING_MODE_KEY = "color_rendering_mode"
+        const val SHARED_PIGMENT_HEX_KEY = "shared_pigment_srgb_hex_v1"
+        const val SELECTED_SHADE_KEY = "selected_lip_shade_key_v1"
+        const val SHARED_PRODUCT_DENSITY_KEY = "shared_product_density_v1"
+        const val SHARED_PRODUCT_TEXTURE_KEY = "shared_product_texture_v1"
+        const val SELECTED_FINISH_KEY = "selected_lipstick_finish_v1"
     }
 }

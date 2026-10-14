@@ -41,4 +41,5 @@
     <string name="color_rendering_mode_ios">Как на iOS</string>
     <string name="color_rendering_mode_unified">Единая формула</string>
     <string name="finish_group">МАТЕРИАЛ</string>
+    <string name="lip_shade_accessibility">%1$s, оттенок %2$s</string>
 </resources>

@@ -86,6 +86,7 @@ internal class ArCoreFaceAnchorRenderer(
     private val lipTessellator = LipMeshTessellator(featherInnerBoundary = false)
     private val satinUvs = directFloatBuffer(IosLipMaterial.textureCoordinates(lipTessellator))
     private val satinSourceTexels = FloatArray(4)
+    private val matteLightReferenceUvs = FloatArray(8)
     private val lipFrameDiagnostics = LipFrameDiagnostics()
     private val mediaPipeOnlyOuterContourPoints =
         FloatArray(LipLandmarkTopology.outerContour.size * 2)
@@ -653,6 +654,7 @@ internal class ArCoreFaceAnchorRenderer(
             innerSeamExpansion = CLOSED_INNER_SEAM_EXPANSION +
                 (OPEN_INNER_EDGE_EXPANSION - CLOSED_INNER_SEAM_EXPANSION) * openInnerCarrierBlend,
             innerCarrierFeather = openInnerCarrierBlend,
+            cornerCarrierExpansion = CORNER_LIP_CARRIER_EXPANSION,
         )
         if (Log.isLoggable(LIP_FRAME_TRACE_TAG, Log.DEBUG)) {
             val frameTrace = lipFrameDiagnostics.capture(
@@ -845,6 +847,17 @@ internal class ArCoreFaceAnchorRenderer(
             .coerceIn(0.5f / viewportWidth, 2f / viewportWidth)
         lipBlurStep[1] = ((maxY - minY) / IOS_BLUR_REFERENCE_HEIGHT * spatialBlurScale)
             .coerceIn(0.5f / viewportHeight, 2f / viewportHeight)
+        // Keep the accepted blur scale tied to measured lips, but include every carrier in the
+        // scissor. The new corner tail must not be clipped on large/close-up faces.
+        for (vertex in 0 until lipTessellator.vertexCount) {
+            val index = vertex * LipMeshTessellator.VERTEX_COMPONENT_COUNT
+            val x = (tessellatedLipVertices.get(index) + 1f) * 0.5f
+            val y = (1f - tessellatedLipVertices.get(index + 1)) * 0.5f
+            minX = minOf(minX, x)
+            maxX = maxOf(maxX, x)
+            minY = minOf(minY, y)
+            maxY = maxOf(maxY, y)
+        }
         val margin = (
             maxOf(
                 lipBlurStep[0] * viewportWidth,
@@ -985,6 +998,28 @@ internal class ArCoreFaceAnchorRenderer(
         GLES20.glUniform2f(GLES20.glGetUniformLocation(lipMeshProgram, "uUvBottomRight"), cameraUvCorners[2], cameraUvCorners[3])
         GLES20.glUniform2f(GLES20.glGetUniformLocation(lipMeshProgram, "uUvTopLeft"), cameraUvCorners[4], cameraUvCorners[5])
         GLES20.glUniform2f(GLES20.glGetUniformLocation(lipMeshProgram, "uUvTopRight"), cameraUvCorners[6], cameraUvCorners[7])
+        // Mid-band samples from this exact observation, before carrier expansion. They exclude
+        // the mouth aperture and provide one exposure reference for the whole lip material.
+        MATTE_LIGHT_REFERENCE_INDICES.forEachIndexed { sample, point ->
+            val coordinate = point * 2
+            matteLightReferenceUvs[sample * 2] =
+                (outerContourPoints[coordinate] + innerContourPoints[coordinate]) * 0.5f
+            matteLightReferenceUvs[sample * 2 + 1] =
+                (outerContourPoints[coordinate + 1] + innerContourPoints[coordinate + 1]) * 0.5f
+        }
+        GLES20.glUniform2fv(
+            GLES20.glGetUniformLocation(lipMeshProgram, "uMatteLightReferenceUvs[0]"),
+            MATTE_LIGHT_REFERENCE_INDICES.size,
+            matteLightReferenceUvs,
+            0,
+        )
+        // Smooth along the mouth, so thin upper lips do not sample far across the aperture.
+        val matteBlurScale = 0.035f * tuning.cameraSampleScale
+        GLES20.glUniform2f(
+            GLES20.glGetUniformLocation(lipMeshProgram, "uMatteLightBlurStep"),
+            (outerContourPoints[20] - outerContourPoints[0]) * matteBlurScale,
+            (outerContourPoints[21] - outerContourPoints[1]) * matteBlurScale,
+        )
         GLES20.glUniform3f(
             GLES20.glGetUniformLocation(lipMeshProgram, "uPigment"),
             pigmentRed,
@@ -1034,6 +1069,8 @@ internal class ArCoreFaceAnchorRenderer(
         GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uTuningNaturalLipBlend"), tuning.naturalLipBlend)
         GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uTuningCameraValueTransfer"), tuning.cameraValueTransfer)
         GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uTuningCameraDetail"), tuning.cameraDetail)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uTuningMatteLightTransfer"), tuning.matteLightTransfer)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uTuningMatteSoftLight"), tuning.matteSoftLight)
         GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uTuningMaterialDetail"), tuning.materialDetail)
         GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uTuningShadowStrength"), tuning.shadowStrength)
         GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uTuningHighlightStrength"), tuning.highlightStrength)
@@ -1369,12 +1406,14 @@ internal class ArCoreFaceAnchorRenderer(
         const val BASE_OUTER_FEATHER_FRACTION = 0.25f
         const val ADDITIONAL_OUTER_FEATHER_FRACTION = 0.20f
         const val OUTER_LIP_CARRIER_EXPANSION = 0.18f
+        const val CORNER_LIP_CARRIER_EXPANSION = 0.012f
         const val CLOSED_INNER_SEAM_EXPANSION = 0.14f
         const val OPEN_INNER_EDGE_EXPANSION = 0.10f
         const val INNER_SEAM_CLOSED_START = 0.035f
         const val INNER_SEAM_OPEN_END = 0.12f
 
         val BUFFERED_CAMERA_UVS = floatArrayOf(0f, 0f, 1f, 0f, 0f, 1f, 1f, 1f)
+        val MATTE_LIGHT_REFERENCE_INDICES = intArrayOf(3, 7, 13, 17)
 
         fun bufferedCameraShader(source: String): String = source
             .replace("#extension GL_OES_EGL_image_external : require", "")
@@ -1446,6 +1485,8 @@ internal class ArCoreFaceAnchorRenderer(
             uniform vec2 uUvTopLeft;
             uniform vec2 uUvTopRight;
             uniform vec3 uPigment;
+            uniform vec2 uMatteLightReferenceUvs[4];
+            uniform vec2 uMatteLightBlurStep;
             uniform float uCoverageMultiplier;
             uniform float uFinishMode;
             uniform float uColorRenderingMode;
@@ -1470,6 +1511,8 @@ internal class ArCoreFaceAnchorRenderer(
             uniform float uTuningNaturalLipBlend;
             uniform float uTuningCameraValueTransfer;
             uniform float uTuningCameraDetail;
+            uniform float uTuningMatteLightTransfer;
+            uniform float uTuningMatteSoftLight;
             uniform float uTuningMaterialDetail;
             uniform float uTuningShadowStrength;
             uniform float uTuningHighlightStrength;
@@ -1731,12 +1774,12 @@ internal class ArCoreFaceAnchorRenderer(
             attribute vec2 aLipUv;
             varying vec2 vDisplayUv;
             varying vec2 vFramebufferUv;
-            varying float vOuterDistance;
+            varying vec2 vLipUv;
             void main() {
                 gl_Position = vec4(aPosition, 0.0, 1.0);
                 vDisplayUv = vec2(aPosition.x * 0.5 + 0.5, 0.5 - aPosition.y * 0.5);
                 vFramebufferUv = aPosition * 0.5 + 0.5;
-                vOuterDistance = aLipUv.x;
+                vLipUv = aLipUv;
             }
         """
 
@@ -1752,7 +1795,7 @@ internal class ArCoreFaceAnchorRenderer(
             uniform float uOuterFeatherFraction;
             varying vec2 vDisplayUv;
             varying vec2 vFramebufferUv;
-            varying float vOuterDistance;
+            varying vec2 vLipUv;
 
             vec2 compositeCameraUv(vec2 displayUv) {
                 vec2 top = mix(uUvTopLeft, uUvTopRight, displayUv.x);
@@ -1764,10 +1807,17 @@ internal class ArCoreFaceAnchorRenderer(
                 vec3 camera = texture2D(uCamera, compositeCameraUv(vDisplayUv)).rgb;
                 vec4 blurredLip = texture2D(uBlurredLip, vFramebufferUv);
                 vec3 materialDelta = (blurredLip.rgb - 0.5019608) / 0.4980392;
+                // The corner carrier is much thinner than the lip body. A body-width feather
+                // erases its tip. Match LipMeshTessellator's local 12% arc support, leaving the
+                // existing outer feather unchanged everywhere else and the inner edge untouched.
+                float cornerDistance = min(vLipUv.y, 1.0 - vLipUv.y);
+                float cornerWeight = 1.0 - smoothstep(0.0, 0.12, cornerDistance);
+                float featherFraction = mix(uOuterFeatherFraction,
+                    min(uOuterFeatherFraction, 0.10), cornerWeight);
                 float outerFeather = smoothstep(
                     0.0,
-                    uOuterFeatherFraction,
-                    clamp(vOuterDistance, 0.0, 1.0)
+                    featherFraction,
+                    clamp(vLipUv.x, 0.0, 1.0)
                 );
                 vec3 composited = camera + materialDelta * blurredLip.a * outerFeather;
                 gl_FragColor = vec4(clamp(composited, 0.0, 1.0), 1.0);

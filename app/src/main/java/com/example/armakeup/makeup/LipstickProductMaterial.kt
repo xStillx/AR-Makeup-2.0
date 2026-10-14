@@ -6,11 +6,21 @@ internal enum class LipColorRenderingMode {
     UNIFIED,
 }
 
-/** Product metadata, independent of source RGB and finish; values match the iOS reference. */
-internal enum class LipstickDensity(val displayName: String, val pigmentCoverage: Float) {
-    LOW("Низкая", 0.54f),
-    MEDIUM("Средняя", 0.78f),
-    HIGH("Высокая", 0.92f),
+/** Density independent of RGB/finish: original iOS coverage and editable UNIFIED starting intensity. */
+internal enum class LipstickDensity(
+    val displayName: String,
+    val pigmentCoverage: Float,
+    val unifiedPigmentOpacity: Float,
+) {
+    LOW("Низкая", 0.54f, 0.30f),
+    MEDIUM("Средняя", 0.78f, 0.65f),
+    HIGH("Высокая", 0.92f, 1.00f);
+
+    /** Initial colour mixing only. iOS already applies its own density in the compositor. */
+    fun initialPigmentOpacity(renderingMode: LipColorRenderingMode): Float = when (renderingMode) {
+        LipColorRenderingMode.UNIFIED -> unifiedPigmentOpacity
+        LipColorRenderingMode.IOS_REFERENCE -> 1f
+    }
 }
 
 internal enum class LipstickTexture(
