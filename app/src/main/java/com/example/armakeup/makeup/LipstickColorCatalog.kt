@@ -29,13 +29,17 @@ internal data class LipColorProduct(
     val shades: List<LipColorShade>,
 )
 
-/** Keep source types intact; oil/tint do not yet have independent renderer formulas. */
+/** Keep source types intact; oil/tint switch finish only in the iOS-dev mode. */
 internal enum class LipProductFinish(val renderingFinish: LipstickFinish?) {
     MATTE(LipstickFinish.MATTE),
     SATIN(LipstickFinish.SATIN),
     GLOSS(LipstickFinish.GLOSS),
-    OIL(null),
-    TINT(null),
+    OIL(LipstickFinish.OIL),
+    TINT(LipstickFinish.TINT),
+    ;
+
+    fun renderingFinish(mode: LipColorRenderingMode): LipstickFinish? =
+        renderingFinish?.takeIf { it.supportedIn(mode) }
 }
 
 internal data class LipColorSwatch(val product: LipColorProduct, val shade: LipColorShade) {

@@ -27,6 +27,8 @@
     <string name="finish_matte">Матовая</string>
     <string name="finish_satin">Сатин</string>
     <string name="finish_gloss">Глянец</string>
+    <string name="finish_oil">Масло</string>
+    <string name="finish_tint">Тинт</string>
     <string name="finish_tracking_test">Трек</string>
     <string name="timeline_label">СИНХРОНИЗАЦИЯ КАДРА</string>
     <string name="timeline_async">Async 60 Гц</string>

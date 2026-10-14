@@ -85,6 +85,7 @@ internal class ArCoreFaceAnchorRenderer(
     private val lipContourRefiner = LipContourTemporalRefiner()
     private val lipTessellator = LipMeshTessellator(featherInnerBoundary = false)
     private val satinUvs = directFloatBuffer(IosLipMaterial.textureCoordinates(lipTessellator))
+    private val lowerLipMask = directFloatBuffer(IosLipMaterial.lowerLipMask(lipTessellator))
     private val satinSourceTexels = FloatArray(4)
     private val matteLightReferenceUvs = FloatArray(8)
     private val lipFrameDiagnostics = LipFrameDiagnostics()
@@ -794,6 +795,9 @@ internal class ArCoreFaceAnchorRenderer(
         semantics: LipSemanticState,
         bufferedCameraTextureId: Int?,
     ) {
+        // RGB encodings differ between modes. Keep one encoding through raster/blur/composite,
+        // even if the UI changes its volatile selection while this frame is being submitted.
+        val frameRenderingMode = colorRenderingMode
         lipBlurFrames.ensureSize(viewportWidth, viewportHeight)
         GLES20.glViewport(0, 0, viewportWidth, viewportHeight)
         GLES20.glClearColor(SIGNED_COLOR_ZERO, SIGNED_COLOR_ZERO, SIGNED_COLOR_ZERO, 0f)
@@ -808,7 +812,8 @@ internal class ArCoreFaceAnchorRenderer(
 
         lipBlurFrames.bindSource()
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
-        drawLipMeshPass(semantics, bufferedCameraTextureId, encodeBlurMaterial = true)
+        drawLipMeshPass(semantics, bufferedCameraTextureId, encodeBlurMaterial = true,
+            renderingMode = frameRenderingMode)
 
         lipBlurFrames.bindIntermediate()
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
@@ -821,7 +826,7 @@ internal class ArCoreFaceAnchorRenderer(
         GLES20.glDisable(GLES20.GL_SCISSOR_TEST)
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
         GLES20.glViewport(0, 0, viewportWidth, viewportHeight)
-        drawLipComposite(lipBlurFrames.sourceTextureId, bufferedCameraTextureId)
+        drawLipComposite(lipBlurFrames.sourceTextureId, bufferedCameraTextureId, frameRenderingMode)
         GLES20.glClearColor(0f, 0f, 0f, 1f)
     }
 
@@ -904,6 +909,7 @@ internal class ArCoreFaceAnchorRenderer(
     private fun drawLipComposite(
         blurredTextureId: Int,
         bufferedCameraTextureId: Int?,
+        renderingMode: LipColorRenderingMode,
     ) {
         val program = if (bufferedCameraTextureId != null) {
             pairedLipCompositeProgram
@@ -922,6 +928,8 @@ internal class ArCoreFaceAnchorRenderer(
         GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, blurredTextureId)
         GLES20.glUniform1i(GLES20.glGetUniformLocation(program, "uBlurredLip"), 1)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(program, "uIosDevMaterial"),
+            if (renderingMode == LipColorRenderingMode.IOS_REFERENCE) 1f else 0f)
         GLES20.glUniform2f(GLES20.glGetUniformLocation(program, "uUvBottomLeft"), cameraUvCorners[0], cameraUvCorners[1])
         GLES20.glUniform2f(GLES20.glGetUniformLocation(program, "uUvBottomRight"), cameraUvCorners[2], cameraUvCorners[3])
         GLES20.glUniform2f(GLES20.glGetUniformLocation(program, "uUvTopLeft"), cameraUvCorners[4], cameraUvCorners[5])
@@ -961,6 +969,7 @@ internal class ArCoreFaceAnchorRenderer(
         semantics: LipSemanticState,
         bufferedCameraTextureId: Int?,
         encodeBlurMaterial: Boolean,
+        renderingMode: LipColorRenderingMode = colorRenderingMode,
     ) {
         val lipMeshProgram = if (bufferedCameraTextureId != null) pairedLipMeshProgram else this.lipMeshProgram
         GLES20.glDisable(GLES20.GL_DEPTH_TEST)
@@ -1030,13 +1039,14 @@ internal class ArCoreFaceAnchorRenderer(
             (if (lipstickFinish == LipstickFinish.TRACKING_TEST) 4f else 2f) * tuning.coverage)
         GLES20.glUniform1f(
             GLES20.glGetUniformLocation(lipMeshProgram, "uColorRenderingMode"),
-            if (colorRenderingMode == LipColorRenderingMode.UNIFIED) 1f else 0f,
+            if (renderingMode == LipColorRenderingMode.UNIFIED) 1f else 0f,
         )
         GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uIosDetailStrength"), parameters.detailStrength)
         GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uIosHighlightStrength"), parameters.highlightStrength)
         GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uIosHighlightMaximum"), parameters.highlightMaximum)
         GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uIosHighlightConcentration"), parameters.highlightConcentration)
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uIosCoreCoverage"), tuning.productDensity.pigmentCoverage)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uIosCoreCoverage"),
+            IosLipMaterial.coverage(tuning.productDensity, lipstickFinish))
         GLES20.glUniform1f(
             GLES20.glGetUniformLocation(lipMeshProgram, "uSemanticConfidence"),
             semantics.lipConfidence,
@@ -1052,6 +1062,9 @@ internal class ArCoreFaceAnchorRenderer(
                 LipstickFinish.GLOSS -> 1f
                 LipstickFinish.SATIN -> 2f
                 LipstickFinish.TRACKING_TEST -> -1f
+                // UI support checks prevent these in UNIFIED; guard a mid-switch frame too.
+                LipstickFinish.OIL -> if (renderingMode == LipColorRenderingMode.IOS_REFERENCE) 3f else 0f
+                LipstickFinish.TINT -> if (renderingMode == LipColorRenderingMode.IOS_REFERENCE) 4f else 0f
             },
         )
         GLES20.glUniform2f(
@@ -1117,6 +1130,10 @@ internal class ArCoreFaceAnchorRenderer(
         GLES20.glEnableVertexAttribArray(satinUv)
         GLES20.glVertexAttribPointer(satinUv, 2, GLES20.GL_FLOAT, false, 0, satinUvs)
         val strideBytes = LipMeshTessellator.VERTEX_COMPONENT_COUNT * Float.SIZE_BYTES
+        val lowerLip = GLES20.glGetAttribLocation(lipMeshProgram, "aLowerLip")
+        lowerLipMask.position(0)
+        GLES20.glEnableVertexAttribArray(lowerLip)
+        GLES20.glVertexAttribPointer(lowerLip, 1, GLES20.GL_FLOAT, false, 0, lowerLipMask)
         val position = GLES20.glGetAttribLocation(lipMeshProgram, "aPosition")
         tessellatedLipVertices.position(0)
         GLES20.glEnableVertexAttribArray(position)
@@ -1160,6 +1177,7 @@ internal class ArCoreFaceAnchorRenderer(
         GLES20.glDisableVertexAttribArray(position)
         GLES20.glDisableVertexAttribArray(lipUv)
         GLES20.glDisableVertexAttribArray(satinUv)
+        GLES20.glDisableVertexAttribArray(lowerLip)
         GLES20.glDisableVertexAttribArray(coverage)
     }
     private fun drawPointCloud(
@@ -1463,16 +1481,19 @@ internal class ArCoreFaceAnchorRenderer(
             attribute float aCoverage;
             attribute vec2 aLipUv;
             attribute vec2 aSatinUv;
+            attribute float aLowerLip;
             varying vec2 vDisplayUv;
             varying float vCoverage;
             varying vec2 vLipUv;
             varying vec2 vSatinUv;
+            varying float vLowerLip;
             void main() {
                 gl_Position = vec4(aPosition, 0.0, 1.0);
                 vDisplayUv = vec2(aPosition.x * 0.5 + 0.5, 0.5 - aPosition.y * 0.5);
                 vCoverage = aCoverage;
                 vLipUv = aLipUv;
                 vSatinUv = aSatinUv;
+                vLowerLip = aLowerLip;
             }
         """
 
@@ -1538,6 +1559,7 @@ internal class ArCoreFaceAnchorRenderer(
             varying float vCoverage;
             varying vec2 vLipUv;
             varying vec2 vSatinUv;
+            varying float vLowerLip;
 
             vec2 cameraUv(vec2 displayUv) {
                 vec2 top = mix(uUvTopLeft, uUvTopRight, displayUv.x);
@@ -1698,6 +1720,18 @@ internal class ArCoreFaceAnchorRenderer(
                     gl_FragColor = vec4(applyLipTuning(mix(camera, uPigment, coverage), camera), 1.0);
                     return;
                 }
+                if (uColorRenderingMode < 0.5) {
+                    vec4 iosMaterial = renderIosLip(coverage);
+                    // Store unassociated material RGB and density alpha for the final
+                    // linear blend AFTER alpha feathering. No inverse-alpha compensation.
+                    if (uEncodeBlurMaterial > 0.5) {
+                        gl_FragColor = iosMaterial;
+                    } else {
+                        gl_FragColor = vec4(iosLinearToSrgb(mix(iosSrgbToLinear(camera),
+                            iosSrgbToLinear(iosMaterial.rgb), iosMaterial.a)), 1.0);
+                    }
+                    return;
+                }
                 vec4 material = uColorRenderingMode > 0.5 ?
                     renderUnifiedLip(coverage) : renderIosLip(coverage);
                 vec3 composited = applyLipTuning(material.rgb, camera);
@@ -1788,6 +1822,7 @@ internal class ArCoreFaceAnchorRenderer(
             precision mediump float;
             uniform samplerExternalOES uCamera;
             uniform sampler2D uBlurredLip;
+            uniform float uIosDevMaterial;
             uniform vec2 uUvBottomLeft;
             uniform vec2 uUvBottomRight;
             uniform vec2 uUvTopLeft;
@@ -1801,6 +1836,17 @@ internal class ArCoreFaceAnchorRenderer(
                 vec2 top = mix(uUvTopLeft, uUvTopRight, displayUv.x);
                 vec2 bottom = mix(uUvBottomLeft, uUvBottomRight, displayUv.x);
                 return mix(top, bottom, displayUv.y);
+            }
+
+            vec3 compositeSrgbToLinear(vec3 color) {
+                return mix(color / 12.92, pow((color + 0.055) / 1.055, vec3(2.4)),
+                    step(vec3(0.04045), color));
+            }
+
+            vec3 compositeLinearToSrgb(vec3 color) {
+                color = max(color, vec3(0.0));
+                return mix(color * 12.92, 1.055 * pow(color, vec3(1.0 / 2.4)) - 0.055,
+                    step(vec3(0.0031308), color));
             }
 
             void main() {
@@ -1819,6 +1865,13 @@ internal class ArCoreFaceAnchorRenderer(
                     featherFraction,
                     clamp(vLipUv.x, 0.0, 1.0)
                 );
+                if (uIosDevMaterial > 0.5) {
+                    vec3 iosComposited = compositeLinearToSrgb(mix(
+                        compositeSrgbToLinear(camera), compositeSrgbToLinear(blurredLip.rgb),
+                        clamp(blurredLip.a * outerFeather, 0.0, 1.0)));
+                    gl_FragColor = vec4(clamp(iosComposited, 0.0, 1.0), 1.0);
+                    return;
+                }
                 vec3 composited = camera + materialDelta * blurredLip.a * outerFeather;
                 gl_FragColor = vec4(clamp(composited, 0.0, 1.0), 1.0);
             }

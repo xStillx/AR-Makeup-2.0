@@ -207,6 +207,16 @@
                             style="@style/LipTuningToggle"
                             android:text="@string/finish_gloss" />
                         <com.google.android.material.button.MaterialButton
+                            android:id="@+id/finish_oil"
+                            style="@style/LipTuningToggle"
+                            android:visibility="gone"
+                            android:text="@string/finish_oil" />
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/finish_tint"
+                            style="@style/LipTuningToggle"
+                            android:visibility="gone"
+                            android:text="@string/finish_tint" />
+                        <com.google.android.material.button.MaterialButton
                             android:id="@+id/finish_tracking_test"
                             style="@style/LipTuningToggle"
                             android:text="@string/finish_tracking_test" />

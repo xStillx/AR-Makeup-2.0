@@ -78,12 +78,31 @@ internal data class LipstickTuning(
         fun defaultsFor(
             renderingMode: LipColorRenderingMode,
             finish: LipstickFinish,
-        ): LipstickTuning = when (renderingMode) {
-            LipColorRenderingMode.IOS_REFERENCE -> defaultsFor(finish)
-            LipColorRenderingMode.UNIFIED -> unifiedDefaultsFor(finish)
+        ): LipstickTuning {
+            require(finish.supportedIn(renderingMode)) { "$finish is not supported in $renderingMode" }
+            return when (renderingMode) {
+                LipColorRenderingMode.IOS_REFERENCE -> iosDevDefaultsFor(finish)
+                LipColorRenderingMode.UNIFIED -> unifiedDefaultsFor(finish)
+            }
         }
 
         fun defaultsFor(finish: LipstickFinish): LipstickTuning = finishDefaults(finish)
+
+        private fun iosDevDefaultsFor(finish: LipstickFinish): LipstickTuning {
+            val defaults = finishDefaults(finish)
+            if (finish == LipstickFinish.TRACKING_TEST) return defaults
+            return defaults.copy(
+                opacity = 0.99f,
+                pigmentBrightness = 1f,
+                cameraValueTransfer = 1f, // Fixed per-pixel transfer; no additional override.
+                cameraDetail = 1f,
+                highlightSize = 1f,
+                highlightThreshold = 1f,
+                highlightConcentration = 1f,
+                cameraSampleScale = 1f,
+                toothProtection = 1f,
+            )
+        }
 
         private fun unifiedDefaultsFor(finish: LipstickFinish): LipstickTuning {
             val defaults = finishDefaults(finish)
@@ -127,8 +146,8 @@ internal data class LipstickTuning(
             )
 
             return when (finish) {
-                LipstickFinish.SATIN, LipstickFinish.GLOSS -> shared
-                LipstickFinish.MATTE -> shared.copy(
+                LipstickFinish.SATIN, LipstickFinish.GLOSS, LipstickFinish.OIL -> shared
+                LipstickFinish.MATTE, LipstickFinish.TINT -> shared.copy(
                     specular = 0.00f,
                     highlightRetention = 0.00f,
                     highlightStrength = 0.00f,
@@ -206,4 +225,11 @@ internal enum class LipstickTuningParameter(
     TOOTH_PROTECTION("КРАЯ И РОТ", "Защита зубов", 0f, 2f, 1f, update = { s, v -> s.copy(toothProtection = v) }, read = { it.toothProtection }),
 
     CAMERA_SAMPLE_SCALE("КАМЕРА", "Масштаб выборки камеры", 0.35f, 2f, 1f, update = { s, v -> s.copy(cameraSampleScale = v) }, read = { it.cameraSampleScale }),
+    ;
+
+    /** dev captures diffuse shape directly; these historical controls are not part of that path. */
+    fun supportedInIosDev(): Boolean = !unifiedOnly && this !in setOf(
+        CAMERA_VALUE_TRANSFER, CAMERA_DETAIL, MATERIAL_DETAIL, SHADOW,
+        MICRO_TEXTURE, SURFACE_DETAIL, LUMINANCE, SEAM_SHADOW, WET_INNER_EDGE,
+    )
 }

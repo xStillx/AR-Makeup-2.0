@@ -52,12 +52,20 @@ internal object ReferenceMatteLipstickProfile {
     const val CORE_INSET_FRACTION = 0.16f
 }
 
-/** Three product finishes plus a temporary, debug-only tracking aid. */
+/** Oil/tint are available only in the iOS-dev renderer; legacy ordinals stay intact. */
 internal enum class LipstickFinish {
     MATTE,
     SATIN,
     GLOSS,
     TRACKING_TEST,
+    OIL,
+    TINT,
+    ;
+
+    fun supportedIn(mode: LipColorRenderingMode): Boolean = when (this) {
+        OIL, TINT -> mode == LipColorRenderingMode.IOS_REFERENCE
+        else -> true
+    }
 }
 
 /**
@@ -242,6 +250,7 @@ internal object ReferenceLipstickRenderProfiles {
         LipstickFinish.SATIN -> satin
         LipstickFinish.GLOSS -> gloss
         LipstickFinish.TRACKING_TEST -> trackingTest
+        LipstickFinish.OIL, LipstickFinish.TINT -> error("Oil/tint require the iOS-dev renderer")
     }
 
     private fun productProfile(

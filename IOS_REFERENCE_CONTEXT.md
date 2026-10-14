@@ -1,5 +1,33 @@
 # iOS reference — устройство проекта и ориентиры переноса
 
+## Дополнение Android: Oil/Tint реализованы — 2026-10-14
+
+По новой явной команде пользователя Oil/Tint dev42318424 перенесены в IOS_REFERENCE. GUERLAIN309/775 автоматически выбирают OIL, OK Beauty Valkyrie/Safari — TINT; две отдельные кнопки доступны только в «Как на iOS». UNIFIED сохраняет прежнее поведение каталога без переключения для этих типов. Финиш хранится отдельно по режимам, прежний UNIFIED preference key сохранён.
+
+Oil: wet signal thresholds0.30/0.72, exponent1.05, strength0.42, linear white mix2.30; source gain1.40/max0.50 с texture multipliers дополнительно ослаблены×0.50. Добавочное отражение только на нижней губе; общий diffuse и wet separation прежние. Tint: никаких добавочных бликов, coverage=base+(0.88-base)×0.65 (0.7715/0.81/0.922), обычная camera-value база и однократный linear alpha blend. Неиспользуемый naturalLipColorWeight из Swift profile не превращён в дополнительный RGB mix.
+
+Ниже раннее «Oil/Tint не перенесены» относится к предыдущему этапу. Temporal shine history/SDF и слабый MATTE shine всё ещё не перенесены. Новых GPU targets/ML/assets/dependencies нет. Проверки compiled artifact и offscreen GPU пройдены; актуальный device статус хранится в верхней секции PROJECT_CONTEXT.md. Визуальный паритет не подтверждён.
+
+## Android IOS_REFERENCE: dev-кандидат реализован 2026-10-14
+
+По последующей явной команде пользователя старый «Как на iOS» заменён dev diffuse/shine equations в IosLipMaterial.kt. UNIFIED не переписан и побитно совпал на210 offscreen before/after frames. Основной материал, плотность0.57/0.68/1, linear density-alpha blend и wet highlight separation перенесены. Temporal shine history, самостоятельный SDF compute gate, OIL/TINT formulas и слабый matte shine не переносились: сохранены действующие Android annulus/Sync/tracker и ранее принятый MATTE без бликов. Это адаптация, не полный паритет iOS pipeline. iOS-исходники не редактировались.
+
+Два старых blur buffers используются без новых targets; в IOS ветке они содержат material sRGB + alpha вместо UNIFIED signed delta. Alpha размазывается отдельно, камера смешивается в linear RGB только после blur. Новые namespaces/defaults/список скрытых legacy controls перечислены в LIPSTICK_PRESETS.md, все результаты проверок/ограничения — в верхней секции PROJECT_CONTEXT.md. Debug APK собран, устройство по ADB недоступно; визуальный результат ещё не принят. Ни прежнюю main-копию, ни ранние paragraphs «не реализовано» ниже не считать текущим состоянием Android.
+
+## Актуальный ориентир: dev, проверен 2026-10-14
+
+Пользователь указал готовую ветку: https://github.com/Dzhanaeva/virtual-makeup/tree/dev, commit42318424b4655ecb6f724cb8395b7d72e42942f5 от2026-10-13. Предыдущее исследование ниже относится к main d810b9d от2026-09-04; compositor/types/catalog main побитно совпадают с прежней локальной копией. Их исторические formulas/defaults не следует считать готовым эталоном dev.
+
+Проверены основные dev sources без установки SDK/моделей/зависимостей и без изменения iOS/Android runtime. В MetalLipColorCompositor.swift lip_fragment360–570 заменён: targetValue=cameraValue×lipstickValue/0.85; hue/saturation из исходного source RGB; HSV-операции в display RGB, затем linear RGB. Diffuse material содержит cameraAwarePigment и coreCoverage, без inverse-alpha compensation и дополнительных нарисованных seam/detail shadow multipliers. lip_captured_shape_exposure321–358 не вызывается; поля profile сами по себе не доказывают активную коррекцию.
+
+Shine извлекается отдельно, стабилизируется temporal-pass574–605, ограничивается signed-distance gate658–797 и накладывается lip_apply_shine607–648. Wet diffuse подавляет часть уже извлечённого отражения, избегая двойного highlight. Промежуточные color targets rgba16Float и shine r16Float; выход в sRGB только в финальном alpha-blur pass1074–1078. Colour/alpha по-прежнему раздельно передаются SceneKit; neutral multiplier1 при Metal (Coordinator391–393), low-light multiply не является общим дополнительным затемнением активного Metal-пути. Камерный material input — ориентированный BGRA MediaPipe buffer с длинной стороной512 (Coordinator168/3056/3085), не полный ARKit background frame.
+
+LipstickTypes.swift111–118: coverage LOW0.57/MEDIUM0.68/HIGH1.00; tint имеет отдельную поправку. Matte в dev допускает слабый camera-derived shine; это отличается от принятого у нас MATTE без бликов. Product texture участвует в profile highlight coefficients. Не менять наши OIL/TINT или MATTE strengths автоматически только ради совпадения с dev. ContentView.swift: Guerlain131=#D07266 (112), Nrav05=#D68B79 (237), Shik Balm01=#F7C8BE (406); ранний вывод по main о другом HEX131 отменён для dev.
+
+Ключевые расхождения Android UNIFIED: partial camera transfer0.20, сглаженный reference valueSource, добавочные surface-light/detail/seam поправки, intensity mixing в sRGB вместо dev density alpha. IOS_REFERENCE тоже основан на СТАРОМ compositor: старые density/compensation и дополнительные runtime overrides, а не новая dev-formula. Следующий разрешаемый A/B должен сначала воспроизвести именно действующую diffuse base и linear blend, отдельно от оптики и трекера; простой camera_value_transfer=1 приблизит лишь один этап, не гарантируя паритет. Реализация пока не запрошена. Визуальная оценка на iPhone, Metal build и device/performance acceptance НЕ выполнялись.
+
+## Историческое исследование main — 2026-09-04
+
 Изучено 2026-09-04. Источник: `C:\Users\User\Desktop\ios makeup\virtual-makeup-main`. В предоставленной копии нет Git-метаданных. Это статическое исследование состава проекта, основных вызовов и реализации материалов, а не запуск iOS и не подтверждение визуального паритета. Номера строк относятся к этой копии; контрольные суммы в конце позволяют проверить её актуальность.
 
 ## Последняя задача пользователя

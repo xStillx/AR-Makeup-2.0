@@ -2,13 +2,16 @@ package com.example.armakeup.arcore
 
 import com.example.armakeup.makeup.LipMeshTessellator
 import com.example.armakeup.makeup.LipstickFinish
+import com.example.armakeup.makeup.LipstickDensity
 import com.example.armakeup.makeup.LipstickTexture
 import com.example.armakeup.makeup.ReferenceMatteLipstickProfile
 
 /**
- * Port of the supplied iOS Metal compositor for matte, satin and gloss.
+ * iOS dev diffuse/shine equations (42318424), independently implemented in GLSL.
+ * No temporal shine history/SDF compute passes; the accepted Android annulus gates highlights.
  * Canonical UVs affect material shading only; the accepted mesh and coverage stay unchanged.
- * Source: Virtual Makeup/{MetalLipColorCompositor,LipstickTypes,CanonicalLipGeometry}.swift.
+ * Reference: github.com/Dzhanaeva/virtual-makeup, dev commit 42318424b4655ecb6f724cb8395b7d72e42942f5.
+ * HSV camera-value idea originates in Banuba beauty-ios; no SDK/models/assets are imported.
  */
 internal object IosLipMaterial {
     data class FinishParameters(
@@ -20,23 +23,49 @@ internal object IosLipMaterial {
 
     fun parameters(finish: LipstickFinish, texture: LipstickTexture): FinishParameters {
         val detail = if (finish == LipstickFinish.SATIN) 1.7f else 1.9f
+        // User calibration: reduce the reflection layer, not the diffuse pigment,
+        // its camera-value transfer, or the spatial mask of the captured highlight.
+        val reflectionScale = when (finish) {
+            LipstickFinish.SATIN -> 0.40f
+            LipstickFinish.GLOSS, LipstickFinish.OIL -> 0.50f
+            else -> 1f
+        }
         val highlight = when (finish) {
-            LipstickFinish.SATIN -> 1.16f
-            LipstickFinish.GLOSS -> 1.05f
+            LipstickFinish.SATIN -> 1.35f
+            LipstickFinish.GLOSS, LipstickFinish.OIL -> 1.40f
             else -> 0f
         }
         val maximum = when (finish) {
-            LipstickFinish.SATIN -> 0.48f
-            LipstickFinish.GLOSS -> 0.20f
+            LipstickFinish.SATIN -> 0.70f
+            LipstickFinish.GLOSS -> 0.40f
+            LipstickFinish.OIL -> 0.50f
             else -> 0f
         }
         return FinishParameters(
             detail * texture.detailResponse,
-            highlight * texture.highlightResponse,
-            maximum * texture.highlightLimitResponse,
+            highlight * texture.highlightResponse * reflectionScale,
+            maximum * texture.highlightLimitResponse * reflectionScale,
             texture.highlightConcentration,
         )
     }
+
+    /** New dev density; never change the shared enum/UNIFIED initial-intensity rule. */
+    fun coverage(density: LipstickDensity): Float = when (density) {
+        LipstickDensity.LOW -> 0.57f
+        LipstickDensity.MEDIUM -> 0.68f
+        LipstickDensity.HIGH -> 1.00f
+    }
+
+    fun coverage(density: LipstickDensity, finish: LipstickFinish): Float {
+        val base = coverage(density)
+        return if (finish == LipstickFinish.TINT) base + (0.88f - base) * 0.65f else base
+    }
+
+    /** Membership, not canonical UV height: the tessellator emits upper then lower triangles. */
+    fun lowerLipMask(tessellator: LipMeshTessellator): FloatArray =
+        FloatArray(tessellator.vertexCount) { vertex ->
+            if (vertex < tessellator.verticesPerLip) 0f else 1f
+        }
 
     fun textureCoordinates(tessellator: LipMeshTessellator): FloatArray {
         val outer = floatArrayOf(
@@ -96,8 +125,7 @@ internal object IosLipMaterial {
 
     const val FRAGMENT_FUNCTION = """
 
-            // Pigment/detail arithmetic stays in source sRGB as in Metal.
-            // Only the final camera/material blend uses the accepted IEC sRGB transfer.
+            // Shared transfer functions are deliberately unchanged: UNIFIED also uses them.
             vec3 iosSrgbToLinear(vec3 color) {
                 return mix(color / 12.92, pow((color + 0.055) / 1.055, vec3(2.4)),
                     step(vec3(0.04045), color));
@@ -109,169 +137,124 @@ internal object IosLipMaterial {
                     step(vec3(0.0031308), color));
             }
 
+            float iosDevLuminance(vec3 linearColor) {
+                return clamp(dot(linearColor, vec3(0.2126, 0.7152, 0.0722)), 0.0, 1.0);
+            }
+
+            // Independent implementation of the dev diffuse equations. Do not use
+            // cameraValuePigment: its partial-transfer override belongs to UNIFIED.
+            vec3 iosDevPigment(vec3 hsv, float cameraValue) {
+                hsv.z = clamp(cameraValue * hsv.z / 0.85, 0.0, 1.0);
+                return iosSrgbToLinear(lipHsvToRgb(hsv));
+            }
+
             vec4 renderIosLip(float coverage) {
-                vec3 base = cameraSrgbAt(vDisplayUv);
-                vec2 dx = uSatinSourceTexelX * 5.0 * uTuningCameraSampleScale;
-                vec2 dy = uSatinSourceTexelY * 5.0 * uTuningCameraSampleScale;
-                vec3 blurred = base * 4.0;
-                blurred += cameraSrgbAt(vDisplayUv + dx);
-                blurred += cameraSrgbAt(vDisplayUv - dx);
-                blurred += cameraSrgbAt(vDisplayUv + dy);
-                blurred += cameraSrgbAt(vDisplayUv - dy);
-                blurred += cameraSrgbAt(vDisplayUv + dx + dy);
-                blurred += cameraSrgbAt(vDisplayUv - dx - dy);
-                blurred += cameraSrgbAt(vDisplayUv + dx - dy);
-                blurred += cameraSrgbAt(vDisplayUv - dx + dy);
-                blurred /= 12.0;
-
-                float baseLuminance = parityLuminance(base);
-                float blurredLuminance = max(parityLuminance(blurred), 0.055);
-                float localLighting = smoothstep(0.10, 0.55, blurredLuminance);
-                // Neutral iOS fallback: Android has no equivalent ARKit ambient estimate.
-                float combinedLighting = clamp(mix(1.0, localLighting, 0.25), 0.45, 1.0);
-                float brightScene = smoothstep(0.78, 1.0, combinedLighting);
-                float logDetail = (log2(max(baseLuminance, 0.04)) -
-                    log2(max(blurredLuminance, 0.04))) * uTuningCameraDetail *
-                    uTuningSurfaceDetail;
-                bool isSatin = uFinishMode > 1.5;
+                vec3 camera = cameraSrgbAt(vDisplayUv);
+                vec3 linearCamera = iosSrgbToLinear(camera);
+                vec3 pigmentHsv = lipRgbToHsv(clamp(uPigment, 0.0, 1.0));
+                float cameraValue = max(camera.r, max(camera.g, camera.b));
+                vec3 pigment = iosDevPigment(pigmentHsv, cameraValue);
                 bool isGloss = uFinishMode > 0.5 && uFinishMode < 1.5;
-                float lowDensityGloss = isGloss ?
-                    1.0 - smoothstep(0.60, 0.72, uIosCoreCoverage) : 0.0;
-                float detailStrength = uIosDetailStrength * uTuningMaterialDetail;
-                float detailExponent;
-                if (uFinishMode < 0.5) {
-                    float matteShadowStrength = mix(1.15, 0.72, brightScene);
-                    float matteHighlightStrength = mix(0.65, 0.35, brightScene);
-                    detailExponent =
-                        clamp(min(logDetail, 0.0), -0.14, 0.0) * detailStrength *
-                            matteShadowStrength * uTuningShadowStrength +
-                        clamp(max(logDetail, 0.0), 0.0, 0.09) * detailStrength *
-                            matteHighlightStrength * uTuningMicroTexture;
-                } else {
-                    float adaptiveDetailStrength = detailStrength * mix(1.0, 0.45, brightScene);
-                    detailExponent =
-                        clamp(min(logDetail, 0.0), -0.14, 0.0) * adaptiveDetailStrength *
-                            (isSatin ? 1.30 : 1.14) * uTuningShadowStrength +
-                        clamp(max(logDetail, 0.0), 0.0, 0.10) * adaptiveDetailStrength *
-                            (isSatin ? 0.92 : 0.96) * uTuningMicroTexture;
-                }
-
-                float cornerPosition = clamp(abs(vSatinUv.x - 0.5) * 2.0, 0.0, 1.0);
-                float cornerRegion = smoothstep(0.62, 0.96, cornerPosition);
-                float innerSeamRegion = 1.0 - smoothstep(0.018, 0.085, abs(vSatinUv.y - 0.50));
-                float localShadow = 1.0 - smoothstep(0.16, 0.42, blurredLuminance);
-                float openMouth = uSatinApertureVisibility;
-                float apertureClosure = 1.0 - openMouth;
-                float seamShadow = 1.0 - innerSeamRegion * smoothstep(0.30, 0.56, openMouth) *
-                    (0.020 + localShadow * 0.08 * uTuningShadowStrength) * uTuningSeamShadow;
-                // HSV value transfer is an optional Android tuning override, off by default.
-                vec3 pigment = clamp(cameraValuePigment(base, uPigment) *
-                    exp2(detailExponent) * seamShadow, 0.0, 1.0);
-                vec3 naturalLipColor = clamp(blurred + (base - blurred) * 0.35, 0.0, 1.0);
-                pigment = mix(naturalLipColor, pigment,
-                    clamp(uTuningPigmentOpacity, 0.0, 1.0));
-                pigment = mix(pigment, naturalLipColor, lowDensityGloss * 0.60);
-
-                float maximum = max(base.r, max(base.g, base.b));
-                float minimum = min(base.r, min(base.g, base.b));
-                float saturation = maximum > 0.001 ? (maximum - minimum) / maximum : 0.0;
-                float toothGuard = clamp(smoothstep(0.64, 0.82, baseLuminance) *
-                    (1.0 - smoothstep(0.16, 0.30, saturation)) *
-                    smoothstep(0.24, 0.46, openMouth) * innerSeamRegion *
-                    uTuningToothProtection, 0.0, 1.0);
-
+                bool isSatin = uFinishMode > 1.5 && uFinishMode < 2.5;
+                bool isOil = uFinishMode > 2.5 && uFinishMode < 3.5;
+                bool isWet = isGloss || isOil;
                 float finishGlow = isSatin ? uTuningSatinGlow : 1.0;
                 float highlightGain = uIosHighlightStrength * uTuningHighlightStrength *
                     uTuningSpecular * uTuningHighlightRetention * finishGlow;
+                float shine = 0.0;
                 if (highlightGain > 0.001) {
                     vec2 hx = uSatinSourceTexelX * 12.0 * uTuningCameraSampleScale *
                         uTuningHighlightSize;
                     vec2 hy = uSatinSourceTexelY * 8.0 * uTuningCameraSampleScale *
                         uTuningHighlightSize;
-                    vec3 highlightSurround = (
-                        cameraSrgbAt(vDisplayUv + hx) + cameraSrgbAt(vDisplayUv - hx) +
-                        cameraSrgbAt(vDisplayUv + hy) + cameraSrgbAt(vDisplayUv - hy)
+                    // Average in linear RGB, as in dev, not in display RGB.
+                    vec3 surround = (
+                        iosSrgbToLinear(cameraSrgbAt(vDisplayUv + hx)) +
+                        iosSrgbToLinear(cameraSrgbAt(vDisplayUv - hx)) +
+                        iosSrgbToLinear(cameraSrgbAt(vDisplayUv + hy)) +
+                        iosSrgbToLinear(cameraSrgbAt(vDisplayUv - hy))
                     ) * 0.25;
-                    float surroundLuminance = max(parityLuminance(highlightSurround), 0.04);
-                    float highlightLogContrast = log2(max(baseLuminance, 0.04) / surroundLuminance);
-                    float relativeHighlight = smoothstep(
-                        (isGloss ? 0.006 : 0.035) * uTuningHighlightThreshold,
-                        (isGloss ? 0.11 : 0.22) * uTuningHighlightThreshold,
-                        highlightLogContrast
-                    );
-                    float highlightBrightness = smoothstep(
-                        isGloss ? 0.07 : 0.18,
-                        isGloss ? 0.48 : 0.68,
-                        baseLuminance
-                    );
-                    float highlightDifference = max(baseLuminance - surroundLuminance, 0.0);
-                    float realHighlightSignal = clamp(relativeHighlight * highlightBrightness, 0.0, 1.0);
-                    float concentration = max(uIosHighlightConcentration *
-                        uTuningHighlightConcentration / max(uTuningRoughness, 0.35), 1.0);
-                    float naturalHighlight;
-                    if (isGloss) {
-                        float liquidResponse = smoothstep(1.20, 1.80, concentration);
-                        float highlightCore = smoothstep(
-                            mix(0.08, 0.16, liquidResponse),
-                            mix(0.50, 0.62, liquidResponse),
-                            realHighlightSignal
-                        );
-                        naturalHighlight = pow(highlightCore, concentration);
-                    } else {
-                        naturalHighlight = pow(realHighlightSignal, concentration);
+                    float luminance = iosDevLuminance(linearCamera);
+                    float surroundLuminance = max(iosDevLuminance(surround), 0.0045);
+                    float contrast = log2(max(luminance, 0.0031) / surroundLuminance) * 0.45;
+                    float relativeHighlight = smoothstep(0.001 * uTuningHighlightThreshold,
+                        0.065 * uTuningHighlightThreshold, contrast);
+                    float brightnessGate = smoothstep(0.012, 0.220, luminance);
+                    vec3 residual = max(linearCamera - surround, vec3(0.0));
+                    float residualMaximum = max(residual.r, max(residual.g, residual.b));
+                    float residualCommon = min(residual.r, min(residual.g, residual.b));
+                    float illuminantEvidence = smoothstep(0.18, 0.62,
+                        residualCommon / max(residualMaximum, 0.0001));
+                    float signal = clamp(relativeHighlight * brightnessGate *
+                        mix(0.30, 1.0, illuminantEvidence), 0.0, 1.0);
+                    float shineMask = smoothstep(isOil ? 0.30 : (isGloss ? 0.34 : 0.37),
+                        isOil ? 0.72 : (isGloss ? 0.78 : 0.89), signal);
+                    if (isWet) {
+                        // Remove the observed wet reflection from the diffuse value
+                        // before applying it separately; otherwise it is counted twice.
+                        vec3 surroundSrgb = iosLinearToSrgb(surround);
+                        float surroundValue = max(surroundSrgb.r,
+                            max(surroundSrgb.g, surroundSrgb.b));
+                        float diffuseValue = mix(cameraValue, min(cameraValue, surroundValue),
+                            shineMask * 0.82);
+                        pigment = iosDevPigment(pigmentHsv, diffuseValue);
                     }
-                    float peakLimit = uIosHighlightMaximum * uTuningHighlightStrength *
-                        uTuningSpecular * finishGlow;
-                    float highlightAmount;
-                    if (isGloss) {
-                        highlightAmount = min(
-                            (pow(realHighlightSignal, 1.35) * 0.035 + naturalHighlight * 0.14) *
-                                highlightGain,
-                            peakLimit
-                        );
-                    } else {
-                        highlightAmount = min(
-                            naturalHighlight * (0.07 + highlightDifference * 0.90) * highlightGain,
-                            peakLimit
-                        );
-                    }
-                    highlightAmount *= (1.0 - clamp(cornerRegion * 0.82 *
-                        uTuningCornerFade, 0.0, 1.0)) *
-                        (1.0 - innerSeamRegion * (isGloss ?
-                            mix(0.30, 0.58, apertureClosure) :
-                            mix(0.74, 0.92, apertureClosure))) *
-                        (1.0 - toothGuard * 0.96);
-                    highlightAmount *= 1.0 + (uTuningWetInnerEdge - 1.0) * innerSeamRegion *
-                        openMouth * 0.22;
-                    pigment = mix(pigment, vec3(1.0), clamp(highlightAmount, 0.0, 0.96));
-                }
-                pigment = mix(pigment, base * (1.0 - localShadow * 0.05), toothGuard * 0.94);
+                    float exponent = (isOil ? 1.05 : (isGloss ? 1.30 : 1.20)) *
+                        uTuningHighlightConcentration / max(uTuningRoughness, 0.35);
+                    shine = min(pow(shineMask, max(exponent, 0.001)) *
+                        (isOil ? 0.42 : (isGloss ? 0.24 : 0.26)) * highlightGain,
+                        uIosHighlightMaximum * uTuningHighlightStrength *
+                            uTuningSpecular * finishGlow);
 
-                float pigmentLuminance = parityLuminance(pigment);
-                float luminanceDelta = (uTuningLuminancePreservation - 1.0) *
-                    (baseLuminance - pigmentLuminance) * 0.60;
-                pigment = parityColorWithLuminance(pigment, clamp(
-                    pigmentLuminance + luminanceDelta, 0.0, 1.0));
-                pigmentLuminance = parityLuminance(pigment);
-                float capturedCornerLuminance = min(baseLuminance, blurredLuminance);
-                float cornerShadowEvidence = smoothstep(0.025, 0.18,
-                    pigmentLuminance - capturedCornerLuminance);
-                float retainedCornerLuminance = max(capturedCornerLuminance, pigmentLuminance * 0.58);
-                pigment = parityColorWithLuminance(pigment, mix(pigmentLuminance, retainedCornerLuminance,
-                    smoothstep(0.86, 1.0, cornerPosition) * cornerShadowEvidence * 0.76));
-                float cornerOpacity = 1.0 - smoothstep(0.82, 0.98, cornerPosition) *
-                    0.12 * uTuningCornerFade;
-                float outputCoverage = mix(uIosCoreCoverage, 0.45, lowDensityGloss);
-                float compensationAlpha = mix(uIosCoreCoverage, 0.92, 0.55);
-                compensationAlpha = mix(compensationAlpha, outputCoverage, lowDensityGloss);
-                vec3 correctiveColor = clamp(
-                    (pigment - blurred * (1.0 - compensationAlpha)) /
-                        max(compensationAlpha, 0.001), 0.0, 1.0
-                );
-                // Android mesh/outer feather stays independent of product density.
-                float alpha = coverage * outputCoverage * 0.99 * cornerOpacity;
-                vec3 composited = mix(iosSrgbToLinear(base), iosSrgbToLinear(correctiveColor), alpha);
-                return vec4(clamp(iosLinearToSrgb(composited), 0.0, 1.0), alpha);
+                    float cornerPosition = clamp(abs(vSatinUv.x - 0.5) * 2.0, 0.0, 1.0);
+                    float cornerRegion = smoothstep(0.62, 0.96, cornerPosition);
+                    float seam = 1.0 - smoothstep(0.018, 0.085, abs(vSatinUv.y - 0.5));
+                    float apertureClosure = 1.0 - uSatinApertureVisibility;
+                    float maximum = max(camera.r, max(camera.g, camera.b));
+                    float minimum = min(camera.r, min(camera.g, camera.b));
+                    float saturation = maximum > 0.001 ? (maximum - minimum) / maximum : 0.0;
+                    float tooth = smoothstep(0.64, 0.82, parityLuminance(camera)) *
+                        (1.0 - smoothstep(0.16, 0.30, saturation)) *
+                        smoothstep(0.24, 0.46, uSatinApertureVisibility) * seam *
+                        uTuningToothProtection;
+                    shine *= (1.0 - clamp(cornerRegion * 0.82 * uTuningCornerFade, 0.0, 1.0)) *
+                        (1.0 - seam * (isWet ? mix(0.30, 0.58, apertureClosure) :
+                            mix(0.74, 0.92, apertureClosure))) *
+                        (1.0 - clamp(tooth * 0.96, 0.0, 1.0));
+                    // Android's accepted annulus replaces iOS's separate SDF shine gate.
+                    // This only gates reflections; never fade the inner pigment coverage.
+                    shine *= smoothstep(0.12, 0.30, vLipUv.x) *
+                        (1.0 - smoothstep(0.80, 0.98, vLipUv.x));
+                    // Explicit tessellator membership identifies the lip independently
+                    // of pose, mouth opening, or historical material UV orientation.
+                    // Gate only the added reflection; retain diffuse camera shading
+                    // and wet-highlight separation so no coloured hot spot is restored.
+                    shine *= vLowerLip;
+                }
+
+                if (isWet) {
+                    pigment = mix(pigment, vec3(1.0),
+                        clamp(shine * (isOil ? 2.30 : 1.45), 0.0, 1.0));
+                } else if (isSatin) {
+                    vec3 materialHsv = lipRgbToHsv(iosLinearToSrgb(pigment));
+                    float visibleShine = clamp(shine * 1.40, 0.0, 1.0);
+                    materialHsv.y *= 1.0 - visibleShine * 0.22;
+                    materialHsv.z = mix(materialHsv.z, 1.0, visibleShine);
+                    pigment = iosSrgbToLinear(lipHsvToRgb(materialHsv));
+                }
+
+                // Optional colour controls modify material, never the camera backdrop.
+                // Opacity/intensity belong to alpha, not an extra display-RGB colour mix.
+                vec3 material = iosLinearToSrgb(pigment);
+                material = mix(vec3(parityLuminance(material)), material, uTuningSaturation);
+                material = tuneHue(material, uTuningHueDegrees);
+                material = (material - vec3(0.5)) * uTuningContrast + vec3(0.5);
+                material = clamp(material * uTuningBrightness, 0.0, 1.0);
+                pigment = mix(iosSrgbToLinear(material), linearCamera,
+                    clamp(uTuningNaturalLipBlend, 0.0, 1.0));
+                float alpha = clamp(coverage * uIosCoreCoverage *
+                    uTuningPigmentOpacity * uTuningOpacity, 0.0, 1.0);
+                return vec4(iosLinearToSrgb(pigment), alpha);
             }
 
     """
