@@ -11,6 +11,7 @@ import com.example.armakeup.makeup.LipMeshTessellator
 import com.example.armakeup.makeup.ReferenceMatteLipstickProfile
 import com.example.armakeup.makeup.LipColorRenderingMode
 import com.example.armakeup.makeup.LipstickFinish
+import com.example.armakeup.makeup.LipLinerStyle
 import com.example.armakeup.tracking.CanonicalFaceTransform
 import com.example.armakeup.tracking.FillCenterTransform
 import com.example.armakeup.tracking.NormalizedImageTransform
@@ -51,6 +52,8 @@ internal class ArCoreFaceAnchorRenderer(
     private var backgroundProgram = 0
     private var pointProgram = 0
     private var lipMeshProgram = 0
+    private var lipLinerProgram = 0
+    private var pairedLipLinerProgram = 0
     private var pairedBackgroundProgram = 0
     private var pairedLipMeshProgram = 0
     private var lipBlurProgram = 0
@@ -75,6 +78,8 @@ internal class ArCoreFaceAnchorRenderer(
     private var hasStableLipAnchor = false
     private val mappedMediaPipeOuterLipVertices =
         directFloatBuffer(LipLandmarkTopology.outerContour.size * 3)
+    private val refinedOuterLipPointVertices =
+        directFloatBuffer(LipLandmarkTopology.outerContour.size * 3)
     private val mappedMediaPipeInnerLipVertices =
         directFloatBuffer(LipLandmarkTopology.innerContour.size * 3)
     private val projectedArCoreLipVertices = directFloatBuffer(
@@ -84,6 +89,11 @@ internal class ArCoreFaceAnchorRenderer(
     private val lipVisibilityGate = HeadDownLipVisibilityGate()
     private val lipContourRefiner = LipContourTemporalRefiner()
     private val lipTessellator = LipMeshTessellator(featherInnerBoundary = false)
+    private val linerMesh = LipLinerMesh(lipTessellator)
+    private val linerVertices = directFloatBuffer(lipTessellator.vertexCount * LipLinerMesh.COMPONENTS)
+    private val outerBoundaryDistances = FloatArray(lipTessellator.vertexCount)
+    private val lowerOuterCoverageOffsetsPixels = FloatArray(lipTessellator.samplesPerLip * 2)
+    private val outerBoundaryVertices = directFloatBuffer(lipTessellator.vertexCount)
     private val satinUvs = directFloatBuffer(IosLipMaterial.textureCoordinates(lipTessellator))
     private val lowerLipMask = directFloatBuffer(IosLipMaterial.lowerLipMask(lipTessellator))
     private val satinSourceTexels = FloatArray(4)
@@ -115,7 +125,38 @@ internal class ArCoreFaceAnchorRenderer(
     private var lipstickFinish = LipstickFinish.SATIN
 
     @Volatile
+    private var lipstickEnabled = true
+
+    fun setLipstickEnabled(enabled: Boolean) {
+        lipstickEnabled = enabled
+    }
+
+    @Volatile
+    private var lowerLipExtensionPixels = LipMeshTessellator.DEFAULT_LOWER_OUTER_EXTENSION_PIXELS
+
+    fun setLowerLipExtensionPixels(value: Float) {
+        lowerLipExtensionPixels = if (value.isFinite()) {
+            value.coerceIn(0f, LipMeshTessellator.MAX_LOWER_OUTER_EXTENSION_PIXELS)
+        } else LipMeshTessellator.DEFAULT_LOWER_OUTER_EXTENSION_PIXELS
+    }
+
+    @Volatile
     private var lipstickTuning = LipstickTuning()
+
+    @Volatile
+    private var lipLinerStyle = LipLinerStyle()
+
+    fun setLipLinerStyle(value: LipLinerStyle) {
+        lipLinerStyle = value
+    }
+
+    @Volatile
+    private var lipContourPointsEnabled = false
+
+    fun setLipContourPointsEnabled(enabled: Boolean) {
+        lipContourPointsEnabled = enabled
+        Log.i(TAG, "Lip contour points: $enabled")
+    }
 
     @Volatile
     private var colorRenderingMode = LipColorRenderingMode.IOS_REFERENCE
@@ -197,6 +238,9 @@ internal class ArCoreFaceAnchorRenderer(
         backgroundProgram = createProgram(BACKGROUND_VERTEX_SHADER, BACKGROUND_FRAGMENT_SHADER)
         pointProgram = createProgram(POINT_VERTEX_SHADER, POINT_FRAGMENT_SHADER)
         lipMeshProgram = createProgram(LIP_MESH_VERTEX_SHADER, LIP_MESH_FRAGMENT_SHADER)
+        lipLinerProgram = createProgram(LipLinerMaterial.VERTEX_SHADER, LipLinerMaterial.FRAGMENT_SHADER)
+        pairedLipLinerProgram = createProgram(LipLinerMaterial.VERTEX_SHADER,
+            bufferedCameraShader(LipLinerMaterial.FRAGMENT_SHADER))
         // Only the sampler changes. All pigment, lighting and coverage equations stay identical.
         pairedBackgroundProgram = createProgram(
             BACKGROUND_VERTEX_SHADER, bufferedCameraShader(BACKGROUND_FRAGMENT_SHADER),
@@ -657,6 +701,13 @@ internal class ArCoreFaceAnchorRenderer(
             innerCarrierFeather = openInnerCarrierBlend,
             cornerCarrierExpansion = CORNER_LIP_CARRIER_EXPANSION,
         )
+        lipTessellator.writeOuterBoundaryDistances(tessellated, viewportWidth, viewportHeight,
+            outerBoundaryDistances)
+        lipTessellator.applyAdaptiveLowerOuterCoverage(tessellated, viewportWidth, viewportHeight,
+            outerBoundaryDistances, lowerLipExtensionPixels)
+        lipTessellator.writeLowerOuterCoverageOffsets(lowerOuterCoverageOffsetsPixels)
+        outerBoundaryVertices.clear()
+        outerBoundaryVertices.put(outerBoundaryDistances).position(0)
         if (Log.isLoggable(LIP_FRAME_TRACE_TAG, Log.DEBUG)) {
             val frameTrace = lipFrameDiagnostics.capture(
                 sensorTimestampNs = faceObservation.sensorTimestampNs,
@@ -691,7 +742,38 @@ internal class ArCoreFaceAnchorRenderer(
             sourceIndex += LipMeshTessellator.VERTEX_COMPONENT_COUNT
         }
         tessellatedLipVertices.position(0)
-        if (lipVisible) drawLipMesh(lips.semantics, bufferedCameraTextureId)
+        val frameLipstickEnabled = lipstickEnabled
+        val frameLinerStyle = lipLinerStyle
+        val frameLinerVisible = lipVisible && frameLinerStyle.enabled && frameLinerStyle.opacity > 0f &&
+            (!frameLipstickEnabled || lipstickFinish != LipstickFinish.TRACKING_TEST) &&
+            linerMesh.update(outerContourPoints, innerContourPoints, viewportWidth, viewportHeight,
+                lowerOuterCoverageOffsetsPixels)
+        if (lipVisible && frameLipstickEnabled) {
+            drawLipMesh(lips.semantics, bufferedCameraTextureId, frameLinerVisible)
+        }
+        if (frameLinerVisible) {
+            drawLipLiner(bufferedCameraTextureId, frameLinerStyle)
+        }
+
+        if (lipContourPointsEnabled && lipVisible) {
+            // Use the same refined, unexpanded contour and camera pair as both material masks.
+            refinedOuterLipPointVertices.clear()
+            for (point in outerContourPoints.indices step 2) {
+                refinedOuterLipPointVertices
+                    .put(outerContourPoints[point] * 2f - 1f)
+                    .put(1f - outerContourPoints[point + 1] * 2f)
+                    .put(0f)
+            }
+            refinedOuterLipPointVertices.position(0)
+            drawPointCloud(
+                vertices = refinedOuterLipPointVertices,
+                pointCount = LipLandmarkTopology.outerContour.size,
+                transform = identity,
+                pointSize = 8f,
+                color = LIP_CONTOUR_CYAN,
+                ringColor = LIP_CONTOUR_CYAN,
+            )
+        }
 
         if (DRAW_DIAGNOSTIC_POINTS && lipVisible) drawPointCloud(
             vertices = mappedMediaPipeOuterLipVertices,
@@ -783,17 +865,68 @@ internal class ArCoreFaceAnchorRenderer(
     private fun drawLipMesh(
         semantics: LipSemanticState,
         bufferedCameraTextureId: Int? = null,
+        lowerLinerContainment: Boolean = false,
     ) {
         if (lipstickFinish == LipstickFinish.TRACKING_TEST) {
             drawLipMeshPass(semantics, bufferedCameraTextureId, encodeBlurMaterial = false)
             return
         }
-        drawBlurredLipMesh(semantics, bufferedCameraTextureId)
+        drawBlurredLipMesh(semantics, bufferedCameraTextureId, lowerLinerContainment)
+    }
+
+    private fun drawLipLiner(bufferedCameraTextureId: Int?, style: LipLinerStyle) {
+        if (!style.enabled || style.opacity <= 0f) return
+        linerVertices.clear()
+        linerVertices.put(linerMesh.vertices).position(0)
+        GLES20.glDisable(GLES20.GL_DEPTH_TEST)
+        GLES20.glEnable(GLES20.GL_BLEND)
+        GLES20.glBlendFuncSeparate(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA,
+            GLES20.GL_ONE, GLES20.GL_ONE_MINUS_SRC_ALPHA)
+        val program = if (bufferedCameraTextureId != null) pairedLipLinerProgram else lipLinerProgram
+        GLES20.glUseProgram(program)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES20.glBindTexture(
+            if (bufferedCameraTextureId != null) GLES20.GL_TEXTURE_2D else GLES11Ext.GL_TEXTURE_EXTERNAL_OES,
+            bufferedCameraTextureId ?: cameraTextureId)
+        GLES20.glUniform1i(GLES20.glGetUniformLocation(program, "uCamera"), 0)
+        GLES20.glUniform2f(GLES20.glGetUniformLocation(program, "uUvBottomLeft"), cameraUvCorners[0], cameraUvCorners[1])
+        GLES20.glUniform2f(GLES20.glGetUniformLocation(program, "uUvBottomRight"), cameraUvCorners[2], cameraUvCorners[3])
+        GLES20.glUniform2f(GLES20.glGetUniformLocation(program, "uUvTopLeft"), cameraUvCorners[4], cameraUvCorners[5])
+        GLES20.glUniform2f(GLES20.glGetUniformLocation(program, "uUvTopRight"), cameraUvCorners[6], cameraUvCorners[7])
+        val axisX = (outerContourPoints[20] - outerContourPoints[0]) * viewportWidth
+        val axisY = (outerContourPoints[21] - outerContourPoints[1]) * viewportHeight
+        val mouthWidth = hypot(axisX, axisY).coerceAtLeast(1f)
+        val radius = (mouthWidth * 0.04f).coerceIn(2f, 10f)
+        GLES20.glUniform2f(GLES20.glGetUniformLocation(program, "uLightStepX"),
+            axisX / mouthWidth * radius / viewportWidth, axisY / mouthWidth * radius / viewportHeight)
+        GLES20.glUniform2f(GLES20.glGetUniformLocation(program, "uLightStepY"),
+            -axisY / mouthWidth * radius / viewportWidth, axisX / mouthWidth * radius / viewportHeight)
+        GLES20.glUniform3f(GLES20.glGetUniformLocation(program, "uColor"),
+            style.color.red, style.color.green, style.color.blue)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(program, "uOpacity"), style.opacity.coerceIn(0f, 1f))
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(program, "uAntialias"), linerMesh.antialias)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(program, "uThickness"), style.thickness.coerceIn(0.25f, 2f))
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(program, "uBlur"), style.blur.coerceIn(0f, 2f))
+        val position = GLES20.glGetAttribLocation(program, "aPosition")
+        val data = GLES20.glGetAttribLocation(program, "aLinerData")
+        val stride = LipLinerMesh.COMPONENTS * Float.SIZE_BYTES
+        GLES20.glEnableVertexAttribArray(position)
+        GLES20.glVertexAttribPointer(position, 2, GLES20.GL_FLOAT, false, stride, linerVertices)
+        linerVertices.position(2)
+        GLES20.glEnableVertexAttribArray(data)
+        GLES20.glVertexAttribPointer(data, 4, GLES20.GL_FLOAT, false, stride, linerVertices)
+        tessellatedLipIndices.position(0)
+        GLES20.glDrawElements(GLES20.GL_TRIANGLES, lipTessellator.indexCount,
+            GLES20.GL_UNSIGNED_SHORT, tessellatedLipIndices)
+        GLES20.glDisableVertexAttribArray(position)
+        GLES20.glDisableVertexAttribArray(data)
+        GLES20.glDisable(GLES20.GL_BLEND)
     }
 
     private fun drawBlurredLipMesh(
         semantics: LipSemanticState,
         bufferedCameraTextureId: Int?,
+        lowerLinerContainment: Boolean,
     ) {
         // RGB encodings differ between modes. Keep one encoding through raster/blur/composite,
         // even if the UI changes its volatile selection while this frame is being submitted.
@@ -826,7 +959,8 @@ internal class ArCoreFaceAnchorRenderer(
         GLES20.glDisable(GLES20.GL_SCISSOR_TEST)
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
         GLES20.glViewport(0, 0, viewportWidth, viewportHeight)
-        drawLipComposite(lipBlurFrames.sourceTextureId, bufferedCameraTextureId, frameRenderingMode)
+        drawLipComposite(lipBlurFrames.sourceTextureId, bufferedCameraTextureId, frameRenderingMode,
+            lowerLinerContainment)
         GLES20.glClearColor(0f, 0f, 0f, 1f)
     }
 
@@ -910,6 +1044,7 @@ internal class ArCoreFaceAnchorRenderer(
         blurredTextureId: Int,
         bufferedCameraTextureId: Int?,
         renderingMode: LipColorRenderingMode,
+        lowerLinerContainment: Boolean,
     ) {
         val program = if (bufferedCameraTextureId != null) {
             pairedLipCompositeProgram
@@ -930,14 +1065,15 @@ internal class ArCoreFaceAnchorRenderer(
         GLES20.glUniform1i(GLES20.glGetUniformLocation(program, "uBlurredLip"), 1)
         GLES20.glUniform1f(GLES20.glGetUniformLocation(program, "uIosDevMaterial"),
             if (renderingMode == LipColorRenderingMode.IOS_REFERENCE) 1f else 0f)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(program, "uLowerLinerContainment"),
+            if (lowerLinerContainment) 1f else 0f)
         GLES20.glUniform2f(GLES20.glGetUniformLocation(program, "uUvBottomLeft"), cameraUvCorners[0], cameraUvCorners[1])
         GLES20.glUniform2f(GLES20.glGetUniformLocation(program, "uUvBottomRight"), cameraUvCorners[2], cameraUvCorners[3])
         GLES20.glUniform2f(GLES20.glGetUniformLocation(program, "uUvTopLeft"), cameraUvCorners[4], cameraUvCorners[5])
         GLES20.glUniform2f(GLES20.glGetUniformLocation(program, "uUvTopRight"), cameraUvCorners[6], cameraUvCorners[7])
         GLES20.glUniform1f(
-            GLES20.glGetUniformLocation(program, "uOuterFeatherFraction"),
-            BASE_OUTER_FEATHER_FRACTION +
-                lipstickTuning.edgeBlur.coerceIn(0f, 1f) * ADDITIONAL_OUTER_FEATHER_FRACTION,
+            GLES20.glGetUniformLocation(program, "uOuterFeatherPixels"),
+            1f + lipstickTuning.edgeBlur.coerceIn(0f, 1f),
         )
 
         val strideBytes = LipMeshTessellator.VERTEX_COMPONENT_COUNT * Float.SIZE_BYTES
@@ -947,12 +1083,15 @@ internal class ArCoreFaceAnchorRenderer(
         GLES20.glVertexAttribPointer(
             position, 2, GLES20.GL_FLOAT, false, strideBytes, tessellatedLipVertices,
         )
-        val lipUv = GLES20.glGetAttribLocation(program, "aLipUv")
-        tessellatedLipVertices.position(6)
-        GLES20.glEnableVertexAttribArray(lipUv)
-        GLES20.glVertexAttribPointer(
-            lipUv, 2, GLES20.GL_FLOAT, false, strideBytes, tessellatedLipVertices,
-        )
+        val outerDistance = GLES20.glGetAttribLocation(program, "aOuterDistance")
+        outerBoundaryVertices.position(0)
+        GLES20.glEnableVertexAttribArray(outerDistance)
+        GLES20.glVertexAttribPointer(outerDistance, 1, GLES20.GL_FLOAT, false, 0,
+            outerBoundaryVertices)
+        val lowerLip = GLES20.glGetAttribLocation(program, "aLowerLip")
+        lowerLipMask.position(0)
+        GLES20.glEnableVertexAttribArray(lowerLip)
+        GLES20.glVertexAttribPointer(lowerLip, 1, GLES20.GL_FLOAT, false, 0, lowerLipMask)
         tessellatedLipIndices.position(0)
         GLES20.glDrawElements(
             GLES20.GL_TRIANGLES,
@@ -961,7 +1100,8 @@ internal class ArCoreFaceAnchorRenderer(
             tessellatedLipIndices,
         )
         GLES20.glDisableVertexAttribArray(position)
-        GLES20.glDisableVertexAttribArray(lipUv)
+        GLES20.glDisableVertexAttribArray(outerDistance)
+        GLES20.glDisableVertexAttribArray(lowerLip)
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
     }
 
@@ -1421,8 +1561,6 @@ internal class ArCoreFaceAnchorRenderer(
         const val SIGNED_COLOR_ZERO = 128f / 255f
         const val BASE_SPATIAL_BLUR_SCALE = 1.50f
         const val ADDITIONAL_SPATIAL_BLUR_SCALE = 1.00f
-        const val BASE_OUTER_FEATHER_FRACTION = 0.25f
-        const val ADDITIONAL_OUTER_FEATHER_FRACTION = 0.20f
         const val OUTER_LIP_CARRIER_EXPANSION = 0.18f
         const val CORNER_LIP_CARRIER_EXPANSION = 0.012f
         const val CLOSED_INNER_SEAM_EXPANSION = 0.14f
@@ -1438,6 +1576,7 @@ internal class ArCoreFaceAnchorRenderer(
             .replace("samplerExternalOES", "sampler2D")
 
         val MAGENTA = floatArrayOf(1f, 0.05f, 0.8f)
+        val LIP_CONTOUR_CYAN = floatArrayOf(35f / 255f, 201f / 255f, 232f / 255f)
         val CYAN = floatArrayOf(0.05f, 1f, 0.95f)
         val DARK_CYAN = floatArrayOf(0f, 0.25f, 0.25f)
         val YELLOW = floatArrayOf(1f, 0.9f, 0.05f)
@@ -1805,15 +1944,18 @@ internal class ArCoreFaceAnchorRenderer(
 
         const val LIP_COMPOSITE_VERTEX_SHADER = """
             attribute vec2 aPosition;
-            attribute vec2 aLipUv;
+            attribute float aOuterDistance;
+            attribute float aLowerLip;
             varying vec2 vDisplayUv;
             varying vec2 vFramebufferUv;
-            varying vec2 vLipUv;
+            varying float vOuterDistance;
+            varying float vLowerLip;
             void main() {
                 gl_Position = vec4(aPosition, 0.0, 1.0);
                 vDisplayUv = vec2(aPosition.x * 0.5 + 0.5, 0.5 - aPosition.y * 0.5);
                 vFramebufferUv = aPosition * 0.5 + 0.5;
-                vLipUv = aLipUv;
+                vOuterDistance = aOuterDistance;
+                vLowerLip = aLowerLip;
             }
         """
 
@@ -1827,10 +1969,12 @@ internal class ArCoreFaceAnchorRenderer(
             uniform vec2 uUvBottomRight;
             uniform vec2 uUvTopLeft;
             uniform vec2 uUvTopRight;
-            uniform float uOuterFeatherFraction;
+            uniform float uOuterFeatherPixels;
+            uniform float uLowerLinerContainment;
             varying vec2 vDisplayUv;
             varying vec2 vFramebufferUv;
-            varying vec2 vLipUv;
+            varying float vOuterDistance;
+            varying float vLowerLip;
 
             vec2 compositeCameraUv(vec2 displayUv) {
                 vec2 top = mix(uUvTopLeft, uUvTopRight, displayUv.x);
@@ -1853,18 +1997,19 @@ internal class ArCoreFaceAnchorRenderer(
                 vec3 camera = texture2D(uCamera, compositeCameraUv(vDisplayUv)).rgb;
                 vec4 blurredLip = texture2D(uBlurredLip, vFramebufferUv);
                 vec3 materialDelta = (blurredLip.rgb - 0.5019608) / 0.4980392;
-                // The corner carrier is much thinner than the lip body. A body-width feather
-                // erases its tip. Match LipMeshTessellator's local 12% arc support, leaving the
-                // existing outer feather unchanged everywhere else and the inner edge untouched.
-                float cornerDistance = min(vLipUv.y, 1.0 - vLipUv.y);
-                float cornerWeight = 1.0 - smoothstep(0.0, 0.12, cornerDistance);
-                float featherFraction = mix(uOuterFeatherFraction,
-                    min(uOuterFeatherFraction, 0.10), cornerWeight);
+                // Complete the transition at the coverage edge: measured upper contour and
+                // bounded adaptive lower contour. Expanded carriers provide raster support;
+                // the final soft tail stays in pixel units instead of scaling with lip thickness.
                 float outerFeather = smoothstep(
+                    -uOuterFeatherPixels,
                     0.0,
-                    featherFraction,
-                    clamp(vLipUv.x, 0.0, 1.0)
+                    vOuterDistance
                 );
+                // A visible liner shares this edge. Keep lipstick's lower soft tail inside
+                // that line; standalone lipstick retains its accepted exterior feather.
+                float linerEdge = smoothstep(0.0, 1.0, vOuterDistance);
+                outerFeather = mix(outerFeather, linerEdge,
+                    uLowerLinerContainment * vLowerLip);
                 if (uIosDevMaterial > 0.5) {
                     vec3 iosComposited = compositeLinearToSrgb(mix(
                         compositeSrgbToLinear(camera), compositeSrgbToLinear(blurredLip.rgb),

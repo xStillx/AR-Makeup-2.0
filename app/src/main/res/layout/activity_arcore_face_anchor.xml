@@ -76,6 +76,35 @@
             android:layout_height="wrap_content"
             android:orientation="vertical">
 
+            <com.google.android.material.button.MaterialButtonToggleGroup
+                android:id="@+id/makeup_tool_group"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginHorizontal="10dp"
+                android:layout_marginTop="6dp"
+                app:checkedButton="@id/tool_lipstick"
+                app:selectionRequired="true"
+                app:singleSelection="true">
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/tool_lipstick"
+                    style="@style/LipTuningToggle"
+                    android:text="@string/tool_lipstick" />
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/tool_liner"
+                    style="@style/LipTuningToggle"
+                    android:text="@string/tool_liner" />
+            </com.google.android.material.button.MaterialButtonToggleGroup>
+
+            <com.google.android.material.switchmaterial.SwitchMaterial
+                android:id="@+id/lip_contour_points"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:paddingHorizontal="14dp"
+                android:checked="false"
+                android:text="@string/lip_contour_points"
+                android:textColor="@color/text_primary_on_dark"
+                android:textSize="13sp" />
+
             <HorizontalScrollView
                 android:id="@+id/lip_shade_scroll"
                 android:layout_width="match_parent"
@@ -142,6 +171,69 @@
             </LinearLayout>
 
             <ScrollView
+                android:id="@+id/liner_tuning_panel"
+                android:layout_width="match_parent"
+                android:layout_height="180dp"
+                android:clipToPadding="false"
+                android:visibility="gone">
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:paddingHorizontal="14dp"
+                    android:paddingBottom="12dp">
+                <com.google.android.material.switchmaterial.SwitchMaterial
+                    android:id="@+id/liner_enabled"
+                    android:layout_width="match_parent"
+                    android:layout_height="48dp"
+                    android:text="@string/liner_enabled"
+                    android:textColor="@color/text_primary_on_dark" />
+                <TextView
+                    android:id="@+id/liner_opacity_label"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/liner_intensity"
+                    android:textColor="@color/text_primary_on_dark"
+                    android:textSize="13sp" />
+                <SeekBar
+                    android:id="@+id/liner_opacity"
+                    android:layout_width="match_parent"
+                    android:layout_height="48dp"
+                    android:contentDescription="@string/liner_intensity"
+                    android:max="100"
+                    android:progress="76" />
+                <TextView
+                    android:id="@+id/liner_thickness_label"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/liner_thickness"
+                    android:textColor="@color/text_primary_on_dark"
+                    android:textSize="13sp" />
+                <SeekBar
+                    android:id="@+id/liner_thickness"
+                    android:layout_width="match_parent"
+                    android:layout_height="48dp"
+                    android:contentDescription="@string/liner_thickness"
+                    android:max="175"
+                    android:progress="175" />
+                <TextView
+                    android:id="@+id/liner_blur_label"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/liner_blur"
+                    android:textColor="@color/text_primary_on_dark"
+                    android:textSize="13sp" />
+                <SeekBar
+                    android:id="@+id/liner_blur"
+                    android:layout_width="match_parent"
+                    android:layout_height="48dp"
+                    android:contentDescription="@string/liner_blur"
+                    android:max="200"
+                    android:progress="200" />
+                </LinearLayout>
+            </ScrollView>
+
+            <ScrollView
                 android:id="@+id/tuning_scroll"
                 android:layout_width="match_parent"
                 android:layout_height="180dp"
@@ -156,6 +248,30 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:orientation="vertical">
+
+                    <com.google.android.material.switchmaterial.SwitchMaterial
+                        android:id="@+id/lipstick_enabled"
+                        android:layout_width="match_parent"
+                        android:layout_height="48dp"
+                        android:text="@string/lipstick_enabled"
+                        android:textColor="@color/text_primary_on_dark" />
+
+                    <TextView
+                        android:id="@+id/lower_lip_coverage_label"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:labelFor="@id/lower_lip_coverage"
+                        android:text="@string/lower_lip_coverage"
+                        android:textColor="@color/text_primary_on_dark"
+                        android:textSize="13sp" />
+
+                    <SeekBar
+                        android:id="@+id/lower_lip_coverage"
+                        android:layout_width="match_parent"
+                        android:layout_height="48dp"
+                        android:contentDescription="@string/lower_lip_coverage"
+                        android:max="12"
+                        android:progress="4" />
 
                     <TextView
                         style="@style/LipTuningSection"

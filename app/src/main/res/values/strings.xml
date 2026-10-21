@@ -1,4 +1,17 @@
 <resources>
+    <string name="tool_lipstick">Помада</string>
+    <string name="tool_liner">Карандаш</string>
+    <string name="liner_enabled">Показывать карандаш</string>
+    <string name="lipstick_enabled">Показывать помаду</string>
+    <string name="lower_lip_coverage">Расширение нижнего контура</string>
+    <string name="lower_lip_coverage_value">Расширение нижнего контура: %1$d px</string>
+    <string name="lip_contour_points">Точки внешнего контура</string>
+    <string name="liner_intensity">Интенсивность карандаша</string>
+    <string name="liner_intensity_value">Интенсивность карандаша: %1$d%%</string>
+    <string name="liner_thickness">Толщина карандаша</string>
+    <string name="liner_thickness_value">Толщина карандаша: %1$d%%</string>
+    <string name="liner_blur">Размытие контура</string>
+    <string name="liner_blur_value">Размытие контура: %1$d%%</string>
     <string name="app_name">AR Makeup</string>
     <string name="camera_permission_title">Нужен доступ к камере</string>
     <string name="camera_permission_message">Изображение обрабатывается только на устройстве и никуда не отправляется.</string>

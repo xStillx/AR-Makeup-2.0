@@ -40,6 +40,9 @@ import com.example.armakeup.makeup.LipstickTexture
 import com.example.armakeup.makeup.LipstickColor
 import com.example.armakeup.makeup.LipstickColorCatalog
 import com.example.armakeup.makeup.LipColorSwatch
+import com.example.armakeup.makeup.LipLinerCatalog
+import com.example.armakeup.makeup.LipLinerStyle
+import com.example.armakeup.makeup.LipMeshTessellator
 import com.google.ar.core.ArCoreApk
 import com.google.ar.core.Config
 import com.google.ar.core.Session
@@ -65,6 +68,8 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
     private var resumed = false
     private var selectedColorRenderingMode = LipColorRenderingMode.IOS_REFERENCE
     private var selectedFinish = LipstickFinish.MATTE
+    private var lipstickEnabled = true
+    private var lowerLipExtensionPixels = LipMeshTessellator.DEFAULT_LOWER_OUTER_EXTENSION_PIXELS
     private var tuning = LipstickTuning.defaultsFor(selectedColorRenderingMode, selectedFinish)
     private var tuningExpanded = true
     private var updatingTuningControls = false
@@ -75,6 +80,15 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
     private val sharedPigmentOpacities = mutableMapOf<LipColorRenderingMode, Float>()
     private var selectedShadeKey: String? = null
     private val shadeControls = mutableListOf<ShadeControl>()
+    private var editingLiner = false
+    private var selectedLinerShadeId = LipLinerCatalog.shades.first().id
+    private var linerStyle = LipLinerStyle()
+    private var updatingLinerControls = false
+
+    private data class PaletteEntry(
+        val key: String, val product: String, val name: String, val color: LipstickColor,
+        val select: () -> Unit,
+    )
 
     private data class ShadeControl(
         val key: String,
@@ -131,6 +145,10 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
         renderer.setColorRenderingMode(selectedColorRenderingMode)
         renderer.setLipstickTuning(tuning)
         renderer.setLipstickFinish(selectedFinish)
+        bindLipstickVisibility()
+        bindLowerLipCoverage()
+        bindLipContourPoints()
+        bindLinerControls()
         createShadePalette()
         createTuningControls()
         bindPanelActions()
@@ -216,12 +234,18 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
     private fun bindPanelActions() {
         binding.toggleTuning.setOnClickListener {
             tuningExpanded = !tuningExpanded
-            binding.tuningScroll.visibility = if (tuningExpanded) View.VISIBLE else View.GONE
+            updateToolPanels()
             binding.toggleTuning.setText(
                 if (tuningExpanded) R.string.tuning_collapse else R.string.tuning_expand,
             )
         }
         binding.resetTuning.setOnClickListener {
+            if (editingLiner) {
+                linerStyle = linerStyle.copy(opacity = 0.76f, thickness = 2f, blur = 2f)
+                updateLinerControls()
+                persistLiner()
+                return@setOnClickListener
+            }
             if (selectedFinish != LipstickFinish.TRACKING_TEST) {
                 sharedProductDensity?.let {
                     sharedPigmentOpacities[selectedColorRenderingMode] = it.initialPigmentOpacity(selectedColorRenderingMode)
@@ -233,11 +257,26 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
             )
             renderer.setLipstickTuning(tuning)
             updateTuningControls()
+            binding.lowerLipCoverage.progress = LipMeshTessellator.DEFAULT_LOWER_OUTER_EXTENSION_PIXELS.roundToInt()
             saveTuning()
         }
         binding.copyTuning.setOnClickListener {
             val text = buildString {
+                if (editingLiner) {
+                    appendLine("tool=LIP_LINER")
+                    appendLine("liner_enabled=${linerStyle.enabled}")
+                    appendLine("liner_shade=$selectedLinerShadeId")
+                    appendLine("liner_red=${linerStyle.color.red8Bit}")
+                    appendLine("liner_green=${linerStyle.color.green8Bit}")
+                    appendLine("liner_blue=${linerStyle.color.blue8Bit}")
+                    appendLine("liner_opacity=${String.format(Locale.US, "%.2f", linerStyle.opacity)}")
+                    appendLine("liner_thickness=${String.format(Locale.US, "%.2f", linerStyle.thickness)}")
+                    appendLine("liner_blur=${String.format(Locale.US, "%.2f", linerStyle.blur)}")
+                    return@buildString
+                }
                 appendLine("rendering_mode=${selectedColorRenderingMode.name}")
+                appendLine("lipstick_enabled=$lipstickEnabled")
+                appendLine("lower_lip_outer_extension_pixels=${lowerLipExtensionPixels.roundToInt()}")
                 appendLine("finish=${selectedFinish.name}")
                 LipstickTuningParameter.values().forEach { parameter ->
                     append(parameter.name.lowercase(Locale.US))
@@ -251,15 +290,187 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
         }
     }
 
+    private fun bindLipstickVisibility() {
+        val preferences = getSharedPreferences(TUNING_PREFERENCES, Context.MODE_PRIVATE)
+        lipstickEnabled = preferences.getBoolean(LIPSTICK_ENABLED_KEY, true)
+        binding.lipstickEnabled.isChecked = lipstickEnabled
+        renderer.setLipstickEnabled(lipstickEnabled)
+        binding.lipstickEnabled.setOnCheckedChangeListener { _, enabled ->
+            lipstickEnabled = enabled
+            renderer.setLipstickEnabled(enabled)
+            preferences.edit().putBoolean(LIPSTICK_ENABLED_KEY, enabled).apply()
+        }
+    }
+
+    private fun bindLowerLipCoverage() {
+        val preferences = getSharedPreferences(TUNING_PREFERENCES, Context.MODE_PRIVATE)
+        val defaultPixels = LipMeshTessellator.DEFAULT_LOWER_OUTER_EXTENSION_PIXELS
+        // Adopt the user's approved 4px once; later manual choices remain persistent.
+        val approvedDefaultAdopted = preferences.getBoolean(LOWER_LIP_EXTENSION_4PX_ADOPTED_KEY, false)
+        val stored = if (approvedDefaultAdopted) {
+            preferences.getFloat(LOWER_LIP_EXTENSION_PIXELS_KEY, defaultPixels)
+        } else defaultPixels
+        val progress = (if (stored.isFinite()) stored else defaultPixels)
+            .coerceIn(0f, LipMeshTessellator.MAX_LOWER_OUTER_EXTENSION_PIXELS).roundToInt()
+        lowerLipExtensionPixels = progress.toFloat()
+        if (!approvedDefaultAdopted || !preferences.contains(LOWER_LIP_EXTENSION_PIXELS_KEY) ||
+            stored != lowerLipExtensionPixels) {
+            preferences.edit().putFloat(LOWER_LIP_EXTENSION_PIXELS_KEY, lowerLipExtensionPixels)
+                .putBoolean(LOWER_LIP_EXTENSION_4PX_ADOPTED_KEY, true).apply()
+        }
+        binding.lowerLipCoverage.max = LipMeshTessellator.MAX_LOWER_OUTER_EXTENSION_PIXELS.roundToInt()
+        binding.lowerLipCoverage.keyProgressIncrement = 1
+        binding.lowerLipCoverage.progress = progress
+        binding.lowerLipCoverageLabel.text = getString(R.string.lower_lip_coverage_value, progress)
+        binding.lowerLipCoverage.contentDescription = binding.lowerLipCoverageLabel.text
+        renderer.setLowerLipExtensionPixels(lowerLipExtensionPixels)
+        binding.lowerLipCoverage.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(bar: SeekBar, progress: Int, fromUser: Boolean) {
+                lowerLipExtensionPixels = progress.toFloat()
+                binding.lowerLipCoverageLabel.text = getString(R.string.lower_lip_coverage_value, progress)
+                binding.lowerLipCoverage.contentDescription = binding.lowerLipCoverageLabel.text
+                renderer.setLowerLipExtensionPixels(lowerLipExtensionPixels)
+                preferences.edit().putFloat(LOWER_LIP_EXTENSION_PIXELS_KEY, lowerLipExtensionPixels).apply()
+            }
+            override fun onStartTrackingTouch(bar: SeekBar) = Unit
+            override fun onStopTrackingTouch(bar: SeekBar) = Unit
+        })
+    }
+
+    private fun bindLipContourPoints() {
+        val preferences = getSharedPreferences(TUNING_PREFERENCES, Context.MODE_PRIVATE)
+        val enabled = preferences.getBoolean(LIP_CONTOUR_POINTS_KEY, false)
+        binding.lipContourPoints.isChecked = enabled
+        renderer.setLipContourPointsEnabled(enabled)
+        binding.lipContourPoints.setOnCheckedChangeListener { _, checked ->
+            renderer.setLipContourPointsEnabled(checked)
+            preferences.edit().putBoolean(LIP_CONTOUR_POINTS_KEY, checked).apply()
+        }
+    }
+
+    private fun bindLinerControls() {
+        val preferences = getSharedPreferences(TUNING_PREFERENCES, Context.MODE_PRIVATE)
+        // Adopt the user's approved 200%/200% once; later manual changes remain persistent.
+        if (!preferences.getBoolean("liner_shape_200_adopted_v1", false)) {
+            preferences.edit().putFloat("liner_thickness_v1", 2f)
+                .putFloat("liner_blur_v1", 2f)
+                .putBoolean("liner_shape_200_adopted_v1", true).apply()
+        }
+        val shade = LipLinerCatalog.shades.firstOrNull {
+            it.id == preferences.getString("liner_shade_v1", null)
+        } ?: LipLinerCatalog.shades.first()
+        selectedLinerShadeId = shade.id
+        linerStyle = LipLinerStyle(
+            enabled = preferences.getBoolean("liner_enabled_v1", false),
+            color = shade.color,
+            opacity = preferences.getFloat("liner_opacity_v1", 0.76f)
+                .takeIf { it.isFinite() }?.coerceIn(0f, 1f) ?: 0.76f,
+            thickness = preferences.getFloat("liner_thickness_v1", 2f)
+                .takeIf { it.isFinite() }?.coerceIn(0.25f, 2f) ?: 2f,
+            blur = preferences.getFloat("liner_blur_v1", 2f)
+                .takeIf { it.isFinite() }?.coerceIn(0f, 2f) ?: 2f,
+        )
+        editingLiner = preferences.getBoolean("editing_liner_v1", false)
+        binding.makeupToolGroup.check(if (editingLiner) R.id.tool_liner else R.id.tool_lipstick)
+        updateLinerControls()
+        updateToolPanels()
+        binding.makeupToolGroup.addOnButtonCheckedListener { _, id, checked ->
+            if (!checked) return@addOnButtonCheckedListener
+            editingLiner = id == R.id.tool_liner
+            createShadePalette()
+            updateToolPanels()
+            persistLiner()
+        }
+        binding.linerEnabled.setOnCheckedChangeListener { _, enabled ->
+            if (updatingLinerControls) return@setOnCheckedChangeListener
+            linerStyle = linerStyle.copy(enabled = enabled)
+            renderer.setLipLinerStyle(linerStyle)
+            persistLiner()
+        }
+        binding.linerOpacity.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(bar: SeekBar, progress: Int, fromUser: Boolean) {
+                if (updatingLinerControls || !fromUser) return
+                linerStyle = linerStyle.copy(opacity = progress / 100f)
+                renderer.setLipLinerStyle(linerStyle)
+                binding.linerOpacityLabel.text = getString(R.string.liner_intensity_value, progress)
+            }
+            override fun onStartTrackingTouch(bar: SeekBar) = Unit
+            override fun onStopTrackingTouch(bar: SeekBar) = persistLiner()
+        })
+        bindLinerShapeSlider(binding.linerThickness) { progress ->
+            linerStyle.copy(thickness = (progress + 25) / 100f)
+        }
+        bindLinerShapeSlider(binding.linerBlur) { progress ->
+            linerStyle.copy(blur = progress / 100f)
+        }
+    }
+
+    private fun bindLinerShapeSlider(bar: SeekBar, update: (Int) -> LipLinerStyle) {
+        bar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(bar: SeekBar, progress: Int, fromUser: Boolean) {
+                if (updatingLinerControls || !fromUser) return
+                linerStyle = update(progress)
+                updateLinerControls()
+            }
+            override fun onStartTrackingTouch(bar: SeekBar) = Unit
+            override fun onStopTrackingTouch(bar: SeekBar) = persistLiner()
+        })
+    }
+
+    private fun updateToolPanels() {
+        binding.tuningScroll.visibility = if (tuningExpanded && !editingLiner) View.VISIBLE else View.GONE
+        binding.linerTuningPanel.visibility = if (tuningExpanded && editingLiner) View.VISIBLE else View.GONE
+    }
+
+    private fun updateLinerControls() {
+        updatingLinerControls = true
+        binding.linerEnabled.isChecked = linerStyle.enabled
+        val progress = (linerStyle.opacity * 100).roundToInt()
+        binding.linerOpacity.progress = progress
+        binding.linerOpacityLabel.text = getString(R.string.liner_intensity_value, progress)
+        val thicknessPercent = (linerStyle.thickness * 100).roundToInt()
+        binding.linerThickness.progress = (thicknessPercent - 25).coerceIn(0, 175)
+        binding.linerThicknessLabel.text = getString(R.string.liner_thickness_value, thicknessPercent)
+        val blurPercent = (linerStyle.blur * 100).roundToInt()
+        binding.linerBlur.progress = blurPercent.coerceIn(0, 200)
+        binding.linerBlurLabel.text = getString(R.string.liner_blur_value, blurPercent)
+        updatingLinerControls = false
+        renderer.setLipLinerStyle(linerStyle)
+    }
+
+    private fun persistLiner() {
+        getSharedPreferences(TUNING_PREFERENCES, Context.MODE_PRIVATE).edit()
+            .putString("liner_shade_v1", selectedLinerShadeId)
+            .putBoolean("liner_enabled_v1", linerStyle.enabled)
+            .putFloat("liner_opacity_v1", linerStyle.opacity)
+            .putFloat("liner_thickness_v1", linerStyle.thickness)
+            .putFloat("liner_blur_v1", linerStyle.blur)
+            .putBoolean("editing_liner_v1", editingLiner)
+            .apply()
+    }
+
     private fun createShadePalette() {
-        LipstickColorCatalog.swatches.forEach { swatch ->
+        binding.lipShadeContainer.removeAllViews()
+        shadeControls.clear()
+        val palette = if (editingLiner) LipLinerCatalog.shades.map { shade ->
+            PaletteEntry(shade.id, shade.product, shade.name, shade.color) {
+                selectedLinerShadeId = shade.id
+                linerStyle = linerStyle.copy(enabled = true, color = shade.color)
+                updateLinerControls()
+                updateShadeSelection()
+                persistLiner()
+            }
+        } else LipstickColorCatalog.swatches.map { swatch ->
+            PaletteEntry(swatch.key, swatch.product.name, swatch.shade.name, swatch.shade.color) { selectShade(swatch) }
+        }
+        palette.forEach { entry ->
             val item = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 gravity = Gravity.CENTER_HORIZONTAL
                 setPadding(dp(6), dp(8), dp(6), dp(4))
                 isFocusable = true
                 contentDescription = getString(
-                    R.string.lip_shade_accessibility, swatch.product.name, swatch.shade.name,
+                    R.string.lip_shade_accessibility, entry.product, entry.name,
                 )
                 val attributes = obtainStyledAttributes(intArrayOf(android.R.attr.selectableItemBackground))
                 background = attributes.getDrawable(0)
@@ -273,10 +484,10 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
                         info.isChecked = host.isSelected
                     }
                 }
-                setOnClickListener { selectShade(swatch) }
+                setOnClickListener { entry.select() }
             }
             val productLabel = TextView(this).apply {
-                text = swatch.product.name
+                text = entry.product
                 textSize = 11f
                 minLines = 2
                 maxLines = 2
@@ -291,7 +502,7 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
             ).apply { bottomMargin = dp(6) })
 
             val circle = FrameLayout(this)
-            val color = swatch.shade.color
+            val color = entry.color
             circle.addView(View(this).apply {
                 background = GradientDrawable().apply {
                     shape = GradientDrawable.OVAL
@@ -312,7 +523,7 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
             item.addView(circle, LinearLayout.LayoutParams(dp(58), dp(58)))
 
             val shadeLabel = TextView(this).apply {
-                text = swatch.shade.name
+                text = entry.name
                 textSize = 12f
                 minLines = 2
                 maxLines = 2
@@ -327,11 +538,11 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
             binding.lipShadeContainer.addView(item, LinearLayout.LayoutParams(
                 dp(128), ViewGroup.LayoutParams.WRAP_CONTENT,
             ))
-            shadeControls += ShadeControl(swatch.key, item, ring, shadeLabel)
+            shadeControls += ShadeControl(entry.key, item, ring, shadeLabel)
         }
         updateShadeSelection()
         binding.lipShadeScroll.post {
-            shadeControls.firstOrNull { it.key == selectedShadeKey }?.item?.let { selected ->
+            shadeControls.firstOrNull { it.key == (if (editingLiner) selectedLinerShadeId else selectedShadeKey) }?.item?.let { selected ->
                 binding.lipShadeScroll.scrollTo(
                     (selected.left - (binding.lipShadeScroll.width - selected.width) / 2).coerceAtLeast(0), 0,
                 )
@@ -379,7 +590,7 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
 
     private fun updateShadeSelection() {
         shadeControls.forEach { control ->
-            val selected = control.key == selectedShadeKey
+            val selected = control.key == (if (editingLiner) selectedLinerShadeId else selectedShadeKey)
             control.item.isSelected = selected
             control.selectionRing.visibility = if (selected) View.VISIBLE else View.INVISIBLE
             control.shadeLabel.setTextColor(ContextCompat.getColor(this,
@@ -582,6 +793,7 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
     }
 
     private fun saveTuning() {
+        persistLiner()
         getSharedPreferences(TUNING_PREFERENCES, Context.MODE_PRIVATE).edit().apply {
             putString(selectedFinishKey(selectedColorRenderingMode), selectedFinish.name)
             LipstickTuningParameter.values().forEach { parameter ->
@@ -817,6 +1029,10 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
         const val TARGET_RENDER_INTERVAL_NS = 1_000_000_000L / 60L
         const val SLIDER_STEPS = 1_000
         const val TUNING_PREFERENCES = "lipstick_tuning_v2"
+        const val LIPSTICK_ENABLED_KEY = "lipstick_enabled_v1"
+        const val LOWER_LIP_EXTENSION_PIXELS_KEY = "lower_lip_outer_extension_pixels_v1"
+        const val LOWER_LIP_EXTENSION_4PX_ADOPTED_KEY = "lower_lip_extension_4px_adopted_v1"
+        const val LIP_CONTOUR_POINTS_KEY = "lip_contour_points_v1"
         const val COLOR_RENDERING_MODE_KEY = "color_rendering_mode"
         const val SHARED_PIGMENT_HEX_KEY = "shared_pigment_srgb_hex_v1"
         const val SELECTED_SHADE_KEY = "selected_lip_shade_key_v1"

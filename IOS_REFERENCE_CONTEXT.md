@@ -1,5 +1,19 @@
 # iOS reference — устройство проекта и ориентиры переноса
 
+## Конечный вариант Android принят — 2026-10-21
+
+Пользователь принял текущие помаду и карандаш как конечный вариант после согласования их нижней границы на 4 экранных px. Сохранить принятые материалы, настройки и независимые палитры/выключатели. Актуальное решение и проверки — в верхних разделах PROJECT_CONTEXT.md и CHAT_HANDOFF.md; описания прежних непринятых вариантов ниже остаются историей переноса и не требуют новых изменений Android ради паритета с iOS. Пользователь разрешил коммит накопленных изменений; push не запрошен.
+
+## Итерация Android-карандаша после оценки пользователя — 2026-10-20
+
+Первый пятиштриховый вариант не принят («неестественный»). По следующему разрешению пользователя Android заменяет bands непрерывным асимметричным Gaussian feather и добавляет слабый bounded luminance transfer из spatial9-tap low-pass исходной камеры exact Sync. Это намеренная Android-итерация, не перенос ещё одной формулы из iOS. Геометрия,3 source RGB и opacity controls прежние; помада не меняется. Ограничения, коэффициенты, проверки и актуальный device статус — в верхней секции PROJECT_CONTEXT.md.
+
+## Карандаш: исследован новый dev, адаптирован на Android — 2026-10-20
+
+Ориентир карандаша — dev cdc2366d67b943d20dcd066ca3d7c2eb5e8070ed от14 октября, а не прежний42318424/main. В ContentView.swift504–533 есть Divage/Vivienne Sabo,3 RGB; linerOpacity0.76 передаётся независимо от помады через FaceTrackingView/Coordinator. LipTextureRenderer.swift930–1148 действительно строит/кэширует linerOpacityImage через Core Graphics: cubic curve, inset upper3.8/lower1.6 на reference height112, вложенные stroke widths40/28/17/10/6 с alpha0.06/0.30/0.60/0.70/0.70, clipping faint passes внутрь губ и radial corner fade. LipMeshRenderer.swift238–253/278–280/549 добавляет constant-colour alpha material, независимый от lighting помады; две material slots подключены к одной отслеживаемой геометрии. Это не отдельный Metal-шейдер карандаша.
+
+По явной команде пользователя Android получил независимые LipLinerCatalog/Style, LipLinerMesh и LipLinerMaterial и вкладку редактора. Вместо CPU bitmap применён один GPU shader draw на lip-side mesh с теми же принятыми Sync/contours; пять штрихов вычисляются аналитически. Весь слой ограничен областью губ (без маленькой наружной половины core исходника), добавлен aperture-side fade, radial corner mask адаптирована к arc fade. RGB/интенсивность независимы от помады, старт enabled=false. Формулы помады обоих режимов не менялись. Никаких новых ML/assets/SDK. Локальные GLSL/mesh checks пройдены; device визуальный паритет и performance не подтверждены. Полное текущее состояние/ограничения — в PROJECT_CONTEXT.md.
+
 ## Дополнение Android: Oil/Tint реализованы — 2026-10-14
 
 По новой явной команде пользователя Oil/Tint dev42318424 перенесены в IOS_REFERENCE. GUERLAIN309/775 автоматически выбирают OIL, OK Beauty Valkyrie/Safari — TINT; две отдельные кнопки доступны только в «Как на iOS». UNIFIED сохраняет прежнее поведение каталога без переключения для этих типов. Финиш хранится отдельно по режимам, прежний UNIFIED preference key сохранён.

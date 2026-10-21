@@ -29,6 +29,9 @@ internal class LipMeshTessellator(
     val indices: ShortArray = buildIndices()
 
     private val surfacePositionScratch = FloatArray(verticesPerLip * SURFACE_POSITION_COMPONENT_COUNT)
+    private val measuredOuterArcScratch = FloatArray(samplesPerLip * POINT_SIZE * LIP_COUNT)
+    private val measuredLowerInnerArcScratch = FloatArray(samplesPerLip * POINT_SIZE)
+    private val lowerOuterCoverageOffsetsPixels = FloatArray(samplesPerLip * POINT_SIZE)
 
     /**
      * Interleaved display x/y, reconstructed normal, coverage, outer-to-inner coordinate and arc.
@@ -54,6 +57,9 @@ internal class LipMeshTessellator(
         val upperInnerArc = sampleArc(innerContour, UPPER_ARC_INDICES)
         val lowerOuterArc = sampleArc(outerContour, LOWER_ARC_INDICES)
         val lowerInnerArc = sampleArc(innerContour, LOWER_ARC_INDICES)
+        upperOuterArc.copyInto(measuredOuterArcScratch)
+        lowerOuterArc.copyInto(measuredOuterArcScratch, samplesPerLip * POINT_SIZE)
+        lowerInnerArc.copyInto(measuredLowerInnerArcScratch)
         expandBoundaries(upperOuterArc, upperInnerArc, outerCarrierExpansion, innerSeamExpansion)
         expandBoundaries(lowerOuterArc, lowerInnerArc, outerCarrierExpansion, innerSeamExpansion)
         expandCornerCarriers(upperOuterArc, cornerCarrierExpansion)
@@ -81,6 +87,131 @@ internal class LipMeshTessellator(
             innerCarrierFeather = innerCarrierFeather,
         )
         return output
+    }
+
+    /**
+     * Signed distance to the measured outer curve, positive on the lip side, in viewport pixels.
+     * Call immediately after tessellate with its returned vertices, before reusing this tessellator.
+     * Carrier expansion changes positions but never the curve used to anchor the final edge.
+     */
+    fun writeOuterBoundaryDistances(
+        vertices: FloatArray,
+        viewportWidth: Int,
+        viewportHeight: Int,
+        output: FloatArray,
+    ) {
+        require(vertices.size == vertexCount * VERTEX_COMPONENT_COUNT)
+        require(output.size == vertexCount)
+        require(viewportWidth > 0 && viewportHeight > 0)
+        val rings = RING_FRACTIONS.size
+        repeat(LIP_COUNT) { lip ->
+            val arcStart = lip * samplesPerLip * POINT_SIZE
+            repeat(samplesPerLip) { sample ->
+                val point = arcStart + sample * POINT_SIZE
+                val previous = arcStart + (sample - 1).coerceAtLeast(0) * POINT_SIZE
+                val next = arcStart + (sample + 1).coerceAtMost(samplesPerLip - 1) * POINT_SIZE
+                val outerX = measuredOuterArcScratch[point]
+                val outerY = measuredOuterArcScratch[point + 1]
+                val tangentX = (measuredOuterArcScratch[next] - measuredOuterArcScratch[previous]) * viewportWidth
+                val tangentY = (measuredOuterArcScratch[next + 1] - measuredOuterArcScratch[previous + 1]) * viewportHeight
+                val length = hypot(tangentX, tangentY).coerceAtLeast(MIN_NORMAL_LENGTH)
+                var normalX = -tangentY / length
+                var normalY = tangentX / length
+                val firstVertex = lip * verticesPerLip + sample * rings
+                val innerOffset = (firstVertex + rings - 1) * VERTEX_COMPONENT_COUNT
+                val acrossX = (vertices[innerOffset] - outerX) * viewportWidth
+                val acrossY = (vertices[innerOffset + 1] - outerY) * viewportHeight
+                if (normalX * acrossX + normalY * acrossY < 0f) {
+                    normalX = -normalX
+                    normalY = -normalY
+                }
+                repeat(rings) { ring ->
+                    val vertex = firstVertex + ring
+                    val offset = vertex * VERTEX_COMPONENT_COUNT
+                    output[vertex] = (vertices[offset] - outerX) * viewportWidth * normalX +
+                        (vertices[offset + 1] - outerY) * viewportHeight * normalY
+                }
+            }
+        }
+    }
+
+    /**
+     * Extend lipstick's lower outer raster band together with its final coverage edge.
+     * Input must be the native distances just written above for this same tessellation.
+     * The core/inner rings, all material attributes, upper lip and both corner tips stay fixed.
+     */
+    fun applyAdaptiveLowerOuterCoverage(
+        vertices: FloatArray,
+        viewportWidth: Int,
+        viewportHeight: Int,
+        distances: FloatArray,
+        extensionPixels: Float = DEFAULT_LOWER_OUTER_EXTENSION_PIXELS,
+    ) {
+        require(viewportWidth > 0 && viewportHeight > 0)
+        require(vertices.size == vertexCount * VERTEX_COMPONENT_COUNT)
+        require(distances.size == vertexCount)
+        require(extensionPixels in 0f..MAX_LOWER_OUTER_EXTENSION_PIXELS)
+        lowerOuterCoverageOffsetsPixels.fill(0f)
+        if (extensionPixels == 0f) return
+        val arcStart = samplesPerLip * POINT_SIZE
+        for (sample in 0 until samplesPerLip) {
+            val point = arcStart + sample * POINT_SIZE
+            val previous = arcStart + (sample - 1).coerceAtLeast(0) * POINT_SIZE
+            val next = arcStart + (sample + 1).coerceAtMost(samplesPerLip - 1) * POINT_SIZE
+            val tangentX = (measuredOuterArcScratch[next] - measuredOuterArcScratch[previous]) * viewportWidth
+            val tangentY = (measuredOuterArcScratch[next + 1] - measuredOuterArcScratch[previous + 1]) * viewportHeight
+            val innerPoint = sample * POINT_SIZE
+            val acrossX = (measuredLowerInnerArcScratch[innerPoint] - measuredOuterArcScratch[point]) * viewportWidth
+            val acrossY = (measuredLowerInnerArcScratch[innerPoint + 1] - measuredOuterArcScratch[point + 1]) * viewportHeight
+            val tangentLength = hypot(tangentX, tangentY).coerceAtLeast(MIN_NORMAL_LENGTH)
+            var normalX = -tangentY / tangentLength
+            var normalY = tangentX / tangentLength
+            if (normalX * acrossX + normalY * acrossY < 0f) {
+                normalX = -normalX
+                normalY = -normalY
+            }
+            // Follow the existing carrier's outer-to-inner cross-section. At large pixel
+            // offsets, independent spline normals can cross near the corner samples.
+            val acrossLength = hypot(acrossX, acrossY).coerceAtLeast(MIN_NORMAL_LENGTH)
+            val directionX = acrossX / acrossLength
+            val directionY = acrossY / acrossLength
+            val normalProjection = (normalX * directionX + normalY * directionY).coerceAtLeast(0f)
+            val arc = sample.toFloat() / (samplesPerLip - 1)
+            val cornerProgress = (minOf(arc, 1f - arc) / CORNER_CARRIER_ARC_FRACTION).coerceIn(0f, 1f)
+            val corner = cornerProgress * cornerProgress * (3f - 2f * cornerProgress)
+            val firstVertex = verticesPerLip + sample * RING_FRACTIONS.size
+            val extension = extensionPixels * corner
+            if (extension <= 0f) continue
+            lowerOuterCoverageOffsetsPixels[sample * POINT_SIZE] = -directionX * extension
+            lowerOuterCoverageOffsetsPixels[sample * POINT_SIZE + 1] = -directionY * extension
+            // Moving only the final gate cannot reveal pixels outside the source mesh. Move the
+            // outer raster band as well; an undersized carrier gets a gradual soft-tail reserve.
+            val tailShortfall = (LOWER_EXTENSION_FEATHER_RESERVE_PIXELS + distances[firstVertex])
+                .coerceAtLeast(0f) / normalProjection.coerceAtLeast(0.01f)
+            val support = extension + minOf(extension, tailShortfall)
+            repeat(RING_FRACTIONS.size) { ring ->
+                val fraction = RING_FRACTIONS[ring]
+                val outerBandWeight = ((ReferenceMatteLipstickProfile.CORE_INSET_FRACTION - fraction) /
+                    (ReferenceMatteLipstickProfile.CORE_INSET_FRACTION -
+                        ReferenceMatteLipstickProfile.MID_INSET_FRACTION)).coerceIn(0f, 1f)
+                val displacement = support * outerBandWeight
+                val vertex = firstVertex + ring
+                if (displacement > 0f) {
+                    val offset = vertex * VERTEX_COMPONENT_COUNT
+                    vertices[offset] -= directionX * displacement / viewportWidth
+                    vertices[offset + 1] -= directionY * displacement / viewportHeight
+                }
+                // Recompute the signed field for the displaced vertex, then move the coverage
+                // edge by the requested amount. Never consume the old carrier as a hard limit.
+                distances[vertex] += (extension - displacement) * normalProjection
+            }
+        }
+    }
+
+    /** Copy the coverage edge, excluding raster-only support, before reusing this tessellator. */
+    fun writeLowerOuterCoverageOffsets(output: FloatArray) {
+        require(output.size == lowerOuterCoverageOffsetsPixels.size)
+        lowerOuterCoverageOffsetsPixels.copyInto(output)
     }
 
     /**
@@ -385,8 +516,11 @@ internal class LipMeshTessellator(
         private const val ARC_BULGE_POWER = 0.65f
         private const val MAX_BOUNDARY_EXPANSION = 0.35f
         private const val MAX_CORNER_CARRIER_EXPANSION = 0.02f
-        // Keep the local composite feather's arc support in sync with this value.
+        // Shared support for the corner carrier and the adaptive lower coverage taper.
         private const val CORNER_CARRIER_ARC_FRACTION = 0.12f
+        const val DEFAULT_LOWER_OUTER_EXTENSION_PIXELS = 4f
+        const val MAX_LOWER_OUTER_EXTENSION_PIXELS = 12f
+        private const val LOWER_EXTENSION_FEATHER_RESERVE_PIXELS = 2f
         private const val INNER_CARRIER_SOLID_FRACTION = 0.40f
         private const val MIN_NORMAL_LENGTH = 1e-7f
         private val UPPER_ARC_INDICES = intArrayOf(0, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10)
