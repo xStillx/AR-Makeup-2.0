@@ -177,7 +177,7 @@
             <LinearLayout
                 android:id="@+id/blush_tuning_panel"
                 android:layout_width="match_parent"
-                android:layout_height="180dp"
+                android:layout_height="wrap_content"
                 android:orientation="vertical"
                 android:paddingHorizontal="14dp"
                 android:paddingBottom="12dp"
@@ -202,7 +202,22 @@
                     android:layout_height="48dp"
                     android:contentDescription="@string/blush_intensity"
                     android:max="150"
-                    android:progress="130" />
+                    android:progress="100" />
+                <TextView
+                    android:id="@+id/blush_saturation_label"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:labelFor="@id/blush_saturation"
+                    android:text="@string/blush_saturation"
+                    android:textColor="@color/text_primary_on_dark"
+                    android:textSize="13sp" />
+                <SeekBar
+                    android:id="@+id/blush_saturation"
+                    android:layout_width="match_parent"
+                    android:layout_height="48dp"
+                    android:contentDescription="@string/blush_saturation"
+                    android:max="200"
+                    android:progress="170" />
                 <TextView
                     android:id="@+id/blush_sync_hint"
                     android:layout_width="match_parent"

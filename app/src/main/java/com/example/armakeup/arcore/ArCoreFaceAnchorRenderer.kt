@@ -545,6 +545,7 @@ internal class ArCoreFaceAnchorRenderer(
         GLES20.glUniform2f(GLES20.glGetUniformLocation(program, "uUvTopRight"), cameraUvCorners[6], cameraUvCorners[7])
         GLES20.glUniform3f(GLES20.glGetUniformLocation(program, "uColor"), style.color.red, style.color.green, style.color.blue)
         GLES20.glUniform1f(GLES20.glGetUniformLocation(program, "uOpacity"), style.opacity)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(program, "uSaturation"), style.saturation)
         GLES20.glUniform4fv(GLES20.glGetUniformLocation(program, "uContour[0]"),
             BlushFaceMesh.CONTOUR_POINTS, contour, 0)
         GLES20.glUniform4fv(GLES20.glGetUniformLocation(program, "uContourParams"), 1, contourParams, 0)

@@ -249,7 +249,8 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
         }
         binding.resetTuning.setOnClickListener {
             if (editingBlush) {
-                blushStyle = blushStyle.copy(opacity = BlushStyle.DEFAULT_OPACITY)
+                blushStyle = blushStyle.copy(opacity = BlushStyle.DEFAULT_OPACITY,
+                    saturation = BlushStyle.DEFAULT_SATURATION)
                 updateBlushControls()
                 persistBlush()
                 return@setOnClickListener
@@ -284,6 +285,7 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
                     appendLine("blush_green=${blushStyle.color.green8Bit}")
                     appendLine("blush_blue=${blushStyle.color.blue8Bit}")
                     appendLine("blush_opacity=${String.format(Locale.US, "%.2f", blushStyle.opacity)}")
+                    appendLine("blush_saturation=${String.format(Locale.US, "%.2f", blushStyle.saturation)}")
                     return@buildString
                 }
                 if (editingLiner) {
@@ -465,6 +467,8 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
             color = shade.color,
             opacity = preferences.getFloat("blush_opacity_v1", BlushStyle.DEFAULT_OPACITY)
                 .takeIf { it.isFinite() }?.coerceIn(0f, BlushStyle.MAX_OPACITY) ?: BlushStyle.DEFAULT_OPACITY,
+            saturation = preferences.getFloat("blush_saturation_v1", BlushStyle.DEFAULT_SATURATION)
+                .takeIf { it.isFinite() }?.coerceIn(0f, BlushStyle.MAX_SATURATION) ?: BlushStyle.DEFAULT_SATURATION,
         )
         updateBlushControls()
         binding.blushEnabled.setOnCheckedChangeListener { _, enabled ->
@@ -483,6 +487,16 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
             override fun onStartTrackingTouch(bar: SeekBar) = Unit
             override fun onStopTrackingTouch(bar: SeekBar) = persistBlush()
         })
+        binding.blushSaturation.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(bar: SeekBar, progress: Int, fromUser: Boolean) {
+                if (updatingBlushControls || !fromUser) return
+                blushStyle = blushStyle.copy(saturation = progress / 100f)
+                updateBlushControls()
+                persistBlush()
+            }
+            override fun onStartTrackingTouch(bar: SeekBar) = Unit
+            override fun onStopTrackingTouch(bar: SeekBar) = persistBlush()
+        })
     }
 
     private fun updateBlushControls() {
@@ -492,6 +506,10 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
         binding.blushOpacity.progress = progress
         binding.blushOpacityLabel.text = getString(R.string.blush_intensity_value, progress)
         binding.blushOpacity.contentDescription = binding.blushOpacityLabel.text
+        val saturationProgress = (blushStyle.saturation * 100).roundToInt()
+        binding.blushSaturation.progress = saturationProgress
+        binding.blushSaturationLabel.text = getString(R.string.blush_saturation_value, saturationProgress)
+        binding.blushSaturation.contentDescription = binding.blushSaturationLabel.text
         updatingBlushControls = false
         renderer.setBlushStyle(blushStyle)
     }
@@ -501,6 +519,7 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
             .putString("blush_shade_v1", selectedBlushShadeId)
             .putBoolean("blush_enabled_v1", blushStyle.enabled)
             .putFloat("blush_opacity_v1", blushStyle.opacity)
+            .putFloat("blush_saturation_v1", blushStyle.saturation)
             .putBoolean("editing_blush_v1", editingBlush)
             .apply()
     }

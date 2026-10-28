@@ -61,5 +61,7 @@
     <string name="blush_enabled">Показывать румяна</string>
     <string name="blush_intensity">Интенсивность румян</string>
     <string name="blush_intensity_value">Интенсивность румян: %1$d%%</string>
+    <string name="blush_saturation">Насыщенность румян</string>
+    <string name="blush_saturation_value">Насыщенность румян: %1$d%%</string>
     <string name="blush_sync_required">Для румян выберите «Sync кадр» в параметрах помады.</string>
 </resources>

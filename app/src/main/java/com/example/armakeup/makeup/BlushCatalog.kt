@@ -16,9 +16,12 @@ internal data class BlushStyle(
     val enabled: Boolean = false,
     val color: LipstickColor = BlushCatalog.shades.first().color,
     val opacity: Float = DEFAULT_OPACITY,
+    val saturation: Float = DEFAULT_SATURATION,
 ) {
     companion object {
-        const val DEFAULT_OPACITY = 1.3f
+        const val DEFAULT_OPACITY = 1f
         const val MAX_OPACITY = 1.5f
+        const val DEFAULT_SATURATION = 1.7f
+        const val MAX_SATURATION = 2f
     }
 }

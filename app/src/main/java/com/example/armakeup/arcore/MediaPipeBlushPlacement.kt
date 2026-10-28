@@ -6,7 +6,7 @@ import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.sqrt
 
-/** Closed cheek boundaries lifted onto the captured surface, independent of camera pose. */
+/** Closed cheek boundaries from paired landmarks and the captured face surface. */
 internal object MediaPipeBlushPlacement {
     var lastDiagnostics = "not_placed"
         private set
@@ -15,8 +15,8 @@ internal object MediaPipeBlushPlacement {
     private fun anchor(a: Int, b: Int = a, weightB: Float = 0f) =
         Anchor(intArrayOf(a, b), floatArrayOf(1f - weightB, weightB))
 
-    // Keep the cheek body; pull only the outer wing slightly inward from the face oval.
-    // Blend on the measured 3D surface, without pose thresholds or visibility switching.
+    // Measured base controls; the body is shaped around the cheek apple below.
+    // Keep the accepted outer wing attached to the same 3D surface.
     // Point numbers on the user's latest sketch are illustrative, not target IDs.
     private val anchors = arrayOf(
         Anchor(intArrayOf(162, 127, 34), floatArrayOf(0.28f, 0.52f, 0.20f)),
@@ -26,6 +26,7 @@ internal object MediaPipeBlushPlacement {
         anchor(116, 123, 0.50f), anchor(234, 227, 0.20f), anchor(127, 34, 0.20f),
     )
     private val mirrors = mapOf(
+        33 to 263, 133 to 362,
         162 to 389, 34 to 264, 127 to 356, 35 to 265, 31 to 261, 111 to 340,
         229 to 449, 118 to 347, 230 to 450, 119 to 348, 231 to 451,
         120 to 349, 101 to 330, 117 to 346, 50 to 280, 116 to 345,
@@ -45,7 +46,7 @@ internal object MediaPipeBlushPlacement {
         lastDiagnostics = "invalid_input"
         if (sourceWidth <= 0 || sourceHeight <= 0 || viewportWidth <= 0 || viewportHeight <= 0 ||
             rotationDegrees % 90 != 0 || coordinates.size < (454 + 1) * 3) return null
-        // Preserve the accepted frontal outline exactly. Retract only the three
+        // Keep the accepted temple shaping. Retract only the three outer
         // temple controls smoothly during turns, using this paired surface's pose.
         // No visibility switch or geometry history: the same pose gives the same shape.
         val pose = mesh.projectionMatrix
@@ -164,6 +165,46 @@ internal object MediaPipeBlushPlacement {
                 diagnostics.add("$centerId:invalid_boundary_$clipped")
                 continue
             }
+            // Start on the cheek apple beneath mid-eye. Eye corners are optional
+            // guides, so an occluded eye never invalidates an otherwise valid cheek.
+            val apple = chart(lifted.getValue(id(101)))
+            val underEye = chart(lifted.getValue(id(230)))
+            fun eyeCorner(index: Int): FloatArray? {
+                val target = screen(id(index)) ?: return null
+                val hit = lift(mesh, target[0], target[1]) ?: return null
+                return if (hit.side * visibleCenter.side > 0f) chart(hit) else null
+            }
+            val outerEye = eyeCorner(33)
+            val innerEye = eyeCorner(133)
+            val midEyeU = if (outerEye != null && innerEye != null)
+                (outerEye[0] + innerEye[0]) * 0.5f else underEye[0]
+            val sign = if (visibleCenter.side < 0f) -1f else 1f
+            val startU = abs(midEyeU)
+            for (i in 1..9) raw[i][0] = sign * maxOf(abs(raw[i][0]), startU)
+            raw[3][1] = minOf(raw[3][1] - 0.002f, apple[1] + 0.006f)
+            raw[4] = floatArrayOf(sign * (startU + 0.0015f), apple[1] + 0.004f)
+            raw[5] = floatArrayOf(sign * startU, apple[1])
+            raw[6] = floatArrayOf(sign * (startU + 0.0015f), apple[1] - 0.004f)
+            // Widen downward locally, tapering before the accepted temple controls.
+            raw[7][1] -= 0.004f
+            raw[8][1] -= 0.0035f
+            raw[9][1] -= 0.0015f
+            // Keep feather calibrated to the untrimmed apple shape from THIS pair.
+            // Shortening the inner tip must not accidentally sharpen the whole cheek.
+            val fullBody = raw.map { it.copyOf() }.toMutableList()
+            var featherBoundary = roundedBoundary(fullBody)
+            if (!simple(featherBoundary) && untangle(fullBody) >= 0)
+                featherBoundary = roundedBoundary(fullBody)
+            val preservedFeather = (minOf(
+                featherBoundary.maxOf { it[0] } - featherBoundary.minOf { it[0] },
+                featherBoundary.maxOf { it[1] } - featherBoundary.minOf { it[1] },
+            ) * 0.22f).coerceIn(0.003f, 0.006f)
+            // Trim only the nose-side start by 4 mm, along the measured cheek chart.
+            val shiftedStartU = startU + 0.004f
+            for (i in 1..9) raw[i][0] = sign * maxOf(abs(raw[i][0]), shiftedStartU)
+            raw[4][0] = sign * (shiftedStartU + 0.0015f)
+            raw[5][0] = sign * shiftedStartU
+            raw[6][0] = sign * (shiftedStartU + 0.0015f)
             var polygon = roundedBoundary(raw)
             var untangled = 0
             if (!simple(polygon)) {
@@ -191,7 +232,7 @@ internal object MediaPipeBlushPlacement {
                 packed[i * 4 + slot * 2] = polygon[i][0]
                 packed[i * 4 + slot * 2 + 1] = polygon[i][1]
             }
-            parameters[slot] = (minOf(width, height) * 0.22f).coerceIn(0.003f, 0.006f)
+            parameters[slot] = preservedFeather
             parameters[slot + 2] = 1f
             val bounds = 4 + slot * 4
             parameters[bounds] = polygon.minOf { it[0] }

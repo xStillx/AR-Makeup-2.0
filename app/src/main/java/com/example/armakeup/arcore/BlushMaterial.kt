@@ -13,42 +13,10 @@ internal object BlushMaterial {
     const val VERTEX_SHADER = """
         attribute vec4 aPosition;
         attribute vec3 aCheek;
-        uniform vec4 uContour[24];
         varying vec3 vCheek;
-        varying vec3 vCheekCore;
         void main() {
             gl_Position = aPosition;
             vCheek = aCheek;
-            // Uniform per cheek. Compute the protected body on vertices rather
-            // than repeating two contour walks for every covered fragment.
-            bool left = aCheek.x < 0.0;
-            vec2 previous = left ? uContour[23].xy : uContour[23].zw;
-            vec2 moment = vec2(0.0);
-            float area = 0.0;
-            for (int i = 0; i < 24; i++) {
-                vec2 current = left ? uContour[i].xy : uContour[i].zw;
-                float cross = previous.x * current.y - current.x * previous.y;
-                area += cross;
-                moment += (previous + current) * cross;
-                previous = current;
-            }
-            vec2 centre = moment / (3.0 * (abs(area) > 0.0000000001 ? area : 1.0));
-            previous = left ? uContour[23].xy : uContour[23].zw;
-            float radiusSquared = 1.0;
-            bool inside = false;
-            for (int i = 0; i < 24; i++) {
-                vec2 current = left ? uContour[i].xy : uContour[i].zw;
-                vec2 edge = current - previous;
-                vec2 offset = centre - previous;
-                float t = clamp(dot(offset, edge) / max(dot(edge, edge), 0.0000000001), 0.0, 1.0);
-                vec2 nearest = offset - edge * t;
-                radiusSquared = min(radiusSquared, dot(nearest, nearest));
-                float dy = abs(edge.y) < 0.0000001 ? 0.0000001 : edge.y;
-                float crossing = previous.x + (centre.y - previous.y) * edge.x / dy;
-                if (((current.y > centre.y) != (previous.y > centre.y)) && centre.x < crossing) inside = !inside;
-                previous = current;
-            }
-            vCheekCore = vec3(centre, inside ? sqrt(radiusSquared) : 0.0);
         }
     """
     const val FRAGMENT_SHADER = """
@@ -64,12 +32,12 @@ internal object BlushMaterial {
         uniform vec2 uUvTopRight;
         uniform vec3 uColor;
         uniform float uOpacity;
+        uniform float uSaturation;
         // Left boundary in xy, right in zw; immutable with the presented camera pair.
         uniform vec4 uContour[24];
         uniform vec4 uContourParams;
         uniform vec4 uContourBounds[2];
         varying vec3 vCheek;
-        varying vec3 vCheekCore;
         vec3 toLinear(vec3 c) {
             return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), c));
         }
@@ -116,6 +84,18 @@ internal object BlushMaterial {
             // Preserve hue: no camera skin RGB is mixed into the source pigment.
             return mix(source, vec3(sourceValue), 0.18 * correction);
         }
+        vec3 withBlushSaturation(vec3 color) {
+            // Keep 100% exactly equal to the preserved material. Apply the user
+            // control after RGB-based correction, without changing its source gates.
+            if (uSaturation == 1.0) return color;
+            float value = max(color.r, max(color.g, color.b));
+            float minimum = min(color.r, min(color.g, color.b));
+            float chroma = value - minimum;
+            if (chroma < 0.00001) return color;
+            // Scale HSV saturation while retaining hue and value at the gamut limit.
+            float scale = min(clamp(uSaturation, 0.0, 2.0), value / chroma);
+            return clamp(vec3(value) + (color - vec3(value)) * scale, 0.0, value);
+        }
         void main() {
             vec2 p = vCheek.xy;
             bool left = p.x < 0.0;
@@ -123,7 +103,7 @@ internal object BlushMaterial {
             if (enabledCheek < 0.5 || uOpacity <= 0.0) discard;
             float feather = max(left ? uContourParams.x : uContourParams.y, 0.0001);
             float blurRadius = feather * 1.8;
-            float rimBlurRadius = blurRadius * 1.45;
+            float rimBlurRadius = blurRadius * 1.90;
             // The original (2t-t*t)^2 mask reaches 50% at t=0.4588039.
             // Keep that edge fixed while spreading the transition to both sides.
             float midpoint = feather * 0.4588039;
@@ -148,21 +128,20 @@ internal object BlushMaterial {
             }
             if (DEBUG_HARD_BOUNDARY && !inside) discard;
             float signedDistance = (inside ? 1.0 : -1.0) * sqrt(distanceSquared);
-            float blend = clamp(0.5 + (signedDistance - midpoint) / (2.0 * blurRadius), 0.0, 1.0);
-            // Widen only the rim around its existing 50% edge. Keep the original
-            // body profile below; the core weight protects the centre exactly.
-            float rimBlend = clamp(0.5 + (signedDistance - midpoint) / (2.0 * rimBlurRadius), 0.0, 1.0);
+            // Broaden only the inner gradient, keeping the entire outer rim exact.
+            // This monotone C1 remap avoids a new seam or a full-density centre line.
+            float innerDepth = max((signedDistance - feather * 0.5) / feather, 0.0);
+            float softInnerDepth = innerDepth / (1.0 + 1.45 * innerDepth);
+            float materialDistance = min(signedDistance, feather * 0.5) + feather * softInnerDepth;
+            // Use the same broad falloff through the body and rim. Switching
+            // back to a narrower kernel inside the body produces a dense stripe.
+            float rimBlend = clamp(0.5 + (materialDistance - midpoint) / (2.0 * rimBlurRadius), 0.0, 1.0);
             float side = 2.0 * abs(rimBlend - 0.5);
             float tail = 1.0 - side;
             float shoulder = side * tail * tail * tail * (1.0 + 3.0 * side);
             float softerBlend = 0.5 + sign(rimBlend - 0.5) * 0.5 * (side - 0.65 * shoulder);
-            float rimWeight = 0.0;
-            if (vCheekCore.z > 0.0001) {
-                float radial = clamp((length(p - vCheekCore.xy) / vCheekCore.z - 0.55) / 0.45, 0.0, 1.0);
-                rimWeight = radial * radial * radial * (10.0 + radial * (6.0 * radial - 15.0));
-            }
-            blend = mix(blend, softerBlend, rimWeight);
-            // Blur only pigment coverage. Preserve the nominal contour and full body;
+            float blend = softerBlend;
+            // Blur only pigment coverage. Preserve the nominal contour;
             // captured pores, lighting and camera texture remain sharp.
             float featherCoverage = blend * blend * blend *
                 (10.0 + blend * (6.0 * blend - 15.0));
@@ -176,7 +155,8 @@ internal object BlushMaterial {
             // Share the existing lighting samples with local highlight detection.
             vec3 softCamera = softBlushCamera(displayUv, camera);
             float valueResponse;
-            vec3 pigment = toLinear(cameraAwareBlushColor(softCamera, valueResponse));
+            vec3 correctedColor = cameraAwareBlushColor(softCamera, valueResponse);
+            vec3 pigment = toLinear(withBlushSaturation(correctedColor));
             float maximum = max(max(pigment.r, pigment.g), max(pigment.b, 0.001));
             // Pigment normalization removes a uniform RGB gain. Apply the bounded
             // value response to transmission so it actually affects this sheer material.
@@ -193,13 +173,9 @@ internal object BlushMaterial {
                 smoothstep(0.025, 0.12, highlightContrast);
             // 150% extends the same strength scale; the full amount stays below one.
             float amount = coverage * clamp(uOpacity, 0.0, 1.5) * 0.58 * (1.0 - 0.65 * reflection);
-            // Add density only inside the preserved body. The C2 falloff ends
-            // before the rim starts, keeping its colour and feather unchanged.
-            float centerWeight = 0.0;
-            if (vCheekCore.z > 0.0001) {
-                float radial = clamp((length(p - vCheekCore.xy) / vCheekCore.z - 0.20) / 0.35, 0.0, 1.0);
-                centerWeight = clamp(1.0 - radial * radial * radial * (10.0 + radial * (6.0 * radial - 15.0)), 0.0, 1.0);
-            }
+            // A broad Gaussian shoulder has no narrow full-density plateau.
+            // It starts past the preserved rim and never depends on a tiny inradius.
+            float centerWeight = 1.0 - exp(-4.0 * softInnerDepth * softInnerDepth);
             float baseStrength = clamp(uOpacity, 0.0, 1.5) * 0.58;
             float centerExtra = (1.0 - baseStrength) * 0.75 * centerWeight * clamp(uOpacity, 0.0, 1.0);
             amount += coverage * centerExtra * (1.0 - 0.65 * reflection);
