@@ -93,6 +93,10 @@
                     android:id="@+id/tool_liner"
                     style="@style/LipTuningToggle"
                     android:text="@string/tool_liner" />
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/tool_blush"
+                    style="@style/LipTuningToggle"
+                    android:text="@string/tool_blush" />
             </com.google.android.material.button.MaterialButtonToggleGroup>
 
             <com.google.android.material.switchmaterial.SwitchMaterial
@@ -168,6 +172,45 @@
                     android:text="@string/tuning_collapse"
                     android:textAllCaps="false"
                     android:textColor="@color/rose_300" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/blush_tuning_panel"
+                android:layout_width="match_parent"
+                android:layout_height="180dp"
+                android:orientation="vertical"
+                android:paddingHorizontal="14dp"
+                android:paddingBottom="12dp"
+                android:visibility="gone">
+                <com.google.android.material.switchmaterial.SwitchMaterial
+                    android:id="@+id/blush_enabled"
+                    android:layout_width="match_parent"
+                    android:layout_height="48dp"
+                    android:text="@string/blush_enabled"
+                    android:textColor="@color/text_primary_on_dark" />
+                <TextView
+                    android:id="@+id/blush_opacity_label"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:labelFor="@id/blush_opacity"
+                    android:text="@string/blush_intensity"
+                    android:textColor="@color/text_primary_on_dark"
+                    android:textSize="13sp" />
+                <SeekBar
+                    android:id="@+id/blush_opacity"
+                    android:layout_width="match_parent"
+                    android:layout_height="48dp"
+                    android:contentDescription="@string/blush_intensity"
+                    android:max="150"
+                    android:progress="130" />
+                <TextView
+                    android:id="@+id/blush_sync_hint"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/blush_sync_required"
+                    android:textColor="@color/text_secondary_on_dark"
+                    android:textSize="12sp"
+                    android:visibility="gone" />
             </LinearLayout>
 
             <ScrollView

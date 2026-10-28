@@ -23,6 +23,7 @@
 ### MediaPipe Tasks Vision `1.0.0`
 
 - `com.google.mediapipe:tasks-vision:1.0.0`; repository — Apache License 2.0. Exact AAR, native/transitive components и NOTICE требуют release audit.
+- Вариант румян от2026-10-28 использует публичные FACE_LANDMARKS_TESSELATION connections из этого же pinned SDK для runtime topology. Отдельный canonical mesh/model/weights/dataset/asset не добавляется; прежние obligations этого dependency сохраняются.
 - Privacy Notice: input обрабатывается on-device и не отправляется Google, но Tasks APIs отправляют Google performance/utilization metrics. Приложение отвечает за informed consent, если он требуется законом.
 - До релиза подтвердить telemetry/network поведение pinned Android runtime и подготовить disclosure/consent, Privacy Policy и Data Safety.
 

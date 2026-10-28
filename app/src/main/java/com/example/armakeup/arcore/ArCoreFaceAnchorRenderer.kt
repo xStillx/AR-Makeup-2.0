@@ -12,6 +12,7 @@ import com.example.armakeup.makeup.ReferenceMatteLipstickProfile
 import com.example.armakeup.makeup.LipColorRenderingMode
 import com.example.armakeup.makeup.LipstickFinish
 import com.example.armakeup.makeup.LipLinerStyle
+import com.example.armakeup.makeup.BlushStyle
 import com.example.armakeup.tracking.CanonicalFaceTransform
 import com.example.armakeup.tracking.FillCenterTransform
 import com.example.armakeup.tracking.NormalizedImageTransform
@@ -54,6 +55,11 @@ internal class ArCoreFaceAnchorRenderer(
     private var lipMeshProgram = 0
     private var lipLinerProgram = 0
     private var pairedLipLinerProgram = 0
+    private var blushProgram = 0
+    private var pairedBlushProgram = 0
+    private var blushDepthProgram = 0
+    private var blushVertices = directFloatBuffer(0)
+    private var blushIndices = directShortBuffer(shortArrayOf())
     private var pairedBackgroundProgram = 0
     private var pairedLipMeshProgram = 0
     private var lipBlurProgram = 0
@@ -64,6 +70,8 @@ internal class ArCoreFaceAnchorRenderer(
     private var pendingPair: CameraPair? = null
     private var presentedPair: CameraPair? = null
     private var presentedObservation: ArCoreMediaPipeLipTracker.Observation? = null
+    private var presentedBlushMesh: BlushFaceMesh? = null
+    private var lastBlushPlacementLogNs = 0L
     private var configuredDisplayRotation = -1
     private var configuredWidth = 0
     private var configuredHeight = 0
@@ -151,6 +159,13 @@ internal class ArCoreFaceAnchorRenderer(
     }
 
     @Volatile
+    private var blushStyle = BlushStyle()
+
+    fun setBlushStyle(value: BlushStyle) {
+        blushStyle = value
+    }
+
+    @Volatile
     private var lipContourPointsEnabled = false
 
     fun setLipContourPointsEnabled(enabled: Boolean) {
@@ -222,6 +237,7 @@ internal class ArCoreFaceAnchorRenderer(
         pendingPair = null
         presentedPair = null
         presentedObservation = null
+        presentedBlushMesh = null
         lipContourRefiner.reset()
         lipFrameDiagnostics.reset()
         lastLipMetricsTimestampNs = 0L
@@ -241,6 +257,10 @@ internal class ArCoreFaceAnchorRenderer(
         lipLinerProgram = createProgram(LipLinerMaterial.VERTEX_SHADER, LipLinerMaterial.FRAGMENT_SHADER)
         pairedLipLinerProgram = createProgram(LipLinerMaterial.VERTEX_SHADER,
             bufferedCameraShader(LipLinerMaterial.FRAGMENT_SHADER))
+        blushProgram = createProgram(BlushMaterial.VERTEX_SHADER, BlushMaterial.FRAGMENT_SHADER)
+        pairedBlushProgram = createProgram(BlushMaterial.VERTEX_SHADER,
+            bufferedCameraShader(BlushMaterial.FRAGMENT_SHADER))
+        blushDepthProgram = createProgram(BlushMaterial.DEPTH_VERTEX_SHADER, BlushMaterial.DEPTH_FRAGMENT_SHADER)
         // Only the sampler changes. All pigment, lighting and coverage equations stay identical.
         pairedBackgroundProgram = createProgram(
             BACKGROUND_VERTEX_SHADER, bufferedCameraShader(BACKGROUND_FRAGMENT_SHADER),
@@ -318,9 +338,10 @@ internal class ArCoreFaceAnchorRenderer(
             }
             val lipVisible = pitchRadians?.let(lipVisibilityGate::update) ?: false
             if (sameFrameSynchronizationEnabled) {
-                drawSynchronizedPair(frame, face != null, screenPoint, lipVisible, pitchRadians)
+                drawSynchronizedPair(frame, face != null, screenPoint, lipVisible, pitchRadians, face)
                 return
             }
+            // MediaPipe blush placement requires an exact camera/geometry pair (Sync).
             val observation = mediaPipeTracker?.latest()
             val hybridStatus = face?.let { trackedFace ->
                 observation?.let {
@@ -358,6 +379,7 @@ internal class ArCoreFaceAnchorRenderer(
         screenPoint: Pair<Float, Float>?,
         lipVisible: Boolean,
         pitchRadians: Float?,
+        face: AugmentedFace?,
     ) {
         val nowNs = SystemClock.elapsedRealtimeNanos()
         val tracker = mediaPipeTracker
@@ -370,6 +392,9 @@ internal class ArCoreFaceAnchorRenderer(
                 pairedCameraFrames.promote()
                 presentedPair = pending
                 presentedObservation = completion.observation
+                presentedBlushMesh = completion.observation?.takeIf { pending.faceTracked }?.let { observation ->
+                    pending.blushMesh?.let { placeBlush(it, observation) }
+                }
                 pendingPair = null
                 promoted = true
                 if (completion.observation == null || !pending.faceTracked) lipContourRefiner.reset()
@@ -381,6 +406,7 @@ internal class ArCoreFaceAnchorRenderer(
         if (presentedPair?.let { nowNs - it.capturedAtNs > MAX_PAIR_AGE_NS } == true) {
             presentedPair = null
             presentedObservation = null
+            presentedBlushMesh = null
             lipContourRefiner.reset()
         }
 
@@ -402,6 +428,7 @@ internal class ArCoreFaceAnchorRenderer(
                 pendingPair = CameraPair(
                     submittedTimestampNs, nowNs, faceTracked, screenPoint, lipVisible, pitchRadians,
                     satinSourceTexels.copyOf(),
+                    if (screenPoint != null) captureBlush(face) else null,
                 )
             }
         }
@@ -419,6 +446,9 @@ internal class ArCoreFaceAnchorRenderer(
         transformedCameraUvs.clear()
         transformedCameraUvs.put(BUFFERED_CAMERA_UVS).position(0)
         drawCameraQuad(pairedBackgroundProgram, GLES20.GL_TEXTURE_2D, textureId)
+        if (pair.faceTracked && presentedObservation != null) {
+            presentedBlushMesh?.let { drawBlush(it, textureId) }
+        }
         val hybridStatus = presentedObservation?.takeIf { pair.faceTracked }?.let {
             drawMediaPipeLipContour(
                 cameraTimestampNs = pair.timestampNs,
@@ -444,7 +474,98 @@ internal class ArCoreFaceAnchorRenderer(
         val lipVisible: Boolean,
         val pitchRadians: Float?,
         val satinSourceTexels: FloatArray,
+        val blushMesh: BlushFaceMesh?,
     )
+
+    private fun captureBlush(face: AugmentedFace?): BlushFaceMesh? {
+        val style = blushStyle
+        if (face == null || !style.enabled || style.opacity <= 0f) return null
+        return BlushFaceMesh.capture(face.meshVertices, face.meshNormals, face.meshTriangleIndices,
+            mvp, viewModel)
+    }
+
+    private fun placeBlush(mesh: BlushFaceMesh, observation: ArCoreMediaPipeLipTracker.Observation): BlushFaceMesh? {
+        val face = observation.face
+        val startedAtNs = SystemClock.elapsedRealtimeNanos()
+        val surface = MediaPipeBlushSurface.create(mesh, observation.coordinates,
+            face.sourceWidth, face.sourceHeight, face.rotationDegrees, face.mirrorHorizontal,
+            viewportWidth, viewportHeight, MediaPipeBlushTopology.indices) ?: mesh
+        val placed = MediaPipeBlushPlacement.apply(surface, observation.coordinates,
+            face.sourceWidth, face.sourceHeight, face.rotationDegrees, face.mirrorHorizontal,
+            viewportWidth, viewportHeight)
+        if (startedAtNs - lastBlushPlacementLogNs >= STATUS_INTERVAL_NS) {
+            lastBlushPlacementLogNs = startedAtNs
+            Log.d(TAG, "Blush MP placement ${if (placed != null) "READY" else "UNAVAILABLE"}" +
+                " guides=${MediaPipeBlushPlacement.lastDiagnostics} surface=${MediaPipeBlushSurface.lastDiagnostics}" +
+                " ts=${observation.sensorTimestampNs} cpuMs=" +
+                String.format(Locale.US, "%.2f", (SystemClock.elapsedRealtimeNanos() - startedAtNs) / 1_000_000.0))
+        }
+        return placed
+    }
+
+    private fun drawBlush(mesh: BlushFaceMesh, bufferedCameraTextureId: Int?) {
+        val style = blushStyle
+        if (!style.enabled || style.opacity <= 0f) return
+        val contour = mesh.contour ?: return
+        val contourParams = mesh.contourParams ?: return
+        if (blushVertices.capacity() < mesh.vertices.size) blushVertices = directFloatBuffer(mesh.vertices.size)
+        if (blushIndices.capacity() < mesh.indices.size) blushIndices = directShortBuffer(mesh.indices)
+        blushVertices.clear()
+        blushVertices.put(mesh.vertices).position(0)
+        blushIndices.clear()
+        blushIndices.put(mesh.indices).position(0)
+        val program = if (bufferedCameraTextureId == null) blushProgram else pairedBlushProgram
+        GLES20.glDisable(GLES20.GL_DEPTH_TEST)
+        GLES20.glDisable(GLES20.GL_CULL_FACE)
+        GLES20.glDisable(GLES20.GL_BLEND)
+        // The full captured face occludes its far cheek. No live pose, FBO or camera readback.
+        GLES20.glEnable(GLES20.GL_DEPTH_TEST)
+        GLES20.glDepthFunc(GLES20.GL_LEQUAL)
+        GLES20.glDepthMask(true)
+        GLES20.glColorMask(false, false, false, false)
+        GLES20.glUseProgram(blushDepthProgram)
+        val depthPosition = GLES20.glGetAttribLocation(blushDepthProgram, "aPosition")
+        blushVertices.position(0)
+        GLES20.glEnableVertexAttribArray(depthPosition)
+        GLES20.glVertexAttribPointer(depthPosition, 4, GLES20.GL_FLOAT, false,
+            BlushFaceMesh.COMPONENTS * Float.SIZE_BYTES, blushVertices)
+        GLES20.glDrawElements(GLES20.GL_TRIANGLES, mesh.indices.size, GLES20.GL_UNSIGNED_SHORT, blushIndices)
+        GLES20.glDisableVertexAttribArray(depthPosition)
+        GLES20.glColorMask(true, true, true, true)
+        GLES20.glDepthMask(false)
+        GLES20.glUseProgram(program)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES20.glBindTexture(if (bufferedCameraTextureId == null) GLES11Ext.GL_TEXTURE_EXTERNAL_OES
+            else GLES20.GL_TEXTURE_2D, bufferedCameraTextureId ?: cameraTextureId)
+        GLES20.glUniform1i(GLES20.glGetUniformLocation(program, "uCamera"), 0)
+        GLES20.glUniform2f(GLES20.glGetUniformLocation(program, "uViewport"), viewportWidth.toFloat(), viewportHeight.toFloat())
+        GLES20.glUniform2f(GLES20.glGetUniformLocation(program, "uUvBottomLeft"), cameraUvCorners[0], cameraUvCorners[1])
+        GLES20.glUniform2f(GLES20.glGetUniformLocation(program, "uUvBottomRight"), cameraUvCorners[2], cameraUvCorners[3])
+        GLES20.glUniform2f(GLES20.glGetUniformLocation(program, "uUvTopLeft"), cameraUvCorners[4], cameraUvCorners[5])
+        GLES20.glUniform2f(GLES20.glGetUniformLocation(program, "uUvTopRight"), cameraUvCorners[6], cameraUvCorners[7])
+        GLES20.glUniform3f(GLES20.glGetUniformLocation(program, "uColor"), style.color.red, style.color.green, style.color.blue)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(program, "uOpacity"), style.opacity)
+        GLES20.glUniform4fv(GLES20.glGetUniformLocation(program, "uContour[0]"),
+            BlushFaceMesh.CONTOUR_POINTS, contour, 0)
+        GLES20.glUniform4fv(GLES20.glGetUniformLocation(program, "uContourParams"), 1, contourParams, 0)
+        GLES20.glUniform4fv(GLES20.glGetUniformLocation(program, "uContourBounds[0]"), 2, contourParams, 4)
+        val position = GLES20.glGetAttribLocation(program, "aPosition")
+        val cheek = GLES20.glGetAttribLocation(program, "aCheek")
+        val stride = BlushFaceMesh.COMPONENTS * Float.SIZE_BYTES
+        blushVertices.position(0)
+        GLES20.glEnableVertexAttribArray(position)
+        GLES20.glVertexAttribPointer(position, 4, GLES20.GL_FLOAT, false, stride, blushVertices)
+        blushVertices.position(4)
+        GLES20.glEnableVertexAttribArray(cheek)
+        GLES20.glVertexAttribPointer(cheek, 3, GLES20.GL_FLOAT, false, stride, blushVertices)
+        GLES20.glDrawElements(GLES20.GL_TRIANGLES, mesh.indices.size, GLES20.GL_UNSIGNED_SHORT, blushIndices)
+        GLES20.glDisableVertexAttribArray(position)
+        GLES20.glDisableVertexAttribArray(cheek)
+        GLES20.glDepthMask(true)
+        GLES20.glDepthFunc(GLES20.GL_LESS)
+        GLES20.glDisable(GLES20.GL_DEPTH_TEST)
+        checkGlError("blush mesh")
+    }
 
     private fun drawCameraBackground(frame: com.google.ar.core.Frame) {
         transformedCameraUvs.position(0)

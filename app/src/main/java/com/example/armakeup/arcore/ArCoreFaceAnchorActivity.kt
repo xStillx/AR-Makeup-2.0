@@ -43,6 +43,8 @@ import com.example.armakeup.makeup.LipColorSwatch
 import com.example.armakeup.makeup.LipLinerCatalog
 import com.example.armakeup.makeup.LipLinerStyle
 import com.example.armakeup.makeup.LipMeshTessellator
+import com.example.armakeup.makeup.BlushCatalog
+import com.example.armakeup.makeup.BlushStyle
 import com.google.ar.core.ArCoreApk
 import com.google.ar.core.Config
 import com.google.ar.core.Session
@@ -81,6 +83,10 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
     private var selectedShadeKey: String? = null
     private val shadeControls = mutableListOf<ShadeControl>()
     private var editingLiner = false
+    private var editingBlush = false
+    private var selectedBlushShadeId = BlushCatalog.shades.first().id
+    private var blushStyle = BlushStyle()
+    private var updatingBlushControls = false
     private var selectedLinerShadeId = LipLinerCatalog.shades.first().id
     private var linerStyle = LipLinerStyle()
     private var updatingLinerControls = false
@@ -148,6 +154,7 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
         bindLipstickVisibility()
         bindLowerLipCoverage()
         bindLipContourPoints()
+        bindBlushControls()
         bindLinerControls()
         createShadePalette()
         createTuningControls()
@@ -196,6 +203,7 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
         binding.timelineToggleGroup.addOnButtonCheckedListener { _, checkedId, isChecked ->
             if (!isChecked) return@addOnButtonCheckedListener
             val sameFrame = checkedId == R.id.timeline_same_frame
+            binding.blushSyncHint.visibility = if (sameFrame) View.GONE else View.VISIBLE
             surfaceView.queueEvent { renderer.setSameFrameSynchronizationEnabled(sameFrame) }
         }
         binding.permissionButton.setOnClickListener {
@@ -240,6 +248,12 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
             )
         }
         binding.resetTuning.setOnClickListener {
+            if (editingBlush) {
+                blushStyle = blushStyle.copy(opacity = BlushStyle.DEFAULT_OPACITY)
+                updateBlushControls()
+                persistBlush()
+                return@setOnClickListener
+            }
             if (editingLiner) {
                 linerStyle = linerStyle.copy(opacity = 0.76f, thickness = 2f, blur = 2f)
                 updateLinerControls()
@@ -262,6 +276,16 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
         }
         binding.copyTuning.setOnClickListener {
             val text = buildString {
+                if (editingBlush) {
+                    appendLine("tool=BLUSH")
+                    appendLine("blush_enabled=${blushStyle.enabled}")
+                    appendLine("blush_shade=$selectedBlushShadeId")
+                    appendLine("blush_red=${blushStyle.color.red8Bit}")
+                    appendLine("blush_green=${blushStyle.color.green8Bit}")
+                    appendLine("blush_blue=${blushStyle.color.blue8Bit}")
+                    appendLine("blush_opacity=${String.format(Locale.US, "%.2f", blushStyle.opacity)}")
+                    return@buildString
+                }
                 if (editingLiner) {
                     appendLine("tool=LIP_LINER")
                     appendLine("liner_enabled=${linerStyle.enabled}")
@@ -370,16 +394,22 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
             blur = preferences.getFloat("liner_blur_v1", 2f)
                 .takeIf { it.isFinite() }?.coerceIn(0f, 2f) ?: 2f,
         )
-        editingLiner = preferences.getBoolean("editing_liner_v1", false)
-        binding.makeupToolGroup.check(if (editingLiner) R.id.tool_liner else R.id.tool_lipstick)
+        editingLiner = !editingBlush && preferences.getBoolean("editing_liner_v1", false)
+        binding.makeupToolGroup.check(when {
+            editingBlush -> R.id.tool_blush
+            editingLiner -> R.id.tool_liner
+            else -> R.id.tool_lipstick
+        })
         updateLinerControls()
         updateToolPanels()
         binding.makeupToolGroup.addOnButtonCheckedListener { _, id, checked ->
             if (!checked) return@addOnButtonCheckedListener
             editingLiner = id == R.id.tool_liner
+            editingBlush = id == R.id.tool_blush
             createShadePalette()
             updateToolPanels()
             persistLiner()
+            persistBlush()
         }
         binding.linerEnabled.setOnCheckedChangeListener { _, enabled ->
             if (updatingLinerControls) return@setOnCheckedChangeListener
@@ -418,8 +448,67 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
     }
 
     private fun updateToolPanels() {
-        binding.tuningScroll.visibility = if (tuningExpanded && !editingLiner) View.VISIBLE else View.GONE
+        binding.tuningScroll.visibility = if (tuningExpanded && !editingLiner && !editingBlush) View.VISIBLE else View.GONE
         binding.linerTuningPanel.visibility = if (tuningExpanded && editingLiner) View.VISIBLE else View.GONE
+        binding.blushTuningPanel.visibility = if (tuningExpanded && editingBlush) View.VISIBLE else View.GONE
+    }
+
+    private fun bindBlushControls() {
+        val preferences = getSharedPreferences(TUNING_PREFERENCES, Context.MODE_PRIVATE)
+        val shade = BlushCatalog.shades.firstOrNull {
+            it.id == preferences.getString("blush_shade_v1", null)
+        } ?: BlushCatalog.shades.first()
+        selectedBlushShadeId = shade.id
+        editingBlush = preferences.getBoolean("editing_blush_v1", false)
+        blushStyle = BlushStyle(
+            enabled = preferences.getBoolean("blush_enabled_v1", false),
+            color = shade.color,
+            opacity = preferences.getFloat("blush_opacity_v1", BlushStyle.DEFAULT_OPACITY)
+                .takeIf { it.isFinite() }?.coerceIn(0f, BlushStyle.MAX_OPACITY) ?: BlushStyle.DEFAULT_OPACITY,
+        )
+        updateBlushControls()
+        binding.blushEnabled.setOnCheckedChangeListener { _, enabled ->
+            if (updatingBlushControls) return@setOnCheckedChangeListener
+            blushStyle = blushStyle.copy(enabled = enabled)
+            renderer.setBlushStyle(blushStyle)
+            persistBlush()
+        }
+        binding.blushOpacity.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(bar: SeekBar, progress: Int, fromUser: Boolean) {
+                if (updatingBlushControls || !fromUser) return
+                blushStyle = blushStyle.copy(opacity = progress / 100f)
+                updateBlushControls()
+                persistBlush()
+            }
+            override fun onStartTrackingTouch(bar: SeekBar) = Unit
+            override fun onStopTrackingTouch(bar: SeekBar) = persistBlush()
+        })
+    }
+
+    private fun updateBlushControls() {
+        updatingBlushControls = true
+        binding.blushEnabled.isChecked = blushStyle.enabled
+        val progress = (blushStyle.opacity * 100).roundToInt()
+        binding.blushOpacity.progress = progress
+        binding.blushOpacityLabel.text = getString(R.string.blush_intensity_value, progress)
+        binding.blushOpacity.contentDescription = binding.blushOpacityLabel.text
+        updatingBlushControls = false
+        renderer.setBlushStyle(blushStyle)
+    }
+
+    private fun persistBlush() {
+        getSharedPreferences(TUNING_PREFERENCES, Context.MODE_PRIVATE).edit()
+            .putString("blush_shade_v1", selectedBlushShadeId)
+            .putBoolean("blush_enabled_v1", blushStyle.enabled)
+            .putFloat("blush_opacity_v1", blushStyle.opacity)
+            .putBoolean("editing_blush_v1", editingBlush)
+            .apply()
+    }
+
+    private fun selectedPaletteKey(): String? = when {
+        editingBlush -> selectedBlushShadeId
+        editingLiner -> selectedLinerShadeId
+        else -> selectedShadeKey
     }
 
     private fun updateLinerControls() {
@@ -452,7 +541,15 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
     private fun createShadePalette() {
         binding.lipShadeContainer.removeAllViews()
         shadeControls.clear()
-        val palette = if (editingLiner) LipLinerCatalog.shades.map { shade ->
+        val palette = if (editingBlush) BlushCatalog.shades.map { shade ->
+            PaletteEntry(shade.id, getString(R.string.tool_blush), shade.name, shade.color) {
+                selectedBlushShadeId = shade.id
+                blushStyle = blushStyle.copy(enabled = true, color = shade.color)
+                updateBlushControls()
+                updateShadeSelection()
+                persistBlush()
+            }
+        } else if (editingLiner) LipLinerCatalog.shades.map { shade ->
             PaletteEntry(shade.id, shade.product, shade.name, shade.color) {
                 selectedLinerShadeId = shade.id
                 linerStyle = linerStyle.copy(enabled = true, color = shade.color)
@@ -542,7 +639,7 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
         }
         updateShadeSelection()
         binding.lipShadeScroll.post {
-            shadeControls.firstOrNull { it.key == (if (editingLiner) selectedLinerShadeId else selectedShadeKey) }?.item?.let { selected ->
+            shadeControls.firstOrNull { it.key == selectedPaletteKey() }?.item?.let { selected ->
                 binding.lipShadeScroll.scrollTo(
                     (selected.left - (binding.lipShadeScroll.width - selected.width) / 2).coerceAtLeast(0), 0,
                 )
@@ -590,7 +687,7 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
 
     private fun updateShadeSelection() {
         shadeControls.forEach { control ->
-            val selected = control.key == (if (editingLiner) selectedLinerShadeId else selectedShadeKey)
+            val selected = control.key == selectedPaletteKey()
             control.item.isSelected = selected
             control.selectionRing.visibility = if (selected) View.VISIBLE else View.INVISIBLE
             control.shadeLabel.setTextColor(ContextCompat.getColor(this,
