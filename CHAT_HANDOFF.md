@@ -1,6 +1,104 @@
 # ARMakeup — handoff текущей задачи
 
-Актуально на 2026-10-28. Этот верхний раздел заменяет исторические задачи/статусы ниже. Архитектура и ограничения — PROJECT_CONTEXT.md и AGENTS.md; iOS — IOS_REFERENCE_CONTEXT.md; лицензии — LICENSE_COMPLIANCE.md.
+Актуально на 2026-10-30. Этот верхний раздел заменяет исторические задачи/статусы ниже. Архитектура и ограничения — PROJECT_CONTEXT.md и AGENTS.md; iOS — IOS_REFERENCE_CONTEXT.md; лицензии — LICENSE_COMPLIANCE.md.
+
+## Тональный крем принят как готовый — 2026-10-30, последнее решение
+
+Пользователь прямо сказал: «Окей, в принципе готово. Сохраняем тоналку как готовую». Работа над тональным завершена. Принят текущий материал/цвет/фактура/ретушь/покрытие/мягкие переходы/каталог и реализованный режим сравнения. Не продолжать автоматически настройку и не требовать повторного принятия ради передачи контекста. Следующую задачу пользователь даст отдельно; румяна, помада и карандаш также остаются конечными вариантами. Старые ожидания проверки и задачи ниже — история.
+
+ПОСЛЕДНЕЕ УТОЧНЕНИЕ после объявления финала: пользователь оставляет укрывистость15% и ретушь200%. Принятые defaults/reset теперь coverage0.15/retouch2.0, XML preview15/200; максимум ретуши500%, диапазон coverage0–100% и все ручные prefs сохраняются. Load/reset используют те же константы, постоянной перезаписи сохранённых значений нет. Старые30%/60% ниже — история. Каталог12 уникальных оттенков: LuxVisage10 fair232,216,189; Seven7een01 Фарфор243,223,205 (F3DFCD); PMKL01 Фарфоровый243,221,205 (F3DDCD). RGB пользовательские, без заявления физической калибровки продукта. Геометрия477/870 поверх paired MP468/852, forehead28mm/feather22mm, мягкие брови/кожа вокруг губ и внутренние exclusions неизменны; GPU/ML/Sync/depth сохранять.
+
+Переключатель «Тон только слева (в предпросмотре)» остаётся с default=true и сохранением ручного выбора: тон+ретушь слева, справа исходная камера для этого эффекта. Off возвращает полное лицо, reset параметров режим не меняет. Объявление финала не является командой отключать режим сравнения или менять другие материалы.
+
+Последний debug build после уточнения defaults15%/200% прошёл, unit-тесты не запускались. Ранее replay196/GPU23 poses/138 comparisons прошли, GL errors0. По свежей проверке Samsung R5CRC3SPVNE отсутствует в ADB: финальный APK собран, НЕ установлен, значения на телефоне не проверены/не менялись. Изменены только две константы FoundationStyle, XML preview15/200 и контекст; материалы/геометрия прежние. При установке install-r сохранять ручные prefs, автоматического override15/200 при каждом старте нет. Исходные fingerprints финального тонального обновлены вверху PROJECT_CONTEXT.md. Чужие dirty/staged изменения сохранены; commit/push без отдельной команды не делать.
+
+## История: цвет Seven7een 01 Фарфор — 2026-10-30
+
+По запросу пользователя Seven7een Time Plus Longlasting Make Up «01 Фарфор» теперь RGB243,223,205 / HEX F3DFCD вместо235,196,157. ID seven7een_time_plus_01 сохранён, другие оттенки/режим половины лица/материалы/настройки не менялись. Не путать с PMKL «01 Фарфоровый»: у него по-прежнему243,221,205 / F3DDCD.
+
+Debug build прошёл без unit-тестов. Samsung в ADB отсутствует, APK пересобран, НЕ установлен. Чужие изменения сохранены, commit/push не выполнялись.
+
+## История: сравнение тона на половине лица — 2026-10-30
+
+Реализован запрос оставить тональный слева и убрать справа: «Тон» → «Развернуть» → «Тон только слева (в предпросмотре)». Новый FoundationStyle.leftHalfOnly=true и pref foundation_left_half_only_v1 fallback=true; ручной переключатель сохраняется, off возвращает полное лицо. Собственное включение foundation/coverage/ретушь/оттенок не изменяются автоматически. Reset сохраняет режим сравнения, Copy его включает.
+
+Разделение — текущая paired 3D-плоскость через лоб10/нос1/подбородок152, ориентированная на левую щёку в предпросмотре; shader discard правой стороны до ретуши/окрашивания. Справа camera-exact для тонального; другие материалы продолжают работать независимо. Нет широкой растушёвки вдоль центральной линии сравнения. Все прежние geometry/маски/цвета/Sync/ML/принятые эффекты сохранены, новых passes/FBO нет.
+
+Debug/replay196/offscreen GPU23 poses/138 comparisons прошли без unit-тестов: данные поверхности прежние, справа исходная камера, слева точное полное нанесение, split off совпадает с прежним shader, GL errors0. Это не device visual acceptance; диагностика ignored app/build/tmp/foundation-half-2026-10-30/. Samsung R5CRC3SPVNE отсутствует в ADB: APK собран, НЕ установлен, UI на телефоне не проверен. При подключении install-r без сброса prefs; чужие изменения сохранены, commit/push не запрошены.
+
+## История: новый каталог тона — 2026-10-30
+
+По списку пользователя удалены11 старых generic shades, добавлены12 уникальных продуктовых оттенков; повторные Guerlain01N/Manly PRO31/Clarins105N/Seven7een07 объединены. RGB/названия точно из запроса и уточнения, brand/product/name хранятся отдельно. Карточки тона показывают бренд+продукт сверху (4 строки), оттенок снизу; другие эффекты/UI прежние. Новый default/fallback для удалённого ID — Guerlain Parure Gold Cushion00N Бежевый. Числовые prefs/включение/coverage30%/retouch60% default и500% max не меняются. Источник цветов пользовательский, физической калибровки продукта нет.
+
+Пользователь ответил «232» на уточнение RGB LuxVisage. Добавлен LuxVisage Active Complex10 fair с RGB232,216,189 (E8D8BD) между Missha и Manly PRO. Каталог завершён, уточнений больше нет. Полный список RGB — верх PROJECT_CONTEXT.md и FoundationCatalog.kt.
+
+Итоговый debug build с12 оттенками прошёл (`:app:assembleDebug --offline`), unit-тесты не запускались. ADB devices пусто, новый APK НЕ установлен и UI не проверен. Принятые материалы/геометрия/ретушь/растушёвка не менялись, чужие dirty изменения сохранены. Commit/push не запрошены.
+
+## История: сильнее растушевать лоб — 2026-10-29
+
+Запрос усилить растушёвку лба был прерван до правок, затем пользователь сказал «продолжай». Реализовано: верхний feather9→22mm по sin² к центру вместо9→10mm. Сама граница/геометрия477/870/верхнее продолжение28mm остаются прежними; брови/губы/ретушь500%/coverage30%/остальные эффекты и prefs не меняются. Нового blur кожи, passes/FBO/ML/dependencies нет.
+
+Debug/replay196/GPU прошли, unit-тесты не запускались. Geometry/indices/feature masks/references exact, max gradient ratio0.464/median0.459 к прошлому; остальные GPU checks/GL errors0. Артефакты — ignored `app/build/tmp/foundation-forehead-feather22-2026-10-29/`. Визуальная оценка ещё нужна.
+
+Samsung SM-G990B/R5CRC3SPVNE: APK установлен install-r/open,pid4535; prefs diff0, coverage30%/retouch301%/enabled=true/fair_warm сохранены. Launch smoke FACE TRACKING0/FPS0, shader/render/FATAL errors0; на лице не проверено. На Redmi Note8, подключённый во время прерванного захода, ничего не устанавливали. Не трогать чужие изменения/принятые румяна/помаду/карандаш. Commit/push не запрошены.
+
+## История: лоб выше, ретушь500%, кожа под губами — 2026-10-29
+
+Пользователь попросил ещё поднять лоб, max ретуши500%, убрать незакрашенные участки у губ/мягко подвести покрытие снизу. Явно уточнил: «Тональный вокруг и под губами». Помаду/карандаш/их4px не трогать.
+
+Сделано: forehead extension14→28mm по прежней paired3D дуге, feather10mm сверху/9mm сбоку сохранён, topology477/870 прежняя. Slider/load/shader до500%; после100% ring radius2.2→5mm и candidate confidence boost усиливают обработку более крупных/слабых пятен, а не только насыщенную альфу. Guards границ/бликов сохраняются, defaults coverage30%/retouch60% и ручные prefs прежние. Lip mask теперь покрывает кожу от контура с smoothstep0..3.5mm вместо пустого2mm отступа; внутри полигона губ/рта по-прежнему нет тонального.
+
+Debug/replay196/offscreen GPU прошли без unit-тестов: исходная поверхность прежняя, cap28mm valid,156 strict innerlip+eye probes/26 zero/99 shade/6 blush identities, мягкий perioral переход и retouch500 на более крупном пятне подтверждены, GL errors0. Более агрессивная ретушь не гарантирует более точный RGB. Диагностика — ignored `app/build/tmp/foundation-forehead-retouch500-2026-10-29/`. Подробности и ограничения — верхний PROJECT_CONTEXT.md.
+
+Samsung SM-G990B/R5CRC3SPVNE: APK установлен install-r/open,pid1591,prefs immediately diff0 (coverage30%/retouch94%/fair_cool). После запуска UI/prefs показывают30%/500%/fair_warm; скрипты настройки не записывали. Device32 FACE TRACKING окон, последние12 FPS samples54.2–59.1, shader/render/FATAL errors0; screenshot на лице подтверждает активное приложение и30/500. Это короткий smoke, не benchmark и не визуальное принятие. Не сбрасывать prefs/не трогать чужую `.idea/deploymentTargetSelector.xml`; commit/push не запрошены.
+
+## История: ещё мягче переход тонального на лбу — 2026-10-29
+
+По просьбе пользователя расширен только верхний feather: 9→10 mm к центру лба вместо прежних 9→4 mm. Те же контур/477 vertices/870 triangles и 14mm верхнего продолжения; брови, coverage30%, retouch0–200%, цвет, кожа и остальные материалы/настройки прежние. Новых GPU passes/blur кожи/моделей нет.
+
+Debug build и replay196/GPU прошли, unit-тесты не запускались. Geometry/indices/остальные masks/references exact, верхний gradient ratio max0.403/median0.401 к предыдущему (≈2.5 раза плавнее); zero/features/brow/blush/retouch/cap/hair-guard checks прежние, GL errors0. Артефакты — ignored `app/build/tmp/foundation-forehead-feather-2026-10-29/`.
+
+Samsung SM-G990B/R5CRC3SPVNE: APK установлен install-r/open, pid22991. Prefs diff0, coverage30%/retouch200%/enabled=true/medium_cool сохранены. Launch smoke FACE TRACKING0/FPS0, без shader/render/FATAL ошибок; активная ретушь/мягкость на лице ещё не проверены, визуального принятия нет. Не трогать чужую `.idea/deploymentTargetSelector.xml` и принятые румяна/помаду/карандаш; commit/push не запрошены.
+
+## История: брови, лоб и ретушь 200% — 2026-10-29
+
+Пользователь попросил плавно подвести тон к бровям и чуть внутрь вместо пустых участков, максимум ретуши 200%, докрасить верх лба. Реализовано:
+
+- Brow mask: два замкнутых 10-point upper/lower MP контура, signed-distance feather -2..+1.5 mm через край, без старого пустого capsule-пояса; dense core сохраняется.
+- Foundation-only forehead strip: до 14 mm продолжения в paired 3D-направлении 151→10 с плавным taper к вискам; +9 vertices/+18 triangles (477/870 всего), исходные 468/852 неизменны. Captured MVP, прежние depth/Sync/ML; outer feather 4 mm сверху→9 mm сбоку. Только на дополнительной области — coarse colour/light guard против тёмных волос, без hair segmentation/обещания точной линии волос.
+- Retouch slider/load/shader до 200%, >100% действительно усиливает коррекцию без extrapolation за local baseline. Coverage default/reset 30%, retouch default/reset 60%, ручные значения и прочие материалы/настройки сохраняются.
+
+Debug/replay 196/offscreen GPU прошли, unit-тесты не запускались. Контрольные брови имеют мягкое проникновение и защищённый core; cap растеризуется на 4 poses, dark-hair guard 4 identities; 200% сильнее 100%, 208 protected eye/lip points/26 zero identities/99 shades/6 blush identities/GL errors0. Подробности и ограничения — верхний PROJECT_CONTEXT.md, ignored `app/build/tmp/foundation-brows-forehead-2026-10-29/`.
+
+Телефон SM-G990B/R5CRC3SPVNE НЕ виден через ADB. APK собран, НЕ установлен. На телефоне предыдущая ретушь 0–100%; при подключении install-r/open без сброса prefs и визуальная проверка бровей/верхнего лба/200%. Принятия новых правок и live performance проверки нет. Румяна/помада/карандаш приняты и не меняются. `.idea/deploymentTargetSelector.xml` чужой, не трогать. Commit/push не запрошены.
+
+## История: тональный 30% + ретушь кожи — 2026-10-29
+
+Пользователь попросил оставить укрывистость 30% и скрывать проблемные зоны/прыщи. Реализованы default/reset/XML 30% и независимый slider «Ретушь кожи» 0–100%, default/reset 60%, persisted `foundation_retouch_v1` с finite/clamp guard. Ручной tint/shade/enabled/retouch сохраняются, стартовые значения не навязываются каждому запуску. Reset затрагивает только tone coverage+retouch.
+
+GPU ретушь: новый небольшой (max512 long side) RGBA8 target с robust 8-neighbour baseline (~2.2 mm) и confidence локальной красноты/умеренных тёмных пятен. На 3D-поверхности исправление применяется до прежнего тонального, с возвратом sub-mm яркостных деталей через fine camera samples. Сила локальная, независимо от общей укрывистости; весь эффект отключается при coverage=0/off, ретушь=0 пропускает новый pass/освобождает target. Cache/continuous feather/depth/exact-pair Sync/защита feature zones прежние. Это эвристика без новых ML/dependencies, не точное распознавание прыщей; может уменьшать веснушки, не обещать полное удаление выраженного рельефа/крупных пятен. Подробности — верхний PROJECT_CONTEXT.md.
+
+Debug/GPU diagnostics прошли без unit-тестов: 196 геометрий прежние, protected feature points/zero coverage/blush layering/triangle identity прошли. Retouch off — предыдущий shader pixel identity (4 poses); synthetic red/dark spots менее контрастны, healthy pores/deep dark/reflections сохраняются. Диагностика — ignored `app/build/tmp/foundation-retouch-2026-10-29/`. Визуальной оценки ретуши на лице ещё нет.
+
+На Samsung SM-G990B/R5CRC3SPVNE APK установлен install-r/open, pid 6000. Prefs diff 0 до/после установки и запуска: coverage=30%, enabled=true/shade=medium_cool. Retouch key пока отсутствует, приложение читает новый default 60% (UI пока не проверен), последующий ручной выбор сохраняется. Телефон заблокирован/AOD, CAMERA_DISABLED и FACE TRACKING=0; live shader/FPS/визуальная проверка ретуши НЕ выполнены. Пользователю сообщено открыть приложение после разблокировки; APK повторно ставить не нужно. Румяна/помада/карандаш не менялись, prefs snapshots не восстанавливать. Чужой `.idea/deploymentTargetSelector.xml` не трогать. Commit/push не запрошены.
+
+## История: тональный без видимых граней — 2026-10-29
+
+Пользователь отклонил видимую «3D модель» на двух скриншотах первой версии, предложил монолитный тон. Исправлено: coverage внутри поверхности теперь равномерное, без per-vertex facing/alpha. Outer 9 mm feather считается per-fragment по 3D distance к oval; геометрия/CPU camera/Sync/MP3D/depth сохранены. Исключения глаз/губ/бровей/ноздрей перепривязаны к проекции ТОЙ ЖЕ paired поверхности (screen metric chart, viewport aspect), чтобы не проявлять далёкую сторону на профилях. Цвет/skin texture/lighting/defaults/UI/prefs остальных материалов прежние. Никаких новых ML/2D overlay/моделей/датасетов. Подробности в верхнем разделе PROJECT_CONTEXT.md.
+
+Debug/replay 196 valid/offscreen GPU прошли: 26 zero identities, 260 protected points, 99 shade renders, 6 blush identities, GL errors 0; диагонали planar patch и reserved vertex strengths не влияют на цвет пикселей. Unit-тесты не добавлялись/не запускались. Диагностика/backup первой версии — ignored `app/build/tmp/foundation-continuous-2026-10-29/`.
+
+Samsung SM-G990B/R5CRC3SPVNE: исправленный APK установлен install-r/open, pid 31682; prefs сразу после установки diff 0, первоначально coverage=55%, enabled=true/fair_warm. Runtime 47 FACE TRACKING окон без shader/render/FATAL ошибок. Позже в prefs/UI coverage=0%, камера в потолок; значения не записывали/не восстанавливали. Пользователю сообщено поднять укрывистость, например до 55%, для проверки. Этот screenshot не доказывает исправление на лице, FPS смешанного прогона с 0% не является benchmark. Визуальной оценки исправления ещё нет. `.idea/deploymentTargetSelector.xml` уже изменён пользователем/IDE при входе, не трогать. Румяна/помада/карандаш остаются принятыми. Commit/push не запрошены.
+
+## История: первая версия тонального — 2026-10-29
+
+Пользователь после обсуждения подхода поручил «приступим». Реализована первая версия натурального тонального: вкладка «Тон», независимый выключатель, 11 локальных оттенков и укрывистость 0–100% (default/reset 55%). По умолчанию выключен, выбор оттенка включает его; новые foundation prefs сохраняются отдельно и не сбрасывают старые настройки. Это НЕ финальный/визуально принятый материал. Румяна, помада и карандаш по-прежнему приняты и не перекалибровываются.
+
+Основа: текущая exact-pair MP3D 468/852 с ARCore calibration; без валидной поверхности/в Async эффект отсутствует. GPU edge-aware low pass (max 384 px long side) и linear diffuse correction с сохранением high-frequency luminance/локальных бликов. 3D oval feather, исключения глаз/губ/бровей/ноздрей, GPU depth/facing. Нет новых ML/assets/dependencies/CPU readback; нет сегментации волос/бороды/очков/рук. Порядок: камера → тон → румяна → губы/карандаш. Румяна получают foundation base через отдельный shader variant, lighting остаётся от raw paired camera. При выключенном тоне прежний путь; исходники принятых материалов не менялись. GPU output кешируется для reused пары, targets освобождаются при off/0. Подробности и ограничения — верхний раздел PROJECT_CONTEXT.md.
+
+Debug build прошёл без unit-тестов. Replay 196/196 valid, clip/indices/facing прежние. Offscreen GPU: 26 zero identities/260 excluded feature points/99 shade renders/6 blush neutral-base identities, тон под румянами виден, GL errors 0. Артефакты проверки — ignored `app/build/tmp/foundation-natural-2026-10-29/`. Это не доказательство качества/FPS на устройстве.
+
+ADB сейчас не видит Samsung SM-G990B/R5CRC3SPVNE. Новый `app/build/outputs/apk/debug/app-debug.apk` НЕ установлен, на устройстве прежний финал румян. Следующий шаг при подключении — install-r с сохранением prefs, запуск и оценка «Тон»: выбранный оттенок, укрывистость, границы/кожа/профили/совместимость с румянами. Автоматически менять принятые румяна/помаду/карандаш нельзя. Unit-тесты только по прямой просьбе; commit/push не запрошены и не выполнялись. На старте изменений git был чистым, HEAD d0606c5 на codex/lipstick-material-v2.
 
 ## Завершено: принят конечный вариант румян — 2026-10-28
 

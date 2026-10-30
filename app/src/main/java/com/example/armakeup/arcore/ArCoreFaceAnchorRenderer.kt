@@ -13,6 +13,7 @@ import com.example.armakeup.makeup.LipColorRenderingMode
 import com.example.armakeup.makeup.LipstickFinish
 import com.example.armakeup.makeup.LipLinerStyle
 import com.example.armakeup.makeup.BlushStyle
+import com.example.armakeup.makeup.FoundationStyle
 import com.example.armakeup.tracking.CanonicalFaceTransform
 import com.example.armakeup.tracking.FillCenterTransform
 import com.example.armakeup.tracking.NormalizedImageTransform
@@ -57,6 +58,9 @@ internal class ArCoreFaceAnchorRenderer(
     private var pairedLipLinerProgram = 0
     private var blushProgram = 0
     private var pairedBlushProgram = 0
+    private var foundationBlushProgram = 0
+    private val foundationRenderer = FoundationRenderer(::createProgram)
+    private var presentedFoundationMesh: FoundationFaceMesh? = null
     private var blushDepthProgram = 0
     private var blushVertices = directFloatBuffer(0)
     private var blushIndices = directShortBuffer(shortArrayOf())
@@ -166,6 +170,13 @@ internal class ArCoreFaceAnchorRenderer(
     }
 
     @Volatile
+    private var foundationStyle = FoundationStyle()
+
+    fun setFoundationStyle(value: FoundationStyle) {
+        foundationStyle = value
+    }
+
+    @Volatile
     private var lipContourPointsEnabled = false
 
     fun setLipContourPointsEnabled(enabled: Boolean) {
@@ -205,7 +216,10 @@ internal class ArCoreFaceAnchorRenderer(
         if (sameFrameSynchronizationEnabled == enabled) return
         sameFrameSynchronizationEnabled = enabled
         invalidateSameFrameState()
-        if (!enabled) pairedCameraFrames.release()
+        if (!enabled) {
+            pairedCameraFrames.release()
+            foundationRenderer.releaseTargets()
+        }
         lipContourRefiner.reset()
         lipFrameDiagnostics.reset()
         lastLipMetricsTimestampNs = 0L
@@ -238,6 +252,7 @@ internal class ArCoreFaceAnchorRenderer(
         presentedPair = null
         presentedObservation = null
         presentedBlushMesh = null
+        presentedFoundationMesh = null
         lipContourRefiner.reset()
         lipFrameDiagnostics.reset()
         lastLipMetricsTimestampNs = 0L
@@ -246,6 +261,8 @@ internal class ArCoreFaceAnchorRenderer(
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
         pairedCameraFrames.onContextCreated()
         lipBlurFrames.onContextCreated()
+        foundationRenderer.onContextCreated()
+        foundationBlushProgram = 0
         invalidateSameFrameState()
         cameraTextureBoundSession = null
         configuredDisplayRotation = -1
@@ -392,6 +409,7 @@ internal class ArCoreFaceAnchorRenderer(
                 pairedCameraFrames.promote()
                 presentedPair = pending
                 presentedObservation = completion.observation
+                presentedFoundationMesh = null
                 presentedBlushMesh = completion.observation?.takeIf { pending.faceTracked }?.let { observation ->
                     pending.blushMesh?.let { placeBlush(it, observation) }
                 }
@@ -407,6 +425,7 @@ internal class ArCoreFaceAnchorRenderer(
             presentedPair = null
             presentedObservation = null
             presentedBlushMesh = null
+            presentedFoundationMesh = null
             lipContourRefiner.reset()
         }
 
@@ -445,9 +464,16 @@ internal class ArCoreFaceAnchorRenderer(
         BUFFERED_CAMERA_UVS.copyInto(cameraUvCorners)
         transformedCameraUvs.clear()
         transformedCameraUvs.put(BUFFERED_CAMERA_UVS).position(0)
-        drawCameraQuad(pairedBackgroundProgram, GLES20.GL_TEXTURE_2D, textureId)
+        val foundation = foundationStyle
+        val foundationTexture = if (foundation.enabled && foundation.coverage > 0f && pair.faceTracked) {
+            presentedFoundationMesh?.let {
+                foundationRenderer.render(it, textureId, viewportWidth, viewportHeight, foundation)
+            }
+        } else null
+        if (!foundation.enabled || foundation.coverage <= 0f) foundationRenderer.releaseTargets()
+        drawCameraQuad(pairedBackgroundProgram, GLES20.GL_TEXTURE_2D, foundationTexture ?: textureId)
         if (pair.faceTracked && presentedObservation != null) {
-            presentedBlushMesh?.let { drawBlush(it, textureId) }
+            presentedBlushMesh?.let { drawBlush(it, textureId, foundationTexture) }
         }
         val hybridStatus = presentedObservation?.takeIf { pair.faceTracked }?.let {
             drawMediaPipeLipContour(
@@ -479,7 +505,9 @@ internal class ArCoreFaceAnchorRenderer(
 
     private fun captureBlush(face: AugmentedFace?): BlushFaceMesh? {
         val style = blushStyle
-        if (face == null || !style.enabled || style.opacity <= 0f) return null
+        val foundation = foundationStyle
+        if (face == null || (!(style.enabled && style.opacity > 0f) &&
+            !(foundation.enabled && foundation.coverage > 0f))) return null
         return BlushFaceMesh.capture(face.meshVertices, face.meshNormals, face.meshTriangleIndices,
             mvp, viewModel)
     }
@@ -487,9 +515,15 @@ internal class ArCoreFaceAnchorRenderer(
     private fun placeBlush(mesh: BlushFaceMesh, observation: ArCoreMediaPipeLipTracker.Observation): BlushFaceMesh? {
         val face = observation.face
         val startedAtNs = SystemClock.elapsedRealtimeNanos()
-        val surface = MediaPipeBlushSurface.create(mesh, observation.coordinates,
+        val measured = MediaPipeBlushSurface.create(mesh, observation.coordinates,
             face.sourceWidth, face.sourceHeight, face.rotationDegrees, face.mirrorHorizontal,
-            viewportWidth, viewportHeight, MediaPipeBlushTopology.indices) ?: mesh
+            viewportWidth, viewportHeight, MediaPipeBlushTopology.indices)
+        // A missing calibrated surface disables foundation for this pair; no ARCore-only fallback.
+        presentedFoundationMesh = if (foundationStyle.enabled) measured?.let {
+            FoundationFaceMesh.create(it, viewportWidth.toFloat() / viewportHeight)
+        } else null
+        if (!blushStyle.enabled || blushStyle.opacity <= 0f) return null
+        val surface = measured ?: mesh
         val placed = MediaPipeBlushPlacement.apply(surface, observation.coordinates,
             face.sourceWidth, face.sourceHeight, face.rotationDegrees, face.mirrorHorizontal,
             viewportWidth, viewportHeight)
@@ -503,7 +537,7 @@ internal class ArCoreFaceAnchorRenderer(
         return placed
     }
 
-    private fun drawBlush(mesh: BlushFaceMesh, bufferedCameraTextureId: Int?) {
+    private fun drawBlush(mesh: BlushFaceMesh, bufferedCameraTextureId: Int?, foundationTexture: Int? = null) {
         val style = blushStyle
         if (!style.enabled || style.opacity <= 0f) return
         val contour = mesh.contour ?: return
@@ -514,7 +548,11 @@ internal class ArCoreFaceAnchorRenderer(
         blushVertices.put(mesh.vertices).position(0)
         blushIndices.clear()
         blushIndices.put(mesh.indices).position(0)
-        val program = if (bufferedCameraTextureId == null) blushProgram else pairedBlushProgram
+        val program = if (foundationTexture != null) {
+            if (foundationBlushProgram == 0) foundationBlushProgram = createProgram(BlushMaterial.VERTEX_SHADER,
+                bufferedCameraShader(FoundationMaterial.blushOverFoundation()))
+            foundationBlushProgram
+        } else if (bufferedCameraTextureId == null) blushProgram else pairedBlushProgram
         GLES20.glDisable(GLES20.GL_DEPTH_TEST)
         GLES20.glDisable(GLES20.GL_CULL_FACE)
         GLES20.glDisable(GLES20.GL_BLEND)
@@ -538,6 +576,12 @@ internal class ArCoreFaceAnchorRenderer(
         GLES20.glBindTexture(if (bufferedCameraTextureId == null) GLES11Ext.GL_TEXTURE_EXTERNAL_OES
             else GLES20.GL_TEXTURE_2D, bufferedCameraTextureId ?: cameraTextureId)
         GLES20.glUniform1i(GLES20.glGetUniformLocation(program, "uCamera"), 0)
+        if (foundationTexture != null) {
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, foundationTexture)
+            GLES20.glUniform1i(GLES20.glGetUniformLocation(program, "uFoundation"), 1)
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        }
         GLES20.glUniform2f(GLES20.glGetUniformLocation(program, "uViewport"), viewportWidth.toFloat(), viewportHeight.toFloat())
         GLES20.glUniform2f(GLES20.glGetUniformLocation(program, "uUvBottomLeft"), cameraUvCorners[0], cameraUvCorners[1])
         GLES20.glUniform2f(GLES20.glGetUniformLocation(program, "uUvBottomRight"), cameraUvCorners[2], cameraUvCorners[3])

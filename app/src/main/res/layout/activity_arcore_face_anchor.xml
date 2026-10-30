@@ -97,6 +97,10 @@
                     android:id="@+id/tool_blush"
                     style="@style/LipTuningToggle"
                     android:text="@string/tool_blush" />
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/tool_foundation"
+                    style="@style/LipTuningToggle"
+                    android:text="@string/tool_foundation" />
             </com.google.android.material.button.MaterialButtonToggleGroup>
 
             <com.google.android.material.switchmaterial.SwitchMaterial
@@ -172,6 +176,73 @@
                     android:text="@string/tuning_collapse"
                     android:textAllCaps="false"
                     android:textColor="@color/rose_300" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/foundation_tuning_panel"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:paddingHorizontal="14dp"
+                android:paddingBottom="12dp"
+                android:visibility="gone">
+                <com.google.android.material.switchmaterial.SwitchMaterial
+                    android:id="@+id/foundation_enabled"
+                    android:layout_width="match_parent"
+                    android:layout_height="48dp"
+                    android:text="@string/foundation_enabled"
+                    android:textColor="@color/text_primary_on_dark" />
+                <com.google.android.material.switchmaterial.SwitchMaterial
+                    android:id="@+id/foundation_left_half_only"
+                    android:layout_width="match_parent"
+                    android:layout_height="48dp"
+                    android:checked="true"
+                    android:text="@string/foundation_left_half_only"
+                    android:textColor="@color/text_primary_on_dark" />
+                <TextView
+                    android:id="@+id/foundation_coverage_label"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:labelFor="@id/foundation_coverage"
+                    android:text="@string/foundation_coverage"
+                    android:textColor="@color/text_primary_on_dark"
+                    android:textSize="13sp" />
+                <SeekBar
+                    android:id="@+id/foundation_coverage"
+                    android:layout_width="match_parent"
+                    android:layout_height="48dp"
+                    android:contentDescription="@string/foundation_coverage"
+                    android:max="100"
+                    android:progress="15" />
+                <TextView
+                    android:id="@+id/foundation_retouch_label"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:labelFor="@id/foundation_retouch"
+                    android:text="@string/foundation_retouch"
+                    android:textColor="@color/text_primary_on_dark"
+                    android:textSize="13sp" />
+                <SeekBar
+                    android:id="@+id/foundation_retouch"
+                    android:layout_width="match_parent"
+                    android:layout_height="48dp"
+                    android:contentDescription="@string/foundation_retouch"
+                    android:max="500"
+                    android:progress="200" />
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/foundation_natural_finish"
+                    android:textColor="@color/text_secondary_on_dark"
+                    android:textSize="12sp" />
+                <TextView
+                    android:id="@+id/foundation_sync_hint"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/foundation_sync_required"
+                    android:textColor="@color/text_secondary_on_dark"
+                    android:textSize="12sp"
+                    android:visibility="gone" />
             </LinearLayout>
 
             <LinearLayout

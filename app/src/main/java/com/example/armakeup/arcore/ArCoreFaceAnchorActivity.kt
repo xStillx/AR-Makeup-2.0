@@ -45,6 +45,8 @@ import com.example.armakeup.makeup.LipLinerStyle
 import com.example.armakeup.makeup.LipMeshTessellator
 import com.example.armakeup.makeup.BlushCatalog
 import com.example.armakeup.makeup.BlushStyle
+import com.example.armakeup.makeup.FoundationCatalog
+import com.example.armakeup.makeup.FoundationStyle
 import com.google.ar.core.ArCoreApk
 import com.google.ar.core.Config
 import com.google.ar.core.Session
@@ -84,6 +86,10 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
     private val shadeControls = mutableListOf<ShadeControl>()
     private var editingLiner = false
     private var editingBlush = false
+    private var editingFoundation = false
+    private var selectedFoundationShadeId = FoundationCatalog.defaultShade.id
+    private var foundationStyle = FoundationStyle()
+    private var updatingFoundationControls = false
     private var selectedBlushShadeId = BlushCatalog.shades.first().id
     private var blushStyle = BlushStyle()
     private var updatingBlushControls = false
@@ -155,6 +161,7 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
         bindLowerLipCoverage()
         bindLipContourPoints()
         bindBlushControls()
+        bindFoundationControls()
         bindLinerControls()
         createShadePalette()
         createTuningControls()
@@ -204,6 +211,7 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
             if (!isChecked) return@addOnButtonCheckedListener
             val sameFrame = checkedId == R.id.timeline_same_frame
             binding.blushSyncHint.visibility = if (sameFrame) View.GONE else View.VISIBLE
+            binding.foundationSyncHint.visibility = if (sameFrame) View.GONE else View.VISIBLE
             surfaceView.queueEvent { renderer.setSameFrameSynchronizationEnabled(sameFrame) }
         }
         binding.permissionButton.setOnClickListener {
@@ -248,6 +256,13 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
             )
         }
         binding.resetTuning.setOnClickListener {
+            if (editingFoundation) {
+                foundationStyle = foundationStyle.copy(coverage = FoundationStyle.DEFAULT_COVERAGE,
+                    retouch = FoundationStyle.DEFAULT_RETOUCH)
+                updateFoundationControls()
+                persistFoundation()
+                return@setOnClickListener
+            }
             if (editingBlush) {
                 blushStyle = blushStyle.copy(opacity = BlushStyle.DEFAULT_OPACITY,
                     saturation = BlushStyle.DEFAULT_SATURATION)
@@ -277,6 +292,17 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
         }
         binding.copyTuning.setOnClickListener {
             val text = buildString {
+                if (editingFoundation) {
+                    appendLine("tool=FOUNDATION")
+                    appendLine("foundation_enabled=${foundationStyle.enabled}")
+                    appendLine("foundation_shade=$selectedFoundationShadeId")
+                    appendLine("foundation_rgb=${foundationStyle.color.red8Bit},${foundationStyle.color.green8Bit},${foundationStyle.color.blue8Bit}")
+                    appendLine("foundation_coverage=${String.format(Locale.US, "%.2f", foundationStyle.coverage)}")
+                    appendLine("foundation_retouch=${String.format(Locale.US, "%.2f", foundationStyle.retouch)}")
+                    appendLine("foundation_left_half_only=${foundationStyle.leftHalfOnly}")
+                    appendLine("foundation_finish=NATURAL")
+                    return@buildString
+                }
                 if (editingBlush) {
                     appendLine("tool=BLUSH")
                     appendLine("blush_enabled=${blushStyle.enabled}")
@@ -396,8 +422,10 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
             blur = preferences.getFloat("liner_blur_v1", 2f)
                 .takeIf { it.isFinite() }?.coerceIn(0f, 2f) ?: 2f,
         )
-        editingLiner = !editingBlush && preferences.getBoolean("editing_liner_v1", false)
+        editingBlush = !editingFoundation && editingBlush
+        editingLiner = !editingFoundation && !editingBlush && preferences.getBoolean("editing_liner_v1", false)
         binding.makeupToolGroup.check(when {
+            editingFoundation -> R.id.tool_foundation
             editingBlush -> R.id.tool_blush
             editingLiner -> R.id.tool_liner
             else -> R.id.tool_lipstick
@@ -408,10 +436,12 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
             if (!checked) return@addOnButtonCheckedListener
             editingLiner = id == R.id.tool_liner
             editingBlush = id == R.id.tool_blush
+            editingFoundation = id == R.id.tool_foundation
             createShadePalette()
             updateToolPanels()
             persistLiner()
             persistBlush()
+            persistFoundation()
         }
         binding.linerEnabled.setOnCheckedChangeListener { _, enabled ->
             if (updatingLinerControls) return@setOnCheckedChangeListener
@@ -450,9 +480,87 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
     }
 
     private fun updateToolPanels() {
-        binding.tuningScroll.visibility = if (tuningExpanded && !editingLiner && !editingBlush) View.VISIBLE else View.GONE
+        binding.tuningScroll.visibility = if (tuningExpanded && !editingLiner && !editingBlush && !editingFoundation) View.VISIBLE else View.GONE
         binding.linerTuningPanel.visibility = if (tuningExpanded && editingLiner) View.VISIBLE else View.GONE
         binding.blushTuningPanel.visibility = if (tuningExpanded && editingBlush) View.VISIBLE else View.GONE
+        binding.foundationTuningPanel.visibility = if (tuningExpanded && editingFoundation) View.VISIBLE else View.GONE
+    }
+
+    private fun bindFoundationControls() {
+        val preferences = getSharedPreferences(TUNING_PREFERENCES, Context.MODE_PRIVATE)
+        val shade = FoundationCatalog.shades.firstOrNull {
+            it.id == preferences.getString("foundation_shade_v1", null)
+        } ?: FoundationCatalog.defaultShade
+        selectedFoundationShadeId = shade.id
+        editingFoundation = preferences.getBoolean("editing_foundation_v1", false)
+        foundationStyle = FoundationStyle(
+            enabled = preferences.getBoolean("foundation_enabled_v1", false), color = shade.color,
+            coverage = preferences.getFloat("foundation_coverage_v1", FoundationStyle.DEFAULT_COVERAGE)
+                .takeIf { it.isFinite() }?.coerceIn(0f, 1f) ?: FoundationStyle.DEFAULT_COVERAGE,
+            retouch = preferences.getFloat("foundation_retouch_v1", FoundationStyle.DEFAULT_RETOUCH)
+                .takeIf { it.isFinite() }?.coerceIn(0f, FoundationStyle.MAX_RETOUCH) ?: FoundationStyle.DEFAULT_RETOUCH,
+            leftHalfOnly = preferences.getBoolean("foundation_left_half_only_v1", true),
+        )
+        updateFoundationControls()
+        binding.foundationEnabled.setOnCheckedChangeListener { _, enabled ->
+            if (updatingFoundationControls) return@setOnCheckedChangeListener
+            foundationStyle = foundationStyle.copy(enabled = enabled)
+            renderer.setFoundationStyle(foundationStyle)
+            persistFoundation()
+        }
+        binding.foundationLeftHalfOnly.setOnCheckedChangeListener { _, leftHalfOnly ->
+            if (updatingFoundationControls) return@setOnCheckedChangeListener
+            foundationStyle = foundationStyle.copy(leftHalfOnly = leftHalfOnly)
+            renderer.setFoundationStyle(foundationStyle)
+            persistFoundation()
+        }
+        binding.foundationCoverage.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(bar: SeekBar, progress: Int, fromUser: Boolean) {
+                if (updatingFoundationControls || !fromUser) return
+                foundationStyle = foundationStyle.copy(coverage = progress / 100f)
+                updateFoundationControls()
+                persistFoundation()
+            }
+            override fun onStartTrackingTouch(bar: SeekBar) = Unit
+            override fun onStopTrackingTouch(bar: SeekBar) = persistFoundation()
+        })
+        binding.foundationRetouch.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(bar: SeekBar, progress: Int, fromUser: Boolean) {
+                if (updatingFoundationControls || !fromUser) return
+                foundationStyle = foundationStyle.copy(retouch = progress / 100f)
+                updateFoundationControls()
+                persistFoundation()
+            }
+            override fun onStartTrackingTouch(bar: SeekBar) = Unit
+            override fun onStopTrackingTouch(bar: SeekBar) = persistFoundation()
+        })
+    }
+
+    private fun updateFoundationControls() {
+        updatingFoundationControls = true
+        binding.foundationEnabled.isChecked = foundationStyle.enabled
+        binding.foundationLeftHalfOnly.isChecked = foundationStyle.leftHalfOnly
+        val progress = (foundationStyle.coverage * 100).roundToInt()
+        binding.foundationCoverage.progress = progress
+        binding.foundationCoverageLabel.text = getString(R.string.foundation_coverage_value, progress)
+        binding.foundationCoverage.contentDescription = binding.foundationCoverageLabel.text
+        val retouchProgress = (foundationStyle.retouch * 100).roundToInt()
+        binding.foundationRetouch.progress = retouchProgress
+        binding.foundationRetouchLabel.text = getString(R.string.foundation_retouch_value, retouchProgress)
+        binding.foundationRetouch.contentDescription = binding.foundationRetouchLabel.text
+        updatingFoundationControls = false
+        renderer.setFoundationStyle(foundationStyle)
+    }
+
+    private fun persistFoundation() {
+        getSharedPreferences(TUNING_PREFERENCES, Context.MODE_PRIVATE).edit()
+            .putString("foundation_shade_v1", selectedFoundationShadeId)
+            .putBoolean("foundation_enabled_v1", foundationStyle.enabled)
+            .putFloat("foundation_coverage_v1", foundationStyle.coverage)
+            .putFloat("foundation_retouch_v1", foundationStyle.retouch)
+            .putBoolean("foundation_left_half_only_v1", foundationStyle.leftHalfOnly)
+            .putBoolean("editing_foundation_v1", editingFoundation)
+            .apply()
     }
 
     private fun bindBlushControls() {
@@ -525,6 +633,7 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
     }
 
     private fun selectedPaletteKey(): String? = when {
+        editingFoundation -> selectedFoundationShadeId
         editingBlush -> selectedBlushShadeId
         editingLiner -> selectedLinerShadeId
         else -> selectedShadeKey
@@ -560,7 +669,15 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
     private fun createShadePalette() {
         binding.lipShadeContainer.removeAllViews()
         shadeControls.clear()
-        val palette = if (editingBlush) BlushCatalog.shades.map { shade ->
+        val palette = if (editingFoundation) FoundationCatalog.shades.map { shade ->
+            PaletteEntry(shade.id, "${shade.brand}\n${shade.product}", shade.name, shade.color) {
+                selectedFoundationShadeId = shade.id
+                foundationStyle = foundationStyle.copy(enabled = true, color = shade.color)
+                updateFoundationControls()
+                updateShadeSelection()
+                persistFoundation()
+            }
+        } else if (editingBlush) BlushCatalog.shades.map { shade ->
             PaletteEntry(shade.id, getString(R.string.tool_blush), shade.name, shade.color) {
                 selectedBlushShadeId = shade.id
                 blushStyle = blushStyle.copy(enabled = true, color = shade.color)
@@ -605,8 +722,8 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
             val productLabel = TextView(this).apply {
                 text = entry.product
                 textSize = 11f
-                minLines = 2
-                maxLines = 2
+                minLines = if (editingFoundation) 4 else 2
+                maxLines = minLines
                 ellipsize = TextUtils.TruncateAt.END
                 includeFontPadding = false
                 gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL

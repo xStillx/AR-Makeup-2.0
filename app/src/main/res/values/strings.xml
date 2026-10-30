@@ -58,6 +58,15 @@
     <string name="finish_group">МАТЕРИАЛ</string>
     <string name="lip_shade_accessibility">%1$s, оттенок %2$s</string>
     <string name="tool_blush">Румяна</string>
+    <string name="tool_foundation">Тон</string>
+    <string name="foundation_enabled">Тональный крем</string>
+    <string name="foundation_left_half_only">Тон только слева (в предпросмотре)</string>
+    <string name="foundation_coverage">Укрывистость</string>
+    <string name="foundation_coverage_value">Укрывистость: %1$d%%</string>
+    <string name="foundation_retouch">Ретушь кожи</string>
+    <string name="foundation_retouch_value">Ретушь кожи: %1$d%%</string>
+    <string name="foundation_natural_finish">Натуральный финиш · оттенки для примерки</string>
+    <string name="foundation_sync_required">Для тонального крема выберите «Sync кадр» в параметрах помады.</string>
     <string name="blush_enabled">Показывать румяна</string>
     <string name="blush_intensity">Интенсивность румян</string>
     <string name="blush_intensity_value">Интенсивность румян: %1$d%%</string>
