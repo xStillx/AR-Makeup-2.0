@@ -44,47 +44,12 @@ internal object FoundationMaterial {
         varying vec2 vUv;
         void main() { gl_FragColor = texture2D(uCamera, vUv); }
     """
-    const val RETOUCH_FRAGMENT = """
-        precision highp float;
+    // Internal layer alpha carries the applied smoothing weight, not transparency.
+    const val BASE_COPY_FRAGMENT = """
+        precision mediump float;
         uniform sampler2D uCamera;
-        uniform vec2 uRadius;
-        uniform float uRetouch;
         varying vec2 vUv;
-    """ + TRANSFER + """
-        float redness(vec3 c) { return (c.r - c.g) / max(c.r + c.g, 0.02); }
-        void main() {
-            vec3 center = linearColor(texture2D(uCamera, vUv).rgb);
-            vec3 sum = vec3(0.0); vec3 lowest = vec3(1.0); vec3 highest = vec3(0.0);
-            float lowY = 1.0; float highY = 0.0;
-            // A trimmed neighbourhood estimate resists an isolated spot without
-            // treating the spot itself as an edge that must be preserved.
-            for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++) {
-                if (x != 0 || y != 0) {
-                    vec3 sampleColor = linearColor(texture2D(uCamera,
-                        clamp(vUv + vec2(float(x), float(y)) * uRadius, 0.0, 1.0)).rgb);
-                    sum += sampleColor; lowest = min(lowest, sampleColor); highest = max(highest, sampleColor);
-                    float yValue = luminance(sampleColor);
-                    lowY = min(lowY, yValue); highY = max(highY, yValue);
-                }
-            }
-            vec3 baseline = (sum - lowest - highest) / 6.0;
-            float baselineY = max(luminance(baseline), 0.005);
-            float centerY = luminance(center);
-            float redSpot = smoothstep(0.025, 0.12, redness(center) - redness(baseline));
-            float deficit = max((baselineY - centerY) / baselineY, 0.0);
-            float darkSpot = smoothstep(0.08, 0.27, deficit) * (1.0 - smoothstep(0.45, 0.70, deficit));
-            float value = max(center.r, max(center.g, center.b));
-            float saturation = (value - min(center.r, min(center.g, center.b))) / max(value, 0.005);
-            darkSpot *= smoothstep(0.12, 0.30, saturation);
-            // Strong neighbourhood edges, deep dark features and highlights are not blemishes.
-            float edgeGuard = 1.0 - smoothstep(0.30, 0.90, (highY - lowY) / baselineY);
-            float skinLight = smoothstep(0.008, 0.03, centerY) * (1.0 - smoothstep(0.65, 0.90, centerY));
-            float spotConfidence = max(redSpot, darkSpot * 0.70);
-            float extra = max(clamp(uRetouch, 0.0, 5.0) - 1.0, 0.0);
-            if (extra > 0.0) spotConfidence = pow(spotConfidence, 1.0 / (1.0 + 0.5 * extra));
-            float confidence = spotConfidence * edgeGuard * skinLight;
-            gl_FragColor = vec4(srgbColor(baseline), confidence);
-        }
+        void main() { gl_FragColor = vec4(texture2D(uCamera, vUv).rgb, 0.0); }
     """
     const val VERTEX = """
         attribute vec4 aPosition;
@@ -98,7 +63,6 @@ internal object FoundationMaterial {
         uniform sampler2D uSoft;
         uniform sampler2D uRetouchMap;
         uniform float uRetouch;
-        uniform vec2 uDetailStep;
         uniform vec2 uViewport;
         uniform vec2 uFeatureScale;
         uniform vec3 uColor;
@@ -112,7 +76,7 @@ internal object FoundationMaterial {
         uniform vec4 uNostrils;
         uniform vec3 uReferences[4];
         varying vec4 vSkin;
-    """ + TRANSFER + """
+    """ + TRANSFER + SkinRetouchMaterial.SMOOTHING + """
         float segmentDistance(vec2 p, vec2 a, vec2 b) {
             vec2 edge = b - a;
             vec2 offset = p - a;
@@ -202,29 +166,9 @@ internal object FoundationMaterial {
                     (1.0 - smoothstep(0.25, 0.75, chromaDifference));
                 mask *= mix(1.0, skinLike, smoothstep(0.0, 0.65, vSkin.w));
             }
-            if (uRetouch > 0.0) {
-                vec4 neighbourhood = texture2D(uRetouchMap, uv);
-                float level = clamp(uRetouch, 0.0, 5.0);
-                float localAmount = neighbourhood.a * 0.90;
-                // Keep 0..100% unchanged; higher levels increase correction without
-                // extrapolating past the reconstructed local skin colour.
-                float correction = level <= 1.0 ? localAmount * level :
-                    1.0 - pow(1.0 - localAmount, level);
-                float strength = mask * correction;
-                if (strength > 0.0001) {
-                    vec3 fine = camera * 0.5;
-                    fine += (linearColor(texture2D(uCamera, uv + vec2(uDetailStep.x, 0.0)).rgb) +
-                        linearColor(texture2D(uCamera, uv - vec2(uDetailStep.x, 0.0)).rgb) +
-                        linearColor(texture2D(uCamera, uv + vec2(0.0, uDetailStep.y)).rgb) +
-                        linearColor(texture2D(uCamera, uv - vec2(0.0, uDetailStep.y)).rgb)) * 0.125;
-                    float fineY = max(luminance(fine), 0.005);
-                    // Keep sub-millimetre luminance detail (pores) while reducing the
-                    // larger-scale red/dark variation. No whole-face smoothing.
-                    float microDetail = clamp((luminance(camera) - fineY) / fineY, -0.18, 0.18);
-                    vec3 corrected = linearColor(neighbourhood.rgb) * (1.0 + microDetail);
-                    camera = mix(camera, corrected, strength);
-                }
-            }
+            vec4 filtered = texture2D(uRetouchMap, uv);
+            float smoothing = mask * clamp(uRetouch, 0.0, 1.0) * filtered.a;
+            camera *= mix(1.0, skinSmoothingGain(camera, filtered), smoothing);
             vec3 soft = linearColor(texture2D(uSoft, uv).rgb);
             float cameraY = luminance(camera);
             float softY = max(luminance(soft), 0.002);
@@ -252,7 +196,7 @@ internal object FoundationMaterial {
             float amount = mask * coverage * 0.90 * (1.0 - 0.85 * highlight);
             // Shadow/near-black guard avoids amplified chromatic noise.
             amount *= smoothstep(0.003, 0.025, cameraY);
-            gl_FragColor = vec4(srgbColor(clamp(mix(camera, material, amount), 0.0, 1.0)), 1.0);
+            gl_FragColor = vec4(srgbColor(clamp(mix(camera, material, amount), 0.0, 1.0)), smoothing);
         }
     """
 

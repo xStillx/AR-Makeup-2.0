@@ -13,7 +13,6 @@ internal class FoundationRenderer(private val createProgram: (String, String) ->
     private data class Target(val texture: Int, val framebuffer: Int, val depth: Int = 0)
     private var soft: Target? = null
     private var output: Target? = null
-    private var retouch: Target? = null
     private var width = 0
     private var height = 0
     private var softWidth = 0
@@ -22,40 +21,37 @@ internal class FoundationRenderer(private val createProgram: (String, String) ->
     private var softProgram = 0
     private var materialProgram = 0
     private var depthProgram = 0
-    private var retouchProgram = 0
-    private var retouchWidth = 0
-    private var retouchHeight = 0
     private var renderedMesh: FoundationFaceMesh? = null
     private var renderedStyle: FoundationStyle? = null
+    private var renderedRevision = -1L
     private var renderedCamera = 0
     private val quad = floats(8).apply { put(floatArrayOf(-1f,-1f, 1f,-1f, -1f,1f, 1f,1f)); position(0) }
     private var vertices = floats(0)
     private var indices: ShortBuffer = ByteBuffer.allocateDirect(0).asShortBuffer()
 
     fun onContextCreated() {
-        soft = null; output = null; retouch = null; width = 0; height = 0
+        soft = null; output = null; width = 0; height = 0
         // Compile lazily. Disabled foundation uses no additional GPU programs or targets.
         copyProgram = 0; softProgram = 0; materialProgram = 0; depthProgram = 0
-        retouchProgram = 0
         renderedMesh = null; renderedStyle = null; renderedCamera = 0
     }
 
     fun releaseTargets() {
-        for (target in listOfNotNull(soft, output, retouch)) {
+        for (target in listOfNotNull(soft, output)) {
             GLES20.glDeleteTextures(1, intArrayOf(target.texture), 0)
             GLES20.glDeleteFramebuffers(1, intArrayOf(target.framebuffer), 0)
             if (target.depth != 0) GLES20.glDeleteRenderbuffers(1, intArrayOf(target.depth), 0)
         }
-        soft = null; output = null; retouch = null; width = 0; height = 0
+        soft = null; output = null; width = 0; height = 0
         renderedMesh = null; renderedStyle = null; renderedCamera = 0
     }
 
     fun render(mesh: FoundationFaceMesh, camera: Int, viewportWidth: Int, viewportHeight: Int,
-        style: FoundationStyle): Int {
+        style: FoundationStyle, smoothing: SkinRetouchRenderer.Frame?): Int {
         if (output != null && width == viewportWidth && height == viewportHeight &&
-            renderedMesh === mesh && renderedStyle == style && renderedCamera == camera) return output!!.texture
+            renderedMesh === mesh && renderedStyle == style && renderedCamera == camera && renderedRevision == (smoothing?.revision ?: -1L)) return output!!.texture
         if (materialProgram == 0) {
-            copyProgram = createProgram(FoundationMaterial.QUAD_VERTEX, FoundationMaterial.COPY_FRAGMENT)
+            copyProgram = createProgram(FoundationMaterial.QUAD_VERTEX, FoundationMaterial.BASE_COPY_FRAGMENT)
             softProgram = createProgram(FoundationMaterial.QUAD_VERTEX, FoundationMaterial.SOFT_FRAGMENT)
             materialProgram = createProgram(FoundationMaterial.VERTEX, FoundationMaterial.FRAGMENT)
             depthProgram = createProgram(BlushMaterial.DEPTH_VERTEX_SHADER, BlushMaterial.DEPTH_FRAGMENT_SHADER)
@@ -69,20 +65,6 @@ internal class FoundationRenderer(private val createProgram: (String, String) ->
             soft = createTarget(softWidth, softHeight, false)
             output = createTarget(width, height, true)
         }
-        if (style.retouch > 0f && retouch == null) {
-            if (retouchProgram == 0) retouchProgram = createProgram(FoundationMaterial.QUAD_VERTEX,
-                FoundationMaterial.RETOUCH_FRAGMENT)
-            val scale = minOf(1f, 512f / maxOf(width, height))
-            retouchWidth = (width * scale).roundToInt().coerceAtLeast(1)
-            retouchHeight = (height * scale).roundToInt().coerceAtLeast(1)
-            retouch = createTarget(retouchWidth, retouchHeight, false)
-        } else if (style.retouch <= 0f) {
-            retouch?.let {
-                GLES20.glDeleteTextures(1, intArrayOf(it.texture), 0)
-                GLES20.glDeleteFramebuffers(1, intArrayOf(it.framebuffer), 0)
-            }
-            retouch = null
-        }
         try {
             GLES20.glDisable(GLES20.GL_BLEND)
             GLES20.glDisable(GLES20.GL_DEPTH_TEST)
@@ -93,23 +75,6 @@ internal class FoundationRenderer(private val createProgram: (String, String) ->
             GLES20.glUniform2f(GLES20.glGetUniformLocation(softProgram, "uRadius"),
                 mesh.sampleRadius, mesh.sampleRadius * width / height)
             drawQuad(softProgram, camera)
-
-            retouch?.let {
-                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, it.framebuffer)
-                GLES20.glViewport(0, 0, retouchWidth, retouchHeight)
-                GLES20.glUseProgram(retouchProgram)
-                // Above 100%, also reach beyond larger spots; an alpha-only boost
-                // saturates early and barely changes the result at high slider values.
-                val retouchLevel = style.retouch.coerceIn(0f, FoundationStyle.MAX_RETOUCH)
-                val extraRetouch = (retouchLevel - 1f).coerceAtLeast(0f)
-                val neighbourhoodRadius = 0.0022f + 0.0007f * extraRetouch
-                val radiusLimit = 0.03f + 0.0225f * extraRetouch
-                GLES20.glUniform2f(GLES20.glGetUniformLocation(retouchProgram, "uRadius"),
-                    (neighbourhoodRadius / (2f * mesh.featureScale[0])).coerceIn(1f / width, radiusLimit),
-                    (neighbourhoodRadius / (2f * mesh.featureScale[1])).coerceIn(1f / height, radiusLimit))
-                GLES20.glUniform1f(GLES20.glGetUniformLocation(retouchProgram, "uRetouch"), retouchLevel)
-                drawQuad(retouchProgram, camera)
-            }
 
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, output!!.framebuffer)
             GLES20.glViewport(0, 0, width, height)
@@ -131,11 +96,8 @@ internal class FoundationRenderer(private val createProgram: (String, String) ->
             GLES20.glUseProgram(materialProgram)
             texture(materialProgram, "uCamera", 0, camera)
             texture(materialProgram, "uSoft", 1, soft!!.texture)
-            texture(materialProgram, "uRetouchMap", 2, retouch?.texture ?: soft!!.texture)
+            texture(materialProgram, "uRetouchMap", 2, smoothing?.texture ?: soft!!.texture)
             GLES20.glUniform1f(GLES20.glGetUniformLocation(materialProgram, "uRetouch"), style.retouch)
-            GLES20.glUniform2f(GLES20.glGetUniformLocation(materialProgram, "uDetailStep"),
-                (0.00035f / (2f * mesh.featureScale[0])).coerceIn(1f / width, 3f / width),
-                (0.00035f / (2f * mesh.featureScale[1])).coerceIn(1f / height, 3f / height))
             GLES20.glUniform2f(GLES20.glGetUniformLocation(materialProgram, "uViewport"), width.toFloat(), height.toFloat())
             GLES20.glUniform2f(GLES20.glGetUniformLocation(materialProgram, "uFeatureScale"),
                 mesh.featureScale[0], mesh.featureScale[1])
@@ -160,6 +122,7 @@ internal class FoundationRenderer(private val createProgram: (String, String) ->
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
             GLES20.glViewport(0, 0, viewportWidth, viewportHeight)
         }
+        renderedRevision = smoothing?.revision ?: -1L
         renderedMesh = mesh; renderedStyle = style; renderedCamera = camera
         return output!!.texture
     }

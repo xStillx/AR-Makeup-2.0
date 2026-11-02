@@ -14,6 +14,7 @@ import com.example.armakeup.makeup.LipstickFinish
 import com.example.armakeup.makeup.LipLinerStyle
 import com.example.armakeup.makeup.BlushStyle
 import com.example.armakeup.makeup.FoundationStyle
+import com.example.armakeup.makeup.ConcealerStyle
 import com.example.armakeup.tracking.CanonicalFaceTransform
 import com.example.armakeup.tracking.FillCenterTransform
 import com.example.armakeup.tracking.NormalizedImageTransform
@@ -59,7 +60,10 @@ internal class ArCoreFaceAnchorRenderer(
     private var blushProgram = 0
     private var pairedBlushProgram = 0
     private var foundationBlushProgram = 0
+    private val skinRetouchRenderer = SkinRetouchRenderer(::createProgram)
     private val foundationRenderer = FoundationRenderer(::createProgram)
+    private val concealerRenderer = ConcealerRenderer(::createProgram)
+    private var presentedConcealerMesh: ConcealerFaceMesh? = null
     private var presentedFoundationMesh: FoundationFaceMesh? = null
     private var blushDepthProgram = 0
     private var blushVertices = directFloatBuffer(0)
@@ -172,6 +176,11 @@ internal class ArCoreFaceAnchorRenderer(
     @Volatile
     private var foundationStyle = FoundationStyle()
 
+    @Volatile
+    private var concealerStyle = ConcealerStyle()
+
+    fun setConcealerStyle(value: ConcealerStyle) { concealerStyle = value }
+
     fun setFoundationStyle(value: FoundationStyle) {
         foundationStyle = value
     }
@@ -218,7 +227,9 @@ internal class ArCoreFaceAnchorRenderer(
         invalidateSameFrameState()
         if (!enabled) {
             pairedCameraFrames.release()
+            skinRetouchRenderer.releaseTargets()
             foundationRenderer.releaseTargets()
+            concealerRenderer.releaseTargets()
         }
         lipContourRefiner.reset()
         lipFrameDiagnostics.reset()
@@ -253,6 +264,8 @@ internal class ArCoreFaceAnchorRenderer(
         presentedObservation = null
         presentedBlushMesh = null
         presentedFoundationMesh = null
+
+        presentedConcealerMesh = null
         lipContourRefiner.reset()
         lipFrameDiagnostics.reset()
         lastLipMetricsTimestampNs = 0L
@@ -261,7 +274,9 @@ internal class ArCoreFaceAnchorRenderer(
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
         pairedCameraFrames.onContextCreated()
         lipBlurFrames.onContextCreated()
+        skinRetouchRenderer.onContextCreated()
         foundationRenderer.onContextCreated()
+        concealerRenderer.onContextCreated()
         foundationBlushProgram = 0
         invalidateSameFrameState()
         cameraTextureBoundSession = null
@@ -280,7 +295,10 @@ internal class ArCoreFaceAnchorRenderer(
         blushDepthProgram = createProgram(BlushMaterial.DEPTH_VERTEX_SHADER, BlushMaterial.DEPTH_FRAGMENT_SHADER)
         // Only the sampler changes. All pigment, lighting and coverage equations stay identical.
         pairedBackgroundProgram = createProgram(
-            BACKGROUND_VERTEX_SHADER, bufferedCameraShader(BACKGROUND_FRAGMENT_SHADER),
+            BACKGROUND_VERTEX_SHADER, bufferedCameraShader(BACKGROUND_FRAGMENT_SHADER).replace(
+                "gl_FragColor = texture2D(uCamera, vTexCoord);",
+                "gl_FragColor = vec4(texture2D(uCamera, vTexCoord).rgb, 1.0);",
+            ),
         )
         pairedLipMeshProgram = createProgram(
             LIP_MESH_VERTEX_SHADER, bufferedCameraShader(LIP_MESH_FRAGMENT_SHADER),
@@ -410,6 +428,8 @@ internal class ArCoreFaceAnchorRenderer(
                 presentedPair = pending
                 presentedObservation = completion.observation
                 presentedFoundationMesh = null
+
+                presentedConcealerMesh = null
                 presentedBlushMesh = completion.observation?.takeIf { pending.faceTracked }?.let { observation ->
                     pending.blushMesh?.let { placeBlush(it, observation) }
                 }
@@ -426,6 +446,8 @@ internal class ArCoreFaceAnchorRenderer(
             presentedObservation = null
             presentedBlushMesh = null
             presentedFoundationMesh = null
+
+            presentedConcealerMesh = null
             lipContourRefiner.reset()
         }
 
@@ -465,15 +487,32 @@ internal class ArCoreFaceAnchorRenderer(
         transformedCameraUvs.clear()
         transformedCameraUvs.put(BUFFERED_CAMERA_UVS).position(0)
         val foundation = foundationStyle
+        val concealer = concealerStyle
+        val needsSmoothing = (foundation.enabled && foundation.coverage > 0f && foundation.retouch > 0f) ||
+            (concealer.enabled && concealer.coverage > 0f && concealer.retouch > 0f)
+        val smoothing = if (needsSmoothing && pair.faceTracked) {
+            (presentedFoundationMesh ?: presentedConcealerMesh?.face)?.let {
+                skinRetouchRenderer.render(it, textureId, viewportWidth, viewportHeight)
+            }
+        } else null
+        if (!needsSmoothing) skinRetouchRenderer.releaseTargets()
         val foundationTexture = if (foundation.enabled && foundation.coverage > 0f && pair.faceTracked) {
             presentedFoundationMesh?.let {
-                foundationRenderer.render(it, textureId, viewportWidth, viewportHeight, foundation)
+                foundationRenderer.render(it, textureId, viewportWidth, viewportHeight, foundation, smoothing)
             }
         } else null
         if (!foundation.enabled || foundation.coverage <= 0f) foundationRenderer.releaseTargets()
-        drawCameraQuad(pairedBackgroundProgram, GLES20.GL_TEXTURE_2D, foundationTexture ?: textureId)
+        val concealerTexture = if (concealer.enabled && concealer.coverage > 0f && pair.faceTracked) {
+            presentedConcealerMesh?.let {
+                concealerRenderer.render(it, textureId, foundationTexture ?: textureId,
+                    viewportWidth, viewportHeight, concealer, if (foundationTexture != null) foundation else null, smoothing)
+            }
+        } else null
+        if (!concealer.enabled || concealer.coverage <= 0f) concealerRenderer.releaseTargets()
+        val skinTexture = concealerTexture ?: foundationTexture
+        drawCameraQuad(pairedBackgroundProgram, GLES20.GL_TEXTURE_2D, skinTexture ?: textureId)
         if (pair.faceTracked && presentedObservation != null) {
-            presentedBlushMesh?.let { drawBlush(it, textureId, foundationTexture) }
+            presentedBlushMesh?.let { drawBlush(it, textureId, skinTexture) }
         }
         val hybridStatus = presentedObservation?.takeIf { pair.faceTracked }?.let {
             drawMediaPipeLipContour(
@@ -507,7 +546,8 @@ internal class ArCoreFaceAnchorRenderer(
         val style = blushStyle
         val foundation = foundationStyle
         if (face == null || (!(style.enabled && style.opacity > 0f) &&
-            !(foundation.enabled && foundation.coverage > 0f))) return null
+            !(foundation.enabled && foundation.coverage > 0f) &&
+            !(concealerStyle.enabled && concealerStyle.coverage > 0f))) return null
         return BlushFaceMesh.capture(face.meshVertices, face.meshNormals, face.meshTriangleIndices,
             mvp, viewModel)
     }
@@ -518,9 +558,14 @@ internal class ArCoreFaceAnchorRenderer(
         val measured = MediaPipeBlushSurface.create(mesh, observation.coordinates,
             face.sourceWidth, face.sourceHeight, face.rotationDegrees, face.mirrorHorizontal,
             viewportWidth, viewportHeight, MediaPipeBlushTopology.indices)
-        // A missing calibrated surface disables foundation for this pair; no ARCore-only fallback.
-        presentedFoundationMesh = if (foundationStyle.enabled) measured?.let {
+        // Skin materials require this pair's calibrated MP surface; no ARCore-only fallback.
+        val skinFace = if (foundationStyle.enabled || concealerStyle.enabled) measured?.let {
             FoundationFaceMesh.create(it, viewportWidth.toFloat() / viewportHeight)
+        } else null
+
+        presentedFoundationMesh = if (foundationStyle.enabled) skinFace else null
+        presentedConcealerMesh = if (concealerStyle.enabled) measured?.let {
+            ConcealerFaceMesh.create(it, viewportWidth.toFloat() / viewportHeight, skinFace)
         } else null
         if (!blushStyle.enabled || blushStyle.opacity <= 0f) return null
         val surface = measured ?: mesh

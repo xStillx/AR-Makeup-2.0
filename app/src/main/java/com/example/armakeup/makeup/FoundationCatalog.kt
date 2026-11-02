@@ -37,7 +37,7 @@ internal data class FoundationStyle(
 ) {
     companion object {
         const val DEFAULT_COVERAGE = 0.15f
-        const val DEFAULT_RETOUCH = 2f
-        const val MAX_RETOUCH = 5f
+        const val DEFAULT_RETOUCH = 0.2f
+        const val MAX_RETOUCH = 1f
     }
 }

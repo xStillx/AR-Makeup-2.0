@@ -101,6 +101,10 @@
                     android:id="@+id/tool_foundation"
                     style="@style/LipTuningToggle"
                     android:text="@string/tool_foundation" />
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/tool_concealer"
+                    style="@style/LipTuningToggle"
+                    android:text="@string/tool_concealer" />
             </com.google.android.material.button.MaterialButtonToggleGroup>
 
             <com.google.android.material.switchmaterial.SwitchMaterial
@@ -215,20 +219,20 @@
                     android:max="100"
                     android:progress="15" />
                 <TextView
-                    android:id="@+id/foundation_retouch_label"
+                    android:id="@+id/foundation_smoothing_label"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:labelFor="@id/foundation_retouch"
+                    android:labelFor="@id/foundation_smoothing"
                     android:text="@string/foundation_retouch"
                     android:textColor="@color/text_primary_on_dark"
                     android:textSize="13sp" />
                 <SeekBar
-                    android:id="@+id/foundation_retouch"
+                    android:id="@+id/foundation_smoothing"
                     android:layout_width="match_parent"
                     android:layout_height="48dp"
                     android:contentDescription="@string/foundation_retouch"
-                    android:max="500"
-                    android:progress="200" />
+                    android:max="100"
+                    android:progress="20" />
                 <TextView
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
@@ -240,6 +244,66 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:text="@string/foundation_sync_required"
+                    android:textColor="@color/text_secondary_on_dark"
+                    android:textSize="12sp"
+                    android:visibility="gone" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/concealer_tuning_panel"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:paddingHorizontal="14dp"
+                android:paddingBottom="12dp"
+                android:visibility="gone">
+                <com.google.android.material.switchmaterial.SwitchMaterial
+                    android:id="@+id/concealer_enabled"
+                    android:layout_width="match_parent"
+                    android:layout_height="48dp"
+                    android:text="@string/concealer_enabled"
+                    android:textColor="@color/text_primary_on_dark" />
+                <TextView
+                    android:id="@+id/concealer_coverage_label"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:labelFor="@id/concealer_coverage"
+                    android:text="@string/concealer_coverage"
+                    android:textColor="@color/text_primary_on_dark"
+                    android:textSize="13sp" />
+                <SeekBar
+                    android:id="@+id/concealer_coverage"
+                    android:layout_width="match_parent"
+                    android:layout_height="48dp"
+                    android:contentDescription="@string/concealer_coverage"
+                    android:max="100"
+                    android:progress="25" />
+                <TextView
+                    android:id="@+id/concealer_smoothing_label"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:labelFor="@id/concealer_smoothing"
+                    android:text="@string/concealer_retouch"
+                    android:textColor="@color/text_primary_on_dark"
+                    android:textSize="13sp" />
+                <SeekBar
+                    android:id="@+id/concealer_smoothing"
+                    android:layout_width="match_parent"
+                    android:layout_height="48dp"
+                    android:contentDescription="@string/concealer_retouch"
+                    android:max="100"
+                    android:progress="20" />
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/concealer_description"
+                    android:textColor="@color/text_secondary_on_dark"
+                    android:textSize="12sp" />
+                <TextView
+                    android:id="@+id/concealer_sync_hint"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/concealer_sync_required"
                     android:textColor="@color/text_secondary_on_dark"
                     android:textSize="12sp"
                     android:visibility="gone" />
