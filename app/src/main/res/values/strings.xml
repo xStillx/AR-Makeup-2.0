@@ -81,4 +81,17 @@
     <string name="blush_saturation">Насыщенность румян</string>
     <string name="blush_saturation_value">Насыщенность румян: %1$d%%</string>
     <string name="blush_sync_required">Для румян выберите «Sync кадр» в параметрах помады.</string>
+    <string name="tool_highlighter">Хайлайтер</string>
+    <string name="highlighter_enabled">Показывать хайлайтер</string>
+    <string name="highlighter_intensity">Интенсивность сияния</string>
+    <string name="highlighter_intensity_value">Интенсивность сияния: %1$d%%</string>
+    <string name="highlighter_cheeks">Скулы</string>
+    <string name="highlighter_nose">Нос</string>
+    <string name="highlighter_brows">Под бровями</string>
+    <string name="highlighter_cupid">Над губой</string>
+    <string name="highlighter_hint">Тестовые оттенки AR Makeup · сияние меняется при повороте лица</string>
+    <string name="highlighter_sync_required">Для хайлайтера выберите «Sync кадр» в параметрах помады.</string>
+    <string name="finish_shimmer">Шиммер</string>
+    <string name="finish_shimmer_gloss">Глянец + шиммер</string>
+    <string name="finish_shimmer_satin">Сатин + шиммер</string>
 </resources>

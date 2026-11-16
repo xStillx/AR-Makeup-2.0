@@ -51,6 +51,8 @@ internal data class LipstickTuning(
     val seamShadow: Float = 1f,
     val toothProtection: Float = 1f,
     val cameraSampleScale: Float = 1f,
+    val shimmerIntensity: Float = 3f,
+    val shimmerTransparency: Float = 15f,
 ) {
     fun withPigment(color: LipstickColor): LipstickTuning = copy(
         pigmentRed = color.red,
@@ -147,6 +149,10 @@ internal data class LipstickTuning(
 
             return when (finish) {
                 LipstickFinish.SATIN, LipstickFinish.GLOSS, LipstickFinish.OIL -> shared
+                LipstickFinish.SHIMMER, LipstickFinish.SHIMMER_GLOSS -> shared.copy(productTexture = LipstickTexture.LIQUID,
+                    pigmentBrightness = 1f, opacity = 0.99f)
+                LipstickFinish.SHIMMER_SATIN -> shared.copy(productTexture = LipstickTexture.CREAMY,
+                    pigmentBrightness = 1f, opacity = 0.99f)
                 LipstickFinish.MATTE, LipstickFinish.TINT -> shared.copy(
                     specular = 0.00f,
                     highlightRetention = 0.00f,
@@ -210,6 +216,10 @@ internal enum class LipstickTuningParameter(
     SPECULAR("БЛИКИ", "Сила отражения", 0f, 2f, 1f, update = { s, v -> s.copy(specular = v) }, read = { it.specular }),
     HIGHLIGHT_RETENTION("БЛИКИ", "Сохранение бликов камеры", 0f, 2f, 1f, update = { s, v -> s.copy(highlightRetention = v) }, read = { it.highlightRetention }),
     HIGHLIGHT_STRENGTH("БЛИКИ", "Яркость блика", 0f, 2f, 1f, update = { s, v -> s.copy(highlightStrength = v) }, read = { it.highlightStrength }),
+    SHIMMER_INTENSITY("БЛИКИ", "Интенсивность шиммера", 0f, 4f, 3f,
+        update = { s, v -> s.copy(shimmerIntensity = v) }, read = { it.shimmerIntensity }),
+    SHIMMER_TRANSPARENCY("БЛИКИ", "Прозрачность блёсток", 0f, 100f, 15f, decimals = 0,
+        update = { s, v -> s.copy(shimmerTransparency = v) }, read = { it.shimmerTransparency }),
     HIGHLIGHT_SIZE("БЛИКИ", "Размер блика", 0.4f, 2f, 1f, update = { s, v -> s.copy(highlightSize = v) }, read = { it.highlightSize }),
     HIGHLIGHT_THRESHOLD("БЛИКИ", "Порог блика", 0.5f, 1.8f, 1f, update = { s, v -> s.copy(highlightThreshold = v) }, read = { it.highlightThreshold }),
     HIGHLIGHT_CONCENTRATION("БЛИКИ", "Концентрация блика", 0.5f, 2f, 1f, update = { s, v -> s.copy(highlightConcentration = v) }, read = { it.highlightConcentration }),

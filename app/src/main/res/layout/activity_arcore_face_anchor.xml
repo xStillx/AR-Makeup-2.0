@@ -87,24 +87,28 @@
                 app:singleSelection="true">
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/tool_lipstick"
-                    style="@style/LipTuningToggle"
+                    style="@style/MakeupToolToggle"
                     android:text="@string/tool_lipstick" />
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/tool_liner"
-                    style="@style/LipTuningToggle"
+                    style="@style/MakeupToolToggle"
                     android:text="@string/tool_liner" />
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/tool_blush"
-                    style="@style/LipTuningToggle"
+                    style="@style/MakeupToolToggle"
                     android:text="@string/tool_blush" />
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/tool_foundation"
-                    style="@style/LipTuningToggle"
+                    style="@style/MakeupToolToggle"
                     android:text="@string/tool_foundation" />
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/tool_concealer"
-                    style="@style/LipTuningToggle"
+                    style="@style/MakeupToolToggle"
                     android:text="@string/tool_concealer" />
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/tool_highlighter"
+                    style="@style/MakeupToolToggle"
+                    android:text="@string/tool_highlighter" />
             </com.google.android.material.button.MaterialButtonToggleGroup>
 
             <com.google.android.material.switchmaterial.SwitchMaterial
@@ -180,6 +184,99 @@
                     android:text="@string/tuning_collapse"
                     android:textAllCaps="false"
                     android:textColor="@color/rose_300" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/highlighter_panel"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:paddingHorizontal="14dp"
+                android:paddingBottom="12dp"
+                android:visibility="gone">
+                <com.google.android.material.switchmaterial.SwitchMaterial
+                    android:id="@+id/highlighter_enabled"
+                    android:layout_width="match_parent"
+                    android:layout_height="48dp"
+                    android:text="@string/highlighter_enabled"
+                    android:textColor="@color/text_primary_on_dark" />
+                <TextView
+                    android:id="@+id/highlighter_finish"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:textColor="@color/rose_300"
+                    android:textSize="13sp" />
+                <TextView
+                    android:id="@+id/highlighter_intensity_label"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:labelFor="@id/highlighter_intensity"
+                    android:text="@string/highlighter_intensity"
+                    android:textColor="@color/text_primary_on_dark"
+                    android:textSize="13sp" />
+                <SeekBar
+                    android:id="@+id/highlighter_intensity"
+                    android:layout_width="match_parent"
+                    android:layout_height="48dp"
+                    android:contentDescription="@string/highlighter_intensity"
+                    android:max="150"
+                    android:progress="55" />
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal">
+                    <com.google.android.material.checkbox.MaterialCheckBox
+                        android:id="@+id/highlighter_cheeks"
+                        android:layout_width="0dp"
+                        android:layout_height="48dp"
+                        android:layout_weight="1"
+                        android:text="@string/highlighter_cheeks"
+                        android:textColor="@color/text_primary_on_dark"
+                        android:textSize="12sp" />
+                    <com.google.android.material.checkbox.MaterialCheckBox
+                        android:id="@+id/highlighter_nose"
+                        android:layout_width="0dp"
+                        android:layout_height="48dp"
+                        android:layout_weight="1"
+                        android:text="@string/highlighter_nose"
+                        android:textColor="@color/text_primary_on_dark"
+                        android:textSize="12sp" />
+                </LinearLayout>
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal">
+                    <com.google.android.material.checkbox.MaterialCheckBox
+                        android:id="@+id/highlighter_brows"
+                        android:layout_width="0dp"
+                        android:layout_height="48dp"
+                        android:layout_weight="1"
+                        android:text="@string/highlighter_brows"
+                        android:textColor="@color/text_primary_on_dark"
+                        android:textSize="12sp" />
+                    <com.google.android.material.checkbox.MaterialCheckBox
+                        android:id="@+id/highlighter_cupid"
+                        android:layout_width="0dp"
+                        android:layout_height="48dp"
+                        android:layout_weight="1"
+                        android:text="@string/highlighter_cupid"
+                        android:textColor="@color/text_primary_on_dark"
+                        android:textSize="12sp" />
+                </LinearLayout>
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/highlighter_hint"
+                    android:textColor="@color/text_secondary_on_dark"
+                    android:textSize="11sp" />
+                <TextView
+                    android:id="@+id/highlighter_sync_hint"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/highlighter_sync_required"
+                    android:textColor="@color/text_secondary_on_dark"
+                    android:textSize="12sp"
+                    android:visibility="gone" />
             </LinearLayout>
 
             <LinearLayout
@@ -494,9 +591,15 @@
                         style="@style/LipTuningSection"
                         android:text="@string/finish_group" />
 
+                    <HorizontalScrollView
+                        android:id="@+id/finish_scroll"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:fillViewport="true"
+                        android:scrollbars="none">
                     <com.google.android.material.button.MaterialButtonToggleGroup
                         android:id="@+id/finish_toggle_group"
-                        android:layout_width="match_parent"
+                        android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="5dp"
                         app:checkedButton="@id/finish_matte"
@@ -505,31 +608,44 @@
 
                         <com.google.android.material.button.MaterialButton
                             android:id="@+id/finish_matte"
-                            style="@style/LipTuningToggle"
+                            style="@style/LipFinishToggle"
                             android:text="@string/finish_matte" />
                         <com.google.android.material.button.MaterialButton
                             android:id="@+id/finish_satin"
-                            style="@style/LipTuningToggle"
+                            style="@style/LipFinishToggle"
                             android:text="@string/finish_satin" />
                         <com.google.android.material.button.MaterialButton
                             android:id="@+id/finish_gloss"
-                            style="@style/LipTuningToggle"
+                            style="@style/LipFinishToggle"
                             android:text="@string/finish_gloss" />
                         <com.google.android.material.button.MaterialButton
                             android:id="@+id/finish_oil"
-                            style="@style/LipTuningToggle"
+                            style="@style/LipFinishToggle"
                             android:visibility="gone"
                             android:text="@string/finish_oil" />
                         <com.google.android.material.button.MaterialButton
                             android:id="@+id/finish_tint"
-                            style="@style/LipTuningToggle"
+                            style="@style/LipFinishToggle"
                             android:visibility="gone"
                             android:text="@string/finish_tint" />
                         <com.google.android.material.button.MaterialButton
+                            android:id="@+id/finish_shimmer"
+                            style="@style/LipFinishToggle"
+                            android:text="@string/finish_shimmer" />
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/finish_shimmer_gloss"
+                            style="@style/LipFinishToggle"
+                            android:text="@string/finish_shimmer_gloss" />
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/finish_shimmer_satin"
+                            style="@style/LipFinishToggle"
+                            android:text="@string/finish_shimmer_satin" />
+                        <com.google.android.material.button.MaterialButton
                             android:id="@+id/finish_tracking_test"
-                            style="@style/LipTuningToggle"
+                            style="@style/LipFinishToggle"
                             android:text="@string/finish_tracking_test" />
                     </com.google.android.material.button.MaterialButtonToggleGroup>
+                    </HorizontalScrollView>
 
                     <TextView
                         style="@style/LipTuningSection"

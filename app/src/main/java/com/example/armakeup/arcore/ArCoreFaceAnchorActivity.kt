@@ -49,6 +49,8 @@ import com.example.armakeup.makeup.FoundationCatalog
 import com.example.armakeup.makeup.FoundationStyle
 import com.example.armakeup.makeup.ConcealerCatalog
 import com.example.armakeup.makeup.ConcealerStyle
+import com.example.armakeup.makeup.HighlighterCatalog
+import com.example.armakeup.makeup.HighlighterStyle
 import com.google.ar.core.ArCoreApk
 import com.google.ar.core.Config
 import com.google.ar.core.Session
@@ -88,6 +90,9 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
     private val shadeControls = mutableListOf<ShadeControl>()
     private var editingLiner = false
     private var editingBlush = false
+    private var editingHighlighter = false
+    private var highlighterStyle = HighlighterStyle()
+    private var updatingHighlighterControls = false
     private var editingConcealer = false
     private var selectedConcealerShadeId = ConcealerCatalog.shades.first().id
     private var concealerStyle = ConcealerStyle()
@@ -169,6 +174,7 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
         bindBlushControls()
         bindFoundationControls()
         bindConcealerControls()
+        bindHighlighterControls()
         bindLinerControls()
         createShadePalette()
         createTuningControls()
@@ -201,6 +207,9 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
                 R.id.finish_gloss -> LipstickFinish.GLOSS
                 R.id.finish_oil -> LipstickFinish.OIL
                 R.id.finish_tint -> LipstickFinish.TINT
+                R.id.finish_shimmer -> LipstickFinish.SHIMMER
+                R.id.finish_shimmer_gloss -> LipstickFinish.SHIMMER_GLOSS
+                R.id.finish_shimmer_satin -> LipstickFinish.SHIMMER_SATIN
                 R.id.finish_tracking_test -> LipstickFinish.TRACKING_TEST
                 else -> LipstickFinish.SATIN
             }
@@ -220,6 +229,7 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
             binding.blushSyncHint.visibility = if (sameFrame) View.GONE else View.VISIBLE
             binding.foundationSyncHint.visibility = if (sameFrame) View.GONE else View.VISIBLE
             binding.concealerSyncHint.visibility = if (sameFrame) View.GONE else View.VISIBLE
+            binding.highlighterSyncHint.visibility = if (sameFrame) View.GONE else View.VISIBLE
             surfaceView.queueEvent { renderer.setSameFrameSynchronizationEnabled(sameFrame) }
         }
         binding.permissionButton.setOnClickListener {
@@ -264,6 +274,12 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
             )
         }
         binding.resetTuning.setOnClickListener {
+            if (editingHighlighter) {
+                highlighterStyle = highlighterStyle.copy(intensity = HighlighterStyle.DEFAULT_INTENSITY,
+                    cheeks = true, nose = false, brows = false, cupid = false)
+                updateHighlighterControls(); persistHighlighter()
+                return@setOnClickListener
+            }
             if (editingConcealer) {
                 concealerStyle = concealerStyle.copy(coverage = ConcealerStyle.DEFAULT_COVERAGE,
                     retouch = ConcealerStyle.DEFAULT_RETOUCH)
@@ -307,6 +323,15 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
         }
         binding.copyTuning.setOnClickListener {
             val text = buildString {
+                if (editingHighlighter) {
+                    appendLine("tool=HIGHLIGHTER")
+                    appendLine("shade=${highlighterStyle.shade.id}")
+                    appendLine("finish=${highlighterStyle.shade.finish}")
+                    appendLine("enabled=${highlighterStyle.enabled}")
+                    appendLine("intensity=${highlighterStyle.intensity}")
+                    appendLine("zones=${highlighterStyle.cheeks},${highlighterStyle.nose},${highlighterStyle.brows},${highlighterStyle.cupid}")
+                    return@buildString
+                }
                 if (editingConcealer) {
                     appendLine("tool=CONCEALER")
                     appendLine("concealer_enabled=${concealerStyle.enabled}")
@@ -446,10 +471,12 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
             blur = preferences.getFloat("liner_blur_v1", 2f)
                 .takeIf { it.isFinite() }?.coerceIn(0f, 2f) ?: 2f,
         )
-        editingFoundation = !editingConcealer && editingFoundation
-        editingBlush = !editingConcealer && !editingFoundation && editingBlush
-        editingLiner = !editingConcealer && !editingFoundation && !editingBlush && preferences.getBoolean("editing_liner_v1", false)
+        editingConcealer = !editingHighlighter && editingConcealer
+        editingFoundation = !editingHighlighter && !editingConcealer && editingFoundation
+        editingBlush = !editingHighlighter && !editingConcealer && !editingFoundation && editingBlush
+        editingLiner = !editingHighlighter && !editingConcealer && !editingFoundation && !editingBlush && preferences.getBoolean("editing_liner_v1", false)
         binding.makeupToolGroup.check(when {
+            editingHighlighter -> R.id.tool_highlighter
             editingConcealer -> R.id.tool_concealer
             editingFoundation -> R.id.tool_foundation
             editingBlush -> R.id.tool_blush
@@ -464,6 +491,9 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
             editingBlush = id == R.id.tool_blush
             editingFoundation = id == R.id.tool_foundation
             editingConcealer = id == R.id.tool_concealer
+            editingHighlighter = id == R.id.tool_highlighter
+            updateHighlighterControls()
+            persistHighlighter()
             createShadePalette()
             updateToolPanels()
             persistLiner()
@@ -508,11 +538,12 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
     }
 
     private fun updateToolPanels() {
-        binding.tuningScroll.visibility = if (tuningExpanded && !editingLiner && !editingBlush && !editingFoundation && !editingConcealer) View.VISIBLE else View.GONE
+        binding.tuningScroll.visibility = if (tuningExpanded && !editingLiner && !editingBlush && !editingFoundation && !editingConcealer && !editingHighlighter) View.VISIBLE else View.GONE
         binding.linerTuningPanel.visibility = if (tuningExpanded && editingLiner) View.VISIBLE else View.GONE
         binding.blushTuningPanel.visibility = if (tuningExpanded && editingBlush) View.VISIBLE else View.GONE
         binding.foundationTuningPanel.visibility = if (tuningExpanded && editingFoundation) View.VISIBLE else View.GONE
         binding.concealerTuningPanel.visibility = if (tuningExpanded && editingConcealer) View.VISIBLE else View.GONE
+        binding.highlighterPanel.visibility = if (tuningExpanded && editingHighlighter) View.VISIBLE else View.GONE
     }
 
     private fun bindFoundationControls() {
@@ -663,6 +694,81 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
             .apply()
     }
 
+    private fun bindHighlighterControls() {
+        val preferences = getSharedPreferences(TUNING_PREFERENCES, Context.MODE_PRIVATE)
+        val shade = HighlighterCatalog.shades.firstOrNull {
+            it.id == preferences.getString("highlighter_shade_v1", null)
+        } ?: HighlighterCatalog.defaultShade
+        editingHighlighter = preferences.getBoolean("editing_highlighter_v1", false)
+        highlighterStyle = HighlighterStyle(
+            enabled = preferences.getBoolean("highlighter_enabled_v1", false), shade = shade,
+            intensity = preferences.getFloat("highlighter_intensity_v1", HighlighterStyle.DEFAULT_INTENSITY)
+                .takeIf { it.isFinite() }?.coerceIn(0f, HighlighterStyle.MAX_INTENSITY) ?: HighlighterStyle.DEFAULT_INTENSITY,
+            cheeks = preferences.getBoolean("highlighter_cheeks_v1", true),
+            nose = preferences.getBoolean("highlighter_nose_v1", false),
+            brows = preferences.getBoolean("highlighter_brows_v1", false),
+            cupid = preferences.getBoolean("highlighter_cupid_v1", false),
+        )
+        updateHighlighterControls()
+        binding.highlighterEnabled.setOnCheckedChangeListener { _, enabled ->
+            if (!updatingHighlighterControls) {
+                highlighterStyle = highlighterStyle.copy(enabled = enabled)
+                updateHighlighterControls(); persistHighlighter()
+            }
+        }
+        val zones = listOf(binding.highlighterCheeks, binding.highlighterNose, binding.highlighterBrows, binding.highlighterCupid)
+        zones.forEachIndexed { i, check ->
+            check.setOnCheckedChangeListener { _, value ->
+                if (!updatingHighlighterControls) {
+                    highlighterStyle = when(i) {
+                        0 -> highlighterStyle.copy(cheeks = value)
+                        1 -> highlighterStyle.copy(nose = value)
+                        2 -> highlighterStyle.copy(brows = value)
+                        else -> highlighterStyle.copy(cupid = value)
+                    }
+                    updateHighlighterControls(); persistHighlighter()
+                }
+            }
+        }
+        binding.highlighterIntensity.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(bar: SeekBar, progress: Int, fromUser: Boolean) {
+                if (!updatingHighlighterControls && fromUser) {
+                    highlighterStyle = highlighterStyle.copy(intensity = progress / 100f)
+                    updateHighlighterControls(); persistHighlighter()
+                }
+            }
+            override fun onStartTrackingTouch(bar: SeekBar) = Unit
+            override fun onStopTrackingTouch(bar: SeekBar) = persistHighlighter()
+        })
+    }
+
+    private fun updateHighlighterControls() {
+        updatingHighlighterControls = true
+        binding.highlighterEnabled.isChecked = highlighterStyle.enabled
+        binding.highlighterCheeks.isChecked = highlighterStyle.cheeks
+        binding.highlighterNose.isChecked = highlighterStyle.nose
+        binding.highlighterBrows.isChecked = highlighterStyle.brows
+        binding.highlighterCupid.isChecked = highlighterStyle.cupid
+        val progress = (highlighterStyle.intensity * 100).roundToInt()
+        binding.highlighterIntensity.progress = progress
+        binding.highlighterIntensityLabel.text = getString(R.string.highlighter_intensity_value, progress)
+        binding.highlighterFinish.text = highlighterStyle.shade.finish.title
+        updatingHighlighterControls = false
+        renderer.setHighlighterStyle(highlighterStyle)
+    }
+
+    private fun persistHighlighter() {
+        getSharedPreferences(TUNING_PREFERENCES, Context.MODE_PRIVATE).edit()
+            .putBoolean("editing_highlighter_v1", editingHighlighter)
+            .putBoolean("highlighter_enabled_v1", highlighterStyle.enabled)
+            .putString("highlighter_shade_v1", highlighterStyle.shade.id)
+            .putFloat("highlighter_intensity_v1", highlighterStyle.intensity)
+            .putBoolean("highlighter_cheeks_v1", highlighterStyle.cheeks)
+            .putBoolean("highlighter_nose_v1", highlighterStyle.nose)
+            .putBoolean("highlighter_brows_v1", highlighterStyle.brows)
+            .putBoolean("highlighter_cupid_v1", highlighterStyle.cupid).apply()
+    }
+
     private fun bindBlushControls() {
         val preferences = getSharedPreferences(TUNING_PREFERENCES, Context.MODE_PRIVATE)
         val shade = BlushCatalog.shades.firstOrNull {
@@ -733,6 +839,7 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
     }
 
     private fun selectedPaletteKey(): String? = when {
+        editingHighlighter -> highlighterStyle.shade.id
         editingConcealer -> selectedConcealerShadeId
         editingFoundation -> selectedFoundationShadeId
         editingBlush -> selectedBlushShadeId
@@ -770,7 +877,12 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
     private fun createShadePalette() {
         binding.lipShadeContainer.removeAllViews()
         shadeControls.clear()
-        val palette = if (editingConcealer) ConcealerCatalog.shades.map { shade ->
+        val palette = if (editingHighlighter) HighlighterCatalog.shades.map { shade ->
+            PaletteEntry(shade.id, shade.finish.title, shade.name, shade.color) {
+                highlighterStyle = highlighterStyle.copy(enabled = true, shade = shade)
+                updateHighlighterControls(); updateShadeSelection(); persistHighlighter()
+            }
+        } else if (editingConcealer) ConcealerCatalog.shades.map { shade ->
             PaletteEntry(shade.id, "${shade.brand}\n${shade.product}", shade.name, shade.color) {
                 selectedConcealerShadeId = shade.id
                 concealerStyle = concealerStyle.copy(enabled = true, color = shade.color)
@@ -927,7 +1039,14 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
             LipstickFinish.TRACKING_TEST -> R.id.finish_tracking_test
             LipstickFinish.OIL -> R.id.finish_oil
             LipstickFinish.TINT -> R.id.finish_tint
+            LipstickFinish.SHIMMER -> R.id.finish_shimmer
+            LipstickFinish.SHIMMER_GLOSS -> R.id.finish_shimmer_gloss
+            LipstickFinish.SHIMMER_SATIN -> R.id.finish_shimmer_satin
         })
+        binding.finishScroll.post {
+            val selected = binding.finishToggleGroup.findViewById<View>(binding.finishToggleGroup.checkedButtonId)
+            selected?.let { binding.finishScroll.smoothScrollTo(it.left + it.width / 2 - binding.finishScroll.width / 2, 0) }
+        }
     }
 
     private fun updateShadeSelection() {
@@ -1013,6 +1132,7 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
             val seekBar = SeekBar(this).apply {
                 max = sliderStepsFor(parameter)
                 progress = progressFor(parameter, parameter.read(tuning))
+                if (parameter == LipstickTuningParameter.SHIMMER_TRANSPARENCY) contentDescription = parameter.label
                 setPadding(0, 0, 0, 0)
             }
             value.text = formatValue(parameter, parameter.read(tuning))
@@ -1085,10 +1205,14 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
         tuningControls.forEach { control ->
             val visible = !control.parameter.unifiedOnly ||
                 (selectedColorRenderingMode == LipColorRenderingMode.UNIFIED &&
-                    selectedFinish != LipstickFinish.TRACKING_TEST)
-            val supported = selectedColorRenderingMode != LipColorRenderingMode.IOS_REFERENCE ||
+                    selectedFinish != LipstickFinish.TRACKING_TEST && !selectedFinish.isShimmer)
+            val shimmerVisible = (control.parameter != LipstickTuningParameter.SHIMMER_INTENSITY &&
+                control.parameter != LipstickTuningParameter.SHIMMER_TRANSPARENCY) ||
+                selectedFinish.isShimmer
+            val supported = (selectedColorRenderingMode != LipColorRenderingMode.IOS_REFERENCE &&
+                !selectedFinish.isShimmer) ||
                 selectedFinish == LipstickFinish.TRACKING_TEST || control.parameter.supportedInIosDev()
-            control.row.visibility = if (visible && supported) View.VISIBLE else View.GONE
+            control.row.visibility = if (visible && supported && shimmerVisible) View.VISIBLE else View.GONE
             val value = control.parameter.read(tuning)
             control.valueView.text = formatValue(control.parameter, value)
             control.seekBar.progress = progressFor(control.parameter, value)
@@ -1096,8 +1220,11 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
         updatingTuningControls = false
     }
 
-    private fun sliderStepsFor(parameter: LipstickTuningParameter): Int =
-        if (parameter.discrete) 2 else SLIDER_STEPS
+    private fun sliderStepsFor(parameter: LipstickTuningParameter): Int = when {
+        parameter == LipstickTuningParameter.SHIMMER_TRANSPARENCY -> 100
+        parameter.discrete -> 2
+        else -> SLIDER_STEPS
+    }
 
     private fun progressFor(parameter: LipstickTuningParameter, value: Float): Int =
         (((value - parameter.minimum) / (parameter.maximum - parameter.minimum)) * sliderStepsFor(parameter))
@@ -1108,12 +1235,14 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
         parameter.minimum + (parameter.maximum - parameter.minimum) * progress / sliderStepsFor(parameter)
 
     private fun formatValue(parameter: LipstickTuningParameter, value: Float): String = when (parameter) {
+        LipstickTuningParameter.SHIMMER_TRANSPARENCY -> "${value.roundToInt()}%"
         LipstickTuningParameter.PRODUCT_DENSITY -> LipstickDensity.values()[value.roundToInt().coerceIn(0, 2)].displayName
         LipstickTuningParameter.PRODUCT_TEXTURE -> LipstickTexture.values()[value.roundToInt().coerceIn(0, 2)].displayName
         else -> String.format(Locale.US, "%.${parameter.decimals}f", value)
     }
 
     private fun formatExportValue(parameter: LipstickTuningParameter, value: Float): String = when (parameter) {
+        LipstickTuningParameter.SHIMMER_TRANSPARENCY -> value.roundToInt().toString()
         LipstickTuningParameter.PRODUCT_DENSITY -> LipstickDensity.values()[value.roundToInt().coerceIn(0, 2)].name
         LipstickTuningParameter.PRODUCT_TEXTURE -> LipstickTexture.values()[value.roundToInt().coerceIn(0, 2)].name
         else -> formatValue(parameter, value)
@@ -1125,10 +1254,20 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
     ): LipstickTuning {
         val preferences = getSharedPreferences(TUNING_PREFERENCES, Context.MODE_PRIVATE)
         val defaults = LipstickTuning.defaultsFor(renderingMode, finish)
-        val restored = LipstickTuningParameter.values().fold(defaults) { state, parameter ->
-            val defaultValue = parameter.read(defaults)
+        val restored = LipstickTuningParameter.values().filter {
+            (it != LipstickTuningParameter.SHIMMER_INTENSITY &&
+                it != LipstickTuningParameter.SHIMMER_TRANSPARENCY) || finish.isShimmer
+        }.fold(defaults) { state, parameter ->
+            val defaultValue = if (finish.isShimmer && finish != LipstickFinish.SHIMMER &&
+                (parameter == LipstickTuningParameter.SHIMMER_INTENSITY ||
+                    parameter == LipstickTuningParameter.SHIMMER_TRANSPARENCY)) {
+                preferences.getFloat(preferenceKey(renderingMode, LipstickFinish.SHIMMER, parameter),
+                    parameter.read(defaults)).takeIf { it.isFinite() } ?: parameter.read(defaults)
+            } else parameter.read(defaults)
             val storedValue = preferences.getFloat(preferenceKey(renderingMode, finish, parameter), defaultValue)
-                .coerceIn(parameter.minimum, parameter.maximum)
+                .let { value ->
+                    if (parameter == LipstickTuningParameter.SHIMMER_TRANSPARENCY && !value.isFinite()) defaultValue else value
+                }.coerceIn(parameter.minimum, parameter.maximum)
             parameter.update(state, storedValue)
         }
         return withSharedSelection(restored, renderingMode, finish)
@@ -1138,7 +1277,10 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
         persistLiner()
         getSharedPreferences(TUNING_PREFERENCES, Context.MODE_PRIVATE).edit().apply {
             putString(selectedFinishKey(selectedColorRenderingMode), selectedFinish.name)
-            LipstickTuningParameter.values().forEach { parameter ->
+            LipstickTuningParameter.values().filter {
+                (it != LipstickTuningParameter.SHIMMER_INTENSITY &&
+                    it != LipstickTuningParameter.SHIMMER_TRANSPARENCY) || selectedFinish.isShimmer
+            }.forEach { parameter ->
                 putFloat(preferenceKey(selectedColorRenderingMode, selectedFinish, parameter), parameter.read(tuning))
             }
             sharedPigment?.let { color ->
@@ -1198,7 +1340,7 @@ class ArCoreFaceAnchorActivity : AppCompatActivity() {
         // Adopt an already-selected oil/tint product once in the newly enabled iOS mode.
         val productFinish = LipstickColorCatalog.swatches.firstOrNull { it.key == selectedShadeKey }
             ?.product?.finish?.renderingFinish(mode)
-        if (productFinish == LipstickFinish.OIL || productFinish == LipstickFinish.TINT) return productFinish
+        if (productFinish == LipstickFinish.OIL || productFinish == LipstickFinish.TINT || productFinish?.isShimmer == true) return productFinish
         return read(SELECTED_FINISH_KEY) ?: fallback.takeIf { it.supportedIn(mode) } ?: LipstickFinish.MATTE
     }
 

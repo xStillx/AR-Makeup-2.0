@@ -148,15 +148,15 @@ internal object IosLipMaterial {
                 return iosSrgbToLinear(lipHsvToRgb(hsv));
             }
 
-            vec4 renderIosLip(float coverage) {
+            vec4 renderIosLipForFinish(float coverage, float finishMode) {
                 vec3 camera = cameraSrgbAt(vDisplayUv);
                 vec3 linearCamera = iosSrgbToLinear(camera);
                 vec3 pigmentHsv = lipRgbToHsv(clamp(uPigment, 0.0, 1.0));
                 float cameraValue = max(camera.r, max(camera.g, camera.b));
                 vec3 pigment = iosDevPigment(pigmentHsv, cameraValue);
-                bool isGloss = uFinishMode > 0.5 && uFinishMode < 1.5;
-                bool isSatin = uFinishMode > 1.5 && uFinishMode < 2.5;
-                bool isOil = uFinishMode > 2.5 && uFinishMode < 3.5;
+                bool isGloss = finishMode > 0.5 && finishMode < 1.5;
+                bool isSatin = finishMode > 1.5 && finishMode < 2.5;
+                bool isOil = finishMode > 2.5 && finishMode < 3.5;
                 bool isWet = isGloss || isOil;
                 float finishGlow = isSatin ? uTuningSatinGlow : 1.0;
                 float highlightGain = uIosHighlightStrength * uTuningHighlightStrength *
@@ -255,6 +255,10 @@ internal object IosLipMaterial {
                 float alpha = clamp(coverage * uIosCoreCoverage *
                     uTuningPigmentOpacity * uTuningOpacity, 0.0, 1.0);
                 return vec4(iosLinearToSrgb(pigment), alpha);
+            }
+
+            vec4 renderIosLip(float coverage) {
+                return renderIosLipForFinish(coverage, uFinishMode);
             }
 
     """

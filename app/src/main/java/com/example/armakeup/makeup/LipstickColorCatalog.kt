@@ -36,6 +36,9 @@ internal enum class LipProductFinish(val renderingFinish: LipstickFinish?) {
     GLOSS(LipstickFinish.GLOSS),
     OIL(LipstickFinish.OIL),
     TINT(LipstickFinish.TINT),
+    SHIMMER(LipstickFinish.SHIMMER),
+    SHIMMER_GLOSS(LipstickFinish.SHIMMER_GLOSS),
+    SHIMMER_SATIN(LipstickFinish.SHIMMER_SATIN),
     ;
 
     fun renderingFinish(mode: LipColorRenderingMode): LipstickFinish? =
@@ -47,7 +50,7 @@ internal data class LipColorSwatch(val product: LipColorProduct, val shade: LipC
     val key: String = "${product.id}:${shade.productId}:${shade.color.sourceSrgbHex.toString(16)}"
 }
 
-/** Exact user-supplied product metadata and source-sRGB colours. */
+/** User-supplied products plus explicitly named local AR Makeup demo finishes. */
 internal object LipstickColorCatalog {
     private fun shade(productId: String, name: String, hex: Int) =
         LipColorShade(productId, name, LipstickColor(hex))
@@ -127,6 +130,20 @@ internal object LipstickColorCatalog {
         LipColorProduct("ok-beauty-tint", "OK Beauty", LipstickDensity.MEDIUM, LipProductFinish.TINT, LipstickTexture.LIQUID, listOf(
             shade("VM-1009-234", "Valkyrie", 0x78293D),
             shade("VM-1009-235", "Safari", 0xD78385),
+        )),
+        LipColorProduct("dior-shimmer", "Блеск-плампер Dior Addict", LipstickDensity.MEDIUM, LipProductFinish.SHIMMER, LipstickTexture.LIQUID, listOf(
+            shade("VM-1015-045", "045 Ореховый шиммер", 0xA6593F),
+        )),
+        // Local preview colours; these are not commercial brand/SKU claims.
+        LipColorProduct("ar-shimmer-gloss", "AR Makeup · демо\nГлянец + шиммер", LipstickDensity.MEDIUM, LipProductFinish.SHIMMER_GLOSS, LipstickTexture.LIQUID, listOf(
+            shade("DEMO-SHG-01", "Ореховый", 0xA6593F),
+            shade("DEMO-SHG-02", "Розовый", 0xC57F80),
+            shade("DEMO-SHG-03", "Вишнёвый", 0xA13C50),
+        )),
+        LipColorProduct("ar-shimmer-satin", "AR Makeup · демо\nСатин + шиммер", LipstickDensity.MEDIUM, LipProductFinish.SHIMMER_SATIN, LipstickTexture.CREAMY, listOf(
+            shade("DEMO-SHS-01", "Ореховый", 0xA6593F),
+            shade("DEMO-SHS-02", "Пыльная роза", 0xAE6574),
+            shade("DEMO-SHS-03", "Сливовый", 0x734056),
         )),
     )
 

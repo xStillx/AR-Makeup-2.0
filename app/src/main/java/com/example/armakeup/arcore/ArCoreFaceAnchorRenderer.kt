@@ -15,6 +15,7 @@ import com.example.armakeup.makeup.LipLinerStyle
 import com.example.armakeup.makeup.BlushStyle
 import com.example.armakeup.makeup.FoundationStyle
 import com.example.armakeup.makeup.ConcealerStyle
+import com.example.armakeup.makeup.HighlighterStyle
 import com.example.armakeup.tracking.CanonicalFaceTransform
 import com.example.armakeup.tracking.FillCenterTransform
 import com.example.armakeup.tracking.NormalizedImageTransform
@@ -53,6 +54,9 @@ internal class ArCoreFaceAnchorRenderer(
     private var viewportHeight = 1
     private var cameraTextureId = 0
     private var backgroundProgram = 0
+    private var shimmerLookupTextureId = 0
+    private var lipMaterialYawRadians = 0f
+    private var lipMaterialPitchRadians = 0f
     private var pointProgram = 0
     private var lipMeshProgram = 0
     private var lipLinerProgram = 0
@@ -60,6 +64,10 @@ internal class ArCoreFaceAnchorRenderer(
     private var blushProgram = 0
     private var pairedBlushProgram = 0
     private var foundationBlushProgram = 0
+    private val highlighterRenderer = HighlighterRenderer(::createProgram)
+    private var presentedHighlighterMesh: HighlighterFaceMesh? = null
+    @Volatile private var highlighterStyle = HighlighterStyle()
+    fun setHighlighterStyle(value: HighlighterStyle) { highlighterStyle = value }
     private val skinRetouchRenderer = SkinRetouchRenderer(::createProgram)
     private val foundationRenderer = FoundationRenderer(::createProgram)
     private val concealerRenderer = ConcealerRenderer(::createProgram)
@@ -265,6 +273,8 @@ internal class ArCoreFaceAnchorRenderer(
         presentedBlushMesh = null
         presentedFoundationMesh = null
 
+        presentedHighlighterMesh = null
+
         presentedConcealerMesh = null
         lipContourRefiner.reset()
         lipFrameDiagnostics.reset()
@@ -274,6 +284,7 @@ internal class ArCoreFaceAnchorRenderer(
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
         pairedCameraFrames.onContextCreated()
         lipBlurFrames.onContextCreated()
+        highlighterRenderer.onContextCreated()
         skinRetouchRenderer.onContextCreated()
         foundationRenderer.onContextCreated()
         concealerRenderer.onContextCreated()
@@ -284,6 +295,7 @@ internal class ArCoreFaceAnchorRenderer(
         GLES20.glClearColor(0f, 0f, 0f, 1f)
         cameraTextureId = createExternalTexture()
         backgroundProgram = createProgram(BACKGROUND_VERTEX_SHADER, BACKGROUND_FRAGMENT_SHADER)
+        shimmerLookupTextureId = createShimmerLookupTexture()
         pointProgram = createProgram(POINT_VERTEX_SHADER, POINT_FRAGMENT_SHADER)
         lipMeshProgram = createProgram(LIP_MESH_VERTEX_SHADER, LIP_MESH_FRAGMENT_SHADER)
         lipLinerProgram = createProgram(LipLinerMaterial.VERTEX_SHADER, LipLinerMaterial.FRAGMENT_SHADER)
@@ -368,12 +380,12 @@ internal class ArCoreFaceAnchorRenderer(
                     }
                 }
             }
-            val pitchRadians = face?.let {
-                CanonicalFaceTransform.fromColumnMajor(viewModel)?.metricPitchRadians
-            }
+            val pose = face?.let { CanonicalFaceTransform.fromColumnMajor(viewModel) }
+            val pitchRadians = pose?.metricPitchRadians
+            val yawRadians = pose?.metricYawRadians
             val lipVisible = pitchRadians?.let(lipVisibilityGate::update) ?: false
             if (sameFrameSynchronizationEnabled) {
-                drawSynchronizedPair(frame, face != null, screenPoint, lipVisible, pitchRadians, face)
+                drawSynchronizedPair(frame, face != null, screenPoint, lipVisible, pitchRadians, yawRadians, face)
                 return
             }
             // MediaPipe blush placement requires an exact camera/geometry pair (Sync).
@@ -385,6 +397,7 @@ internal class ArCoreFaceAnchorRenderer(
                         face = trackedFace,
                         lipVisible = lipVisible,
                         pitchRadians = pitchRadians,
+                        yawRadians = yawRadians,
                         observation = it,
                         bufferedCameraAgeMs = 0f,
                     )
@@ -414,6 +427,7 @@ internal class ArCoreFaceAnchorRenderer(
         screenPoint: Pair<Float, Float>?,
         lipVisible: Boolean,
         pitchRadians: Float?,
+        yawRadians: Float?,
         face: AugmentedFace?,
     ) {
         val nowNs = SystemClock.elapsedRealtimeNanos()
@@ -429,9 +443,11 @@ internal class ArCoreFaceAnchorRenderer(
                 presentedObservation = completion.observation
                 presentedFoundationMesh = null
 
+                presentedHighlighterMesh = null
+
                 presentedConcealerMesh = null
                 presentedBlushMesh = completion.observation?.takeIf { pending.faceTracked }?.let { observation ->
-                    pending.blushMesh?.let { placeBlush(it, observation) }
+                    pending.blushMesh?.let { placeBlush(it, observation, pending.highlighterViewModel) }
                 }
                 pendingPair = null
                 promoted = true
@@ -446,6 +462,8 @@ internal class ArCoreFaceAnchorRenderer(
             presentedObservation = null
             presentedBlushMesh = null
             presentedFoundationMesh = null
+
+            presentedHighlighterMesh = null
 
             presentedConcealerMesh = null
             lipContourRefiner.reset()
@@ -467,9 +485,10 @@ internal class ArCoreFaceAnchorRenderer(
                     GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
                 }
                 pendingPair = CameraPair(
-                    submittedTimestampNs, nowNs, faceTracked, screenPoint, lipVisible, pitchRadians,
+                    submittedTimestampNs, nowNs, faceTracked, screenPoint, lipVisible, pitchRadians, yawRadians,
                     satinSourceTexels.copyOf(),
                     if (screenPoint != null) captureBlush(face) else null,
+                    if (highlighterStyle.enabled) viewModel.copyOf() else null,
                 )
             }
         }
@@ -514,12 +533,18 @@ internal class ArCoreFaceAnchorRenderer(
         if (pair.faceTracked && presentedObservation != null) {
             presentedBlushMesh?.let { drawBlush(it, textureId, skinTexture) }
         }
+        if (pair.faceTracked && presentedObservation != null) {
+            presentedHighlighterMesh?.let {
+                highlighterRenderer.draw(it, textureId, viewportWidth, viewportHeight, highlighterStyle)
+            }
+        }
         val hybridStatus = presentedObservation?.takeIf { pair.faceTracked }?.let {
             drawMediaPipeLipContour(
                 cameraTimestampNs = pair.timestampNs,
                 face = null, // Never read a live ARCore mesh/pose for a buffered image.
                 lipVisible = pair.lipVisible,
                 pitchRadians = pair.pitchRadians,
+                yawRadians = pair.yawRadians,
                 observation = it,
                 bufferedCameraAgeMs = (frame.timestamp - pair.timestampNs).coerceAtLeast(0L) / 1_000_000f,
                 bufferedCameraTextureId = textureId,
@@ -538,8 +563,10 @@ internal class ArCoreFaceAnchorRenderer(
         val screenPoint: Pair<Float, Float>?,
         val lipVisible: Boolean,
         val pitchRadians: Float?,
+        val yawRadians: Float?,
         val satinSourceTexels: FloatArray,
         val blushMesh: BlushFaceMesh?,
+        val highlighterViewModel: FloatArray?,
     )
 
     private fun captureBlush(face: AugmentedFace?): BlushFaceMesh? {
@@ -547,25 +574,30 @@ internal class ArCoreFaceAnchorRenderer(
         val foundation = foundationStyle
         if (face == null || (!(style.enabled && style.opacity > 0f) &&
             !(foundation.enabled && foundation.coverage > 0f) &&
-            !(concealerStyle.enabled && concealerStyle.coverage > 0f))) return null
+            !(concealerStyle.enabled && concealerStyle.coverage > 0f) &&
+            !(highlighterStyle.enabled && highlighterStyle.intensity > 0f))) return null
         return BlushFaceMesh.capture(face.meshVertices, face.meshNormals, face.meshTriangleIndices,
             mvp, viewModel)
     }
 
-    private fun placeBlush(mesh: BlushFaceMesh, observation: ArCoreMediaPipeLipTracker.Observation): BlushFaceMesh? {
+    private fun placeBlush(mesh: BlushFaceMesh, observation: ArCoreMediaPipeLipTracker.Observation,
+        highlighterViewModel: FloatArray?): BlushFaceMesh? {
         val face = observation.face
         val startedAtNs = SystemClock.elapsedRealtimeNanos()
         val measured = MediaPipeBlushSurface.create(mesh, observation.coordinates,
             face.sourceWidth, face.sourceHeight, face.rotationDegrees, face.mirrorHorizontal,
             viewportWidth, viewportHeight, MediaPipeBlushTopology.indices)
         // Skin materials require this pair's calibrated MP surface; no ARCore-only fallback.
-        val skinFace = if (foundationStyle.enabled || concealerStyle.enabled) measured?.let {
+        val skinFace = if (foundationStyle.enabled || concealerStyle.enabled || highlighterStyle.enabled) measured?.let {
             FoundationFaceMesh.create(it, viewportWidth.toFloat() / viewportHeight)
         } else null
 
         presentedFoundationMesh = if (foundationStyle.enabled) skinFace else null
         presentedConcealerMesh = if (concealerStyle.enabled) measured?.let {
             ConcealerFaceMesh.create(it, viewportWidth.toFloat() / viewportHeight, skinFace)
+        } else null
+        presentedHighlighterMesh = if (highlighterStyle.enabled && highlighterViewModel != null && skinFace != null) {
+            measured?.let { HighlighterFaceMesh.create(it, highlighterViewModel, skinFace) }
         } else null
         if (!blushStyle.enabled || blushStyle.opacity <= 0f) return null
         val surface = measured ?: mesh
@@ -780,6 +812,7 @@ internal class ArCoreFaceAnchorRenderer(
         face: AugmentedFace?,
         lipVisible: Boolean,
         pitchRadians: Float?,
+        yawRadians: Float?,
         observation: ArCoreMediaPipeLipTracker.Observation,
         bufferedCameraAgeMs: Float,
         bufferedCameraTextureId: Int? = null,
@@ -960,6 +993,8 @@ internal class ArCoreFaceAnchorRenderer(
             linerMesh.update(outerContourPoints, innerContourPoints, viewportWidth, viewportHeight,
                 lowerOuterCoverageOffsetsPixels)
         if (lipVisible && frameLipstickEnabled) {
+            lipMaterialYawRadians = yawRadians?.takeIf { it.isFinite() } ?: 0f
+            lipMaterialPitchRadians = pitchRadians?.takeIf { it.isFinite() } ?: 0f
             drawLipMesh(lips.semantics, bufferedCameraTextureId, frameLinerVisible)
         }
         if (frameLinerVisible) {
@@ -1141,7 +1176,10 @@ internal class ArCoreFaceAnchorRenderer(
     ) {
         // RGB encodings differ between modes. Keep one encoding through raster/blur/composite,
         // even if the UI changes its volatile selection while this frame is being submitted.
-        val frameRenderingMode = colorRenderingMode
+        val frameFinish = lipstickFinish
+        val frameRenderingMode = if (frameFinish.isShimmer) {
+            LipColorRenderingMode.IOS_REFERENCE
+        } else colorRenderingMode
         lipBlurFrames.ensureSize(viewportWidth, viewportHeight)
         GLES20.glViewport(0, 0, viewportWidth, viewportHeight)
         GLES20.glClearColor(SIGNED_COLOR_ZERO, SIGNED_COLOR_ZERO, SIGNED_COLOR_ZERO, 0f)
@@ -1157,7 +1195,7 @@ internal class ArCoreFaceAnchorRenderer(
         lipBlurFrames.bindSource()
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
         drawLipMeshPass(semantics, bufferedCameraTextureId, encodeBlurMaterial = true,
-            renderingMode = frameRenderingMode)
+            renderingMode = frameRenderingMode, finish = frameFinish)
 
         lipBlurFrames.bindIntermediate()
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
@@ -1316,30 +1354,49 @@ internal class ArCoreFaceAnchorRenderer(
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
     }
 
+    private fun createShimmerLookupTexture(): Int {
+        val bytes = ShimmerLipMaterial.lookupBytes()
+        val pixels = ByteBuffer.allocateDirect(bytes.size).apply { put(bytes); position(0) }
+        val texture = IntArray(1)
+        GLES20.glGenTextures(1, texture, 0)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture[0])
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_NEAREST)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_NEAREST)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+        GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA,
+            ShimmerLipMaterial.LOOKUP_WIDTH, ShimmerLipMaterial.LOOKUP_HEIGHT,
+            0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, pixels)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        return texture[0]
+    }
+
     private fun drawLipMeshPass(
         semantics: LipSemanticState,
         bufferedCameraTextureId: Int?,
         encodeBlurMaterial: Boolean,
         renderingMode: LipColorRenderingMode = colorRenderingMode,
+        finish: LipstickFinish = lipstickFinish,
     ) {
         val lipMeshProgram = if (bufferedCameraTextureId != null) pairedLipMeshProgram else this.lipMeshProgram
         GLES20.glDisable(GLES20.GL_DEPTH_TEST)
         GLES20.glDisable(GLES20.GL_BLEND)
         GLES20.glUseProgram(lipMeshProgram)
         val tuning = lipstickTuning
-        val parameters = IosLipMaterial.parameters(lipstickFinish, tuning.productTexture)
+        val parameters = IosLipMaterial.parameters(finish.baseFinish, tuning.productTexture)
         val pigmentBrightness = tuning.pigmentBrightness
-        val pigmentRed = if (lipstickFinish == LipstickFinish.TRACKING_TEST) {
+        val pigmentRed = if (finish == LipstickFinish.TRACKING_TEST) {
             TRACKING_PIGMENT[0]
         } else {
             (tuning.pigmentRed * pigmentBrightness).coerceIn(0f, 1f)
         }
-        val pigmentGreen = if (lipstickFinish == LipstickFinish.TRACKING_TEST) {
+        val pigmentGreen = if (finish == LipstickFinish.TRACKING_TEST) {
             TRACKING_PIGMENT[1]
         } else {
             (tuning.pigmentGreen * pigmentBrightness).coerceIn(0f, 1f)
         }
-        val pigmentBlue = if (lipstickFinish == LipstickFinish.TRACKING_TEST) {
+        val pigmentBlue = if (finish == LipstickFinish.TRACKING_TEST) {
             TRACKING_PIGMENT[2]
         } else {
             (tuning.pigmentBlue * pigmentBrightness).coerceIn(0f, 1f)
@@ -1358,6 +1415,31 @@ internal class ArCoreFaceAnchorRenderer(
         GLES20.glUniform2f(GLES20.glGetUniformLocation(lipMeshProgram, "uUvBottomRight"), cameraUvCorners[2], cameraUvCorners[3])
         GLES20.glUniform2f(GLES20.glGetUniformLocation(lipMeshProgram, "uUvTopLeft"), cameraUvCorners[4], cameraUvCorners[5])
         GLES20.glUniform2f(GLES20.glGetUniformLocation(lipMeshProgram, "uUvTopRight"), cameraUvCorners[6], cameraUvCorners[7])
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, shimmerLookupTextureId)
+        GLES20.glUniform1i(GLES20.glGetUniformLocation(lipMeshProgram, "uShimmerLookup"), 1)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uShimmerIntensity"), tuning.shimmerIntensity)
+        val shimmerTransparency = tuning.shimmerTransparency.takeIf { it.isFinite() } ?: 15f
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uShimmerParticleOpacity"),
+            1f - shimmerTransparency.coerceIn(0f, 100f) / 100f)
+        // Bounded monotonic phase; integer shader frequencies make the wrap continuous.
+        val shimmerIdlePhase = if (finish.isShimmer) {
+            (SystemClock.uptimeMillis() % 120_000L).toFloat() * (6.2831853f / 120_000f)
+        } else 0f
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uShimmerIdlePhase"), shimmerIdlePhase)
+        GLES20.glUniform2f(GLES20.glGetUniformLocation(lipMeshProgram, "uShimmerViewAngles"),
+            lipMaterialYawRadians, lipMaterialPitchRadians)
+        fun thicknessAt(point: Int): Float = hypot(
+            (outerContourPoints[point * 2] - innerContourPoints[point * 2]) * viewportWidth,
+            (outerContourPoints[point * 2 + 1] - innerContourPoints[point * 2 + 1]) * viewportHeight,
+        ).coerceAtLeast(1f)
+        GLES20.glUniform2f(GLES20.glGetUniformLocation(lipMeshProgram, "uShimmerLipThickness"),
+            thicknessAt(5), thicknessAt(15))
+        val mouthWidth = hypot((outerContourPoints[20] - outerContourPoints[0]) * viewportWidth,
+            (outerContourPoints[21] - outerContourPoints[1]) * viewportHeight)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uShimmerInsetScale"),
+            (mouthWidth / 256f).coerceIn(0.25f, 4f))
         // Mid-band samples from this exact observation, before carrier expansion. They exclude
         // the mouth aperture and provide one exposure reference for the whole lip material.
         MATTE_LIGHT_REFERENCE_INDICES.forEachIndexed { sample, point ->
@@ -1387,7 +1469,7 @@ internal class ArCoreFaceAnchorRenderer(
             pigmentBlue,
         )
         GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uCoverageMultiplier"),
-            (if (lipstickFinish == LipstickFinish.TRACKING_TEST) 4f else 2f) * tuning.coverage)
+            (if (finish == LipstickFinish.TRACKING_TEST) 4f else 2f) * tuning.coverage)
         GLES20.glUniform1f(
             GLES20.glGetUniformLocation(lipMeshProgram, "uColorRenderingMode"),
             if (renderingMode == LipColorRenderingMode.UNIFIED) 1f else 0f,
@@ -1397,7 +1479,7 @@ internal class ArCoreFaceAnchorRenderer(
         GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uIosHighlightMaximum"), parameters.highlightMaximum)
         GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uIosHighlightConcentration"), parameters.highlightConcentration)
         GLES20.glUniform1f(GLES20.glGetUniformLocation(lipMeshProgram, "uIosCoreCoverage"),
-            IosLipMaterial.coverage(tuning.productDensity, lipstickFinish))
+            IosLipMaterial.coverage(tuning.productDensity, finish))
         GLES20.glUniform1f(
             GLES20.glGetUniformLocation(lipMeshProgram, "uSemanticConfidence"),
             semantics.lipConfidence,
@@ -1408,7 +1490,7 @@ internal class ArCoreFaceAnchorRenderer(
         )
         GLES20.glUniform1f(
             GLES20.glGetUniformLocation(lipMeshProgram, "uFinishMode"),
-            when (lipstickFinish) {
+            when (finish) {
                 LipstickFinish.MATTE -> 0f
                 LipstickFinish.GLOSS -> 1f
                 LipstickFinish.SATIN -> 2f
@@ -1416,6 +1498,9 @@ internal class ArCoreFaceAnchorRenderer(
                 // UI support checks prevent these in UNIFIED; guard a mid-switch frame too.
                 LipstickFinish.OIL -> if (renderingMode == LipColorRenderingMode.IOS_REFERENCE) 3f else 0f
                 LipstickFinish.TINT -> if (renderingMode == LipColorRenderingMode.IOS_REFERENCE) 4f else 0f
+                LipstickFinish.SHIMMER -> 5f
+                LipstickFinish.SHIMMER_GLOSS -> 6f
+                LipstickFinish.SHIMMER_SATIN -> 7f
             },
         )
         GLES20.glUniform2f(
@@ -1836,6 +1921,7 @@ internal class ArCoreFaceAnchorRenderer(
             varying float vCoverage;
             varying vec2 vLipUv;
             varying vec2 vSatinUv;
+            varying highp vec2 vShimmerUv;
             varying float vLowerLip;
             void main() {
                 gl_Position = vec4(aPosition, 0.0, 1.0);
@@ -1843,6 +1929,7 @@ internal class ArCoreFaceAnchorRenderer(
                 vCoverage = aCoverage;
                 vLipUv = aLipUv;
                 vSatinUv = aSatinUv;
+                vShimmerUv = aSatinUv;
                 vLowerLip = aLowerLip;
             }
         """
@@ -2027,6 +2114,7 @@ internal class ArCoreFaceAnchorRenderer(
             }
 
             ${IosLipMaterial.FRAGMENT_FUNCTION}
+            ${ShimmerLipMaterial.FRAGMENT_FUNCTION}
             ${UnifiedLipMaterial.FRAGMENT_FUNCTION}
 
             float semanticRefinedCoverage(float rawCoverage) {
@@ -2070,8 +2158,8 @@ internal class ArCoreFaceAnchorRenderer(
                     gl_FragColor = vec4(applyLipTuning(mix(camera, uPigment, coverage), camera), 1.0);
                     return;
                 }
-                if (uColorRenderingMode < 0.5) {
-                    vec4 iosMaterial = renderIosLip(coverage);
+                if (uColorRenderingMode < 0.5 || uFinishMode > 4.5) {
+                    vec4 iosMaterial = uFinishMode > 4.5 ? renderShimmerLip(coverage) : renderIosLip(coverage);
                     // Store unassociated material RGB and density alpha for the final
                     // linear blend AFTER alpha feathering. No inverse-alpha compensation.
                     if (uEncodeBlurMaterial > 0.5) {

@@ -1,5 +1,19 @@
 # iOS reference — устройство проекта и ориентиры переноса
 
+## Android: шиммер адаптирован — 2026-11-11
+
+По новой команде пользователя SHIMMER и Dior Addict045 добавлены в Android. Hash/96×48 canonical grid/цвета частиц/pearl yaw-pitch из pinned dev61338c5 адаптированы к принятой Android annulus geometry и прежней базе/blur/composite. Нет переноса общего gloss material/temporal history/SDF и визуальный паритет не заявляется. Актуальная реализация/проверки — верх PROJECT_CONTEXT.md и CHAT_HANDOFF.md. Нижний этап «следующая адаптация требует отдельной команды» относится к завершённому read-only исследованию до этой команды. iOS repo не редактировался.
+
+## Подтверждён новый iOS dev с шиммерной помадой — 2026-11-11
+
+По просьбе пользователя повторно проверен GitHub API Dzhanaeva/virtual-makeup. dev теперь61338c5f7d4aa43aa3cc736014ecaf1d947414f9, коммит «fix gloss», committer date2026-10-30T12:13:07Z. Сравнение с последним изученным cdc2366d67b943d20dcd066ca3d7c2eb5e8070ed показывает ahead_by1,13 изменённых файлов. main по-прежнему d810b9d181d3fb2879c98d96137aea5210e313bc. Нижнее историческое заключение об отсутствии шиммера относится к старому cdc2366 и не описывает новый dev.
+
+В новом dev действительно добавлен LipFinish.shimmer, rawValue5, displayName «Шиммерная», isWet=true. В ContentView.swift496–506 есть id=dior-shimmer, «Блеск-плампер Dior Addict», finish.shimmer, density.medium, texture.liquid, SKU VM-1015-045 «045 Ореховый шиммер», source sRGB A6593F (166/89/63). Material profile задаёт shimmerIntensity3.0. Выбор продукта проходит через FaceTrackingView/Coordinator.updateLipstick → LipTextureRenderer.updateStyle → MetalLipColorCompositor.makeTexture с finish/materialProfile и yaw/pitch. В CPU camera fallback также вызывается shimmerLayer при finish.shimmer и debug.off.
+
+MetalLipColorCompositor.swift1015–1111 добавляет над пигментом перламутровый слой с тёпло-розовым/лиловым цветовым переливом, зависящим от canonical UV noise и yaw/pitch, и детерминированные частицы на сетке96×48. Отбор hash%8==0, редкие яркие частицы дополнительно отбеливаются. Частицы затухают около открытого рта по inner contour и particleInsetScale. Union-alpha/premultiplied композиция оставляет сияние независимым от плотности пигмента. Эти сведения подтверждены чтением14 runtime Swift sources нового pinned commit. Визуальная приёмка на iPhone/паритет Android этим исследованием не устанавливались.
+
+Локальный ignored снимок app/build/tmp/ios-shimmer-check-2026-11-11/ содержит branches/compare/head/tree metadata,14 sources dev-61338c5 и ихSHA256. Получен read-only через публичные GitHub API/raw URLs. Runtime Android и iOS-репозиторий в рамках этой проверки не редактировались. Следующая адаптация требует отдельной команды пользователя.
+
 ## Android: румяна переведены на ориентиры MediaPipe — 2026-10-22
 
 По прямой просьбе пользователя положение Android-румян теперь определяется парными группами MP landmarks 50/101/116/187 и 280/330/345/411. Они переносятся на захваченную в тот же момент ARCore поверхность; iOS BlushRenderer с долями face bounds больше не является ориентиром положения маски. Палитра iOS и уже добавленный Android optical material прежние, принятые материалы губ не изменены. Текущий статус/ограничение Sync/проверки — верх PROJECT_CONTEXT.md и CHAT_HANDOFF.md. iOS-исходники не редактировались.

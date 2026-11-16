@@ -60,7 +60,20 @@ internal enum class LipstickFinish {
     TRACKING_TEST,
     OIL,
     TINT,
+    SHIMMER,
+    SHIMMER_GLOSS,
+    SHIMMER_SATIN,
     ;
+
+    val isShimmer: Boolean
+        get() = this == SHIMMER || this == SHIMMER_GLOSS || this == SHIMMER_SATIN
+
+    val baseFinish: LipstickFinish
+        get() = when (this) {
+            SHIMMER_GLOSS -> GLOSS
+            SHIMMER_SATIN -> SATIN
+            else -> this
+        }
 
     fun supportedIn(mode: LipColorRenderingMode): Boolean = when (this) {
         OIL, TINT -> mode == LipColorRenderingMode.IOS_REFERENCE
@@ -249,6 +262,8 @@ internal object ReferenceLipstickRenderProfiles {
         LipstickFinish.MATTE -> matte
         LipstickFinish.SATIN -> satin
         LipstickFinish.GLOSS -> gloss
+        LipstickFinish.SHIMMER, LipstickFinish.SHIMMER_GLOSS -> gloss
+        LipstickFinish.SHIMMER_SATIN -> satin
         LipstickFinish.TRACKING_TEST -> trackingTest
         LipstickFinish.OIL, LipstickFinish.TINT -> error("Oil/tint require the iOS-dev renderer")
     }
